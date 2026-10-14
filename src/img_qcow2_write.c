@@ -1,0 +1,420 @@
+/* img_qcow2_write.c — qcow2 写入
+ *
+ * 分配策略：【追加式】—— 新簇一律从文件尾部拿。
+ *   理由：简单、绝不会覆盖已用数据、无需空闲链表。
+ *   代价：不复用已释放空间（阶段1可接受；阶段中后期再做回收）。
+ *
+ * refcount：按 host 簇索引，默认 16 位/条。
+ *   refcount_block 覆盖 entries_per_rc_block 个 host 簇，按需分配。
+ *
+ * 验证路径（分步，绝不写坏用户数据）：
+ *   create → qemu-img check → 转回 raw 逐字节比对
+ *   append → qemu-img check → 读回 sha256
+ *   overwrite → sha256 应恰好变成新值
+ */
+#include "img_qcow2_int.h"
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+/* ------------------------------------------------------------------ */
+/* 内部小工具                                                          */
+/* ------------------------------------------------------------------ */
+static inline uint64_t align_up(uint64_t v, uint64_t a){ return (v + a - 1) & ~(a - 1); }
+
+static inline int wr64(img_io *io, uint64_t off, uint64_t v){
+    uint8_t b[8]; wr_be64_i(b, v);
+    return img_io_write_full(io, off, b, 8);
+}
+static inline int rd64(img_io *io, uint64_t off, uint64_t *v){
+    uint8_t b[8];
+    int rc = img_io_read_full(io, off, b, 8);
+    if(rc) return rc;
+    *v = rd_be64_i(b);
+    return IMG_OK;
+}
+static inline int wr32(img_io *io, uint64_t off, uint32_t v){
+    uint8_t b[4]; wr_be32_i(b, v);
+    return img_io_write_full(io, off, b, 4);
+}
+static inline int wr16(img_io *io, uint64_t off, uint16_t v){
+    uint8_t b[2]; wr_be16_i(b, v);
+    return img_io_write_full(io, off, b, 2);
+}
+
+/* ------------------------------------------------------------------ */
+/* refcount                                                            */
+/* ------------------------------------------------------------------ */
+
+/* 不设 refcount 的裸分配（用于 refcount block 自身等） */
+static int alloc_cluster_raw(img_qcow2 *q, uint64_t *out_off){
+    uint64_t off = q->alloc_next;
+    if(off == 0){
+        off = align_up(img_io_size(q->io), q->h.cluster_size);
+        if(off == 0) off = q->h.cluster_size;   /* 至少从簇1开始 */
+        q->alloc_next = off;
+    }
+    /* 延伸文件（写一个 0 簇保证真正占位；qcow2 要求文件包含真实字节） */
+    uint8_t *z = calloc(1, (size_t)q->h.cluster_size);
+    if(!z) return IMG_ENOMEM;
+    int rc = img_io_write_full(q->io, off, z, (size_t)q->h.cluster_size);
+    free(z);
+    if(rc) return rc;
+    q->alloc_next = off + q->h.cluster_size;
+    if(q->alloc_next > q->total_clusters * q->h.cluster_size)
+        q->total_clusters = q->alloc_next / q->h.cluster_size;
+    *out_off = off;
+    return IMG_OK;
+}
+
+/* 设置 host 簇 idx 的 refcount 值；必要时按需分配 refcount block */
+static int set_refcount(img_qcow2 *q, uint64_t host_idx, uint32_t value){
+    if(q->refcount_bits == 0 || q->refcount_bits > 32) return IMG_ESTATE;
+    if(q->refcount_bits == 16){
+        uint64_t block_i  = host_idx / q->entries_per_rc_block;
+        uint64_t entry_i  = host_idx % q->entries_per_rc_block;
+        if(block_i * 8 >= q->refcount_table_bytes) return IMG_EFULL;
+
+        /* 1) 确保该 refcount block 存在 */
+        uint64_t table_off = q->h.refcount_table_offset;
+        uint64_t blk_off = 0;
+        int rc = rd64(q->io, table_off + block_i*8, &blk_off);
+        if(rc) return rc;
+        if(blk_off == 0){
+            uint64_t a = 0;
+            if((rc = alloc_cluster_raw(q, &a)) != IMG_OK) return rc;
+            /* 写回 table 条目 */
+            if((rc = wr64(q->io, table_off + block_i*8, a)) != IMG_OK) return rc;
+            /* 给这个新 refcount block 自己记 refcount（table 条目已就位，不会递归死循环） */
+            if((rc = set_refcount(q, a / q->h.cluster_size, 1)) != IMG_OK) return rc;
+            blk_off = a;
+        }
+        /* 2) 写条目 */
+        uint64_t pos = blk_off + entry_i * 2;
+        uint16_t v = (uint16_t)value;
+        return wr16(q->io, pos, v);
+    }
+    /* 32 位 refcount（少见，但按同法处理） */
+    uint64_t eprb = q->entries_per_rc_block;   /* entries_per_rc_block 是按 bits 算过的 */
+    uint64_t block_i = host_idx / eprb, entry_i = host_idx % eprb;
+    uint64_t table_off = q->h.refcount_table_offset;
+    if(block_i * 8 >= q->refcount_table_bytes) return IMG_EFULL;
+    uint64_t blk_off = 0;
+    int rc = rd64(q->io, table_off + block_i*8, &blk_off);
+    if(rc) return rc;
+    if(blk_off == 0){
+        uint64_t a=0;
+        if((rc = alloc_cluster_raw(q,&a))!=IMG_OK) return rc;
+        if((rc = wr64(q->io, table_off + block_i*8, a))!=IMG_OK) return rc;
+        if((rc = set_refcount(q, a/q->h.cluster_size, 1))!=IMG_OK) return rc;
+        blk_off = a;
+    }
+    uint64_t pos = blk_off + entry_i * 4;
+    uint8_t b[4]; wr_be32_i(b, value);
+    return img_io_write_full(q->io, pos, b, 4);
+}
+
+/* 带 refcount 的簇分配 */
+static int alloc_cluster(img_qcow2 *q, uint64_t *out_off){
+    uint64_t a=0;
+    int rc = alloc_cluster_raw(q, &a);
+    if(rc) return rc;
+    if((rc = set_refcount(q, a / q->h.cluster_size, 1)) != IMG_OK) return rc;
+    *out_off = a;
+    return IMG_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* L2 表维护                                                           */
+/* ------------------------------------------------------------------ */
+
+/* 读出 L2 表所在簇的完整内容（alloc/free/写条目都要用） */
+static int read_l2_cluster(img_qcow2 *q, uint64_t l2_addr, uint8_t **out){
+    uint8_t *b = malloc((size_t)q->h.cluster_size);
+    if(!b) return IMG_ENOMEM;
+    int rc = img_io_read_full(q->io, l2_addr, b, (size_t)q->h.cluster_size);
+    if(rc){ free(b); return rc; }
+    *out = b;
+    return IMG_OK;
+}
+
+/* 把 L2 表写回（同时失效读缓存） */
+static int write_l2_cluster(img_qcow2 *q, uint64_t l2_addr, const uint8_t *b){
+    int rc = img_io_write_full(q->io, l2_addr, b, (size_t)q->h.cluster_size);
+    if(rc) return rc;
+    q->l2_cache_valid = false;                /* 读缓存必须失效 */
+    return IMG_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* L1 表维护                                                           */
+/* ------------------------------------------------------------------ */
+
+static int l1_get(img_qcow2 *q, uint64_t l1i, uint64_t *val){
+    if(l1i >= q->h.l1_size) return IMG_ENOENT;
+    *val = rd_be64_i(q->l1 + l1i*8);
+    return IMG_OK;
+}
+static int l1_set(img_qcow2 *q, uint64_t l1i, uint64_t val){
+    if(l1i >= q->h.l1_size) return IMG_EFULL;
+    wr_be64_i(q->l1 + l1i*8, val);
+    return img_io_write_full(q->io, q->h.l1_table_offset + l1i*8, q->l1 + l1i*8, 8);
+}
+
+/* ------------------------------------------------------------------ */
+/* 创建全新 qcow2                                                      */
+/* ------------------------------------------------------------------ */
+/*
+ * 布局（与 QEMU 一致）：
+ *   cluster 0 : header
+ *   cluster 1 : refcount 表
+ *   cluster 2 : refcount block 0
+ *   cluster 3 : L1 表
+ *   cluster 4+: 数据 / L2 / 后续 refcount block
+ */
+int img_qcow2_create(img_io *dest, const img_qcow2_create_opts_t *o){
+    if(!dest || !o || o->size == 0) return IMG_EINVAL;
+    if(!img_io_writable(dest)) return IMG_EINVAL;
+
+    uint32_t cb = o->cluster_bits ? o->cluster_bits : 16;   /* 默认 64KB */
+    if(cb < 9 || cb > 21) return IMG_EINVAL;
+    uint64_t cs = 1ULL << cb;
+    uint64_t rcb = o->refcount_bits ? o->refcount_bits : 16;
+    if(rcb != 16 && rcb != 32) return IMG_ENOTSUP;
+
+    uint64_t l2_entries = cs / 8;
+    uint64_t l1_span    = cs * l2_entries;          /* 单张 L2 覆盖量 */
+    uint64_t l1_size    = (o->size + l1_span - 1) / l1_span;
+    if(l1_size == 0) l1_size = 1;
+    if(l1_size * 8 > cs) return IMG_ENOTSUP;        /* 单簇放不下 L1（>4TB），暂不支持 */
+
+    const uint64_t OFF_RCT = cs * 1;                /* refcount 表 */
+    const uint64_t OFF_RCB = cs * 2;                /* refcount block 0 */
+    const uint64_t OFF_L1  = cs * 3;                /* L1 表 */
+
+    /* ---- 写头 ---- */
+    uint8_t hdr[104];
+    memset(hdr, 0, sizeof hdr);
+    hdr[0]='Q'; hdr[1]='F'; hdr[2]='I'; hdr[3]=0xfb;
+    wr_be32_i(hdr+4, 3);                            /* version 3 */
+    wr_be32_i(hdr+20, cb);                          /* cluster_bits (规范 20-23) */
+    wr_be64_i(hdr+24, o->size);                     /* 虚拟大小 */
+    wr_be32_i(hdr+36, (uint32_t)l1_size);           /* l1_size */
+    wr_be64_i(hdr+40, OFF_L1);                      /* l1_table_offset */
+    wr_be64_i(hdr+48, OFF_RCT);                     /* refcount_table_offset */
+    wr_be32_i(hdr+56, 1);                           /* refcount_table_clusters = 1 */
+    wr_be32_i(hdr+60, 0);                           /* nb_snapshots */
+    wr_be64_i(hdr+64, 0);                           /* snapshots_offset */
+    /* v3 特性区（72..95）全 0 → 无加密/外部文件/脏位/压缩类型 */
+    wr_be32_i(hdr+96,  (uint32_t)(rcb==16 ? 4 : 5));  /* 96-99  refcount_order: 16位→4, 32位→5 */
+    wr_be32_i(hdr+100, 104);                         /* 100-103 header_length (>=104, 8的倍数) */
+    int rc = img_io_write_full(dest, 0, hdr, sizeof hdr);
+    if(rc) return rc;
+
+    /* ---- refcount 表（1 簇） ---- */
+    uint8_t *z = calloc(1,(size_t)cs);
+    if(!z) return IMG_ENOMEM;
+    rc = img_io_write_full(dest, OFF_RCT, z, (size_t)cs);
+    if(rc){ free(z); return rc; }
+
+    /* ---- L1 表 ---- */
+    memset(z, 0, (size_t)cs);
+    rc = img_io_write_full(dest, OFF_L1, z, (size_t)cs);
+    if(rc){ free(z); return rc; }
+
+    /* ---- refcount block 0（覆盖 host 簇 0..entries-1）---- */
+    memset(z, 0, (size_t)cs);
+    /* cluster 0..3 已被占用 → refcount = 1 */
+    if(rcb == 16){
+        for(int i=0;i<4;i++){
+            z[i*2]   = 0; z[i*2+1] = 1;             /* BE16 = 1 */
+        }
+    } else {
+        for(int i=0;i<4;i++) wr_be32_i(z+i*4, 1);
+    }
+    rc = img_io_write_full(dest, OFF_RCB, z, (size_t)cs);
+    free(z);
+    if(rc) return rc;
+
+    /* refcount 表指向 block 0 */
+    rc = wr64(dest, OFF_RCT, OFF_RCB);
+    if(rc) return rc;
+
+    /* 预置文件大小（稀疏占位，不占真实空间） */
+    rc = img_io_truncate(dest, cs*4);
+    if(rc) return rc;
+
+    return img_io_sync(dest);
+}
+
+/* ------------------------------------------------------------------ */
+/* 打开后为写模式准备状态                                              */
+/* ------------------------------------------------------------------ */
+int img_qcow2_write_init(img_qcow2 *q){
+    if(!q) return IMG_EINVAL;
+    uint64_t cs = q->h.cluster_size;
+    uint32_t rcb = q->refcount_bits ? q->refcount_bits : 16;
+    q->refcount_bits = rcb;
+    q->entries_per_rc_block = cs / (rcb/8);
+    q->refcount_table_bytes = (uint64_t)q->h.refcount_table_clusters * cs;
+    /* 追加水位 = 文件尾（cluster 对齐） */
+    q->alloc_next = align_up(img_io_size(q->io), cs);
+    if(q->alloc_next == 0) q->alloc_next = cs;
+    q->total_clusters = (img_io_size(q->io) + cs - 1) / cs;
+    q->writable = true;
+    return IMG_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* 写 guest 空间                                                       */
+/* ------------------------------------------------------------------ */
+int img_qcow2_write(img_qcow2 *q, uint64_t off, const void *buf, size_t len){
+    if(!q||!buf) return IMG_EINVAL;
+    if(!q->writable) return IMG_ESTATE;
+    if(off + len > q->h.size) return IMG_EFULL;      /* 越界 → 需先 expand */
+
+    const uint8_t *src = (const uint8_t*)buf;
+    uint64_t cs = q->h.cluster_size;
+    uint8_t *scratch = malloc((size_t)cs);
+    if(!scratch) return IMG_ENOMEM;
+
+    int rc = IMG_OK;
+    size_t done = 0;
+    while(done < len){
+        uint64_t abs = off + done;
+        uint64_t in_cl = abs % cs;
+        size_t n = len - done;
+        if(n > cs - in_cl) n = (size_t)(cs - in_cl);
+        uint64_t cl_base = abs - in_cl;
+
+        /* ---- ① 拿到 L2 表 ---- */
+        uint64_t l1i = abs / q->h.l1_span_bytes;
+        if(l1i >= q->h.l1_size){ rc = IMG_EFULL; break; }
+
+        uint64_t l2_addr = 0;
+        if((rc = l1_get(q, l1i, &l2_addr)) != IMG_OK) break;
+        l2_addr &= QCOW2_OFFSET_MASK;
+
+        uint8_t *l2 = NULL;
+        if(l2_addr == 0){
+            if((rc = alloc_cluster(q, &l2_addr)) != IMG_OK) break;
+            l2 = calloc(1,(size_t)cs);
+            if(!l2){ rc = IMG_ENOMEM; break; }
+            if((rc = l1_set(q, l1i, l2_addr | QCOW2_COPIED_BIT)) != IMG_OK){ free(l2); break; }
+            if((rc = write_l2_cluster(q, l2_addr, l2)) != IMG_OK){ free(l2); break; }
+        } else {
+            if((rc = read_l2_cluster(q, l2_addr, &l2)) != IMG_OK) break;
+        }
+
+        /* ---- ② 拿到数据簇 ---- */
+        uint64_t l2i = (abs % q->h.l1_span_bytes) / cs;
+        uint64_t l2e = rd_be64_i(l2 + l2i*8);
+        uint64_t host = l2e & QCOW2_OFFSET_MASK;
+        bool compressed = (l2e & QCOW2_COMPRESSED_BIT) != 0;
+
+        bool need_new = (host == 0);
+        if(compressed){
+            /* 压缩簇 → 解出来，改成未压缩重写（简单、必然有效） */
+            if((rc = img_qcow2_read(q, cl_base, scratch, (size_t)cs)) != IMG_OK) break;
+            need_new = true;
+            host = 0;
+        } else if(host == 0){
+            memset(scratch, 0, (size_t)cs);
+        } else {
+            if((rc = img_io_read_full(q->io, host, scratch, (size_t)cs)) != IMG_OK) break;
+        }
+
+        if(need_new){
+            uint64_t a = 0;
+            if((rc = alloc_cluster(q, &a)) != IMG_OK) break;
+            host = a;
+        }
+
+        /* ---- ③ 覆盖本次要写的字节 ---- */
+        memcpy(scratch + in_cl, src + done, n);
+
+        /* ---- ④ 落盘 + 更新 L2 ---- */
+        if((rc = img_io_write_full(q->io, host, scratch, (size_t)cs)) != IMG_OK) break;
+        if(need_new || compressed){
+            /* host 簇 refcount==1 → 必须置 OFLAG_COPIED(bit63)；同时清掉压缩位 */
+            wr_be64_i(l2 + l2i*8, host | QCOW2_COPIED_BIT);
+            if((rc = write_l2_cluster(q, l2_addr, l2)) != IMG_OK) break;
+        }
+        free(l2); l2 = NULL;
+        done += n;
+    }
+    free(scratch);
+    return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/* 扩大虚拟磁盘                                                        */
+/* ------------------------------------------------------------------ */
+int img_qcow2_expand(img_qcow2 *q, uint64_t new_size, img_prog *prog){
+    if(!q) return IMG_EINVAL;
+    if(!q->writable) return IMG_ESTATE;
+    if(new_size <= q->h.size) return IMG_EINVAL;      /* 阶段1 不支持缩容 */
+    if(new_size == q->h.size) return IMG_OK;
+
+    uint64_t new_l1 = (new_size + q->h.l1_span_bytes - 1) / q->h.l1_span_bytes;
+    if(new_l1 == 0) new_l1 = 1;
+
+    if(new_l1 > q->h.l1_size){
+        uint64_t need = new_l1 * 8;
+        /* L1 表在簇内还有位置吗？（我们的布局：cluster 对齐 → 一簇可放 8192 条 = 4TB）*/
+        uint64_t in_cluster = q->h.l1_table_offset % q->h.cluster_size;
+        uint64_t room = q->h.cluster_size - in_cluster;
+        uint8_t *z = calloc(1, (size_t)(need > room ? room : need));
+        if(!z) return IMG_ENOMEM;
+        int rc = IMG_OK;
+        if(need > room){
+            /* 需要搬迁 L1 表到文件尾（>4TB 才会发生） */
+            uint64_t a = 0;
+            if((rc = alloc_cluster(q, &a)) == IMG_OK){
+                rc = img_io_write_full(q->io, a, q->l1, (size_t)q->l1_bytes);
+                if(rc == IMG_OK){
+                    memset((uint8_t*)z,0,(size_t)need);
+                    memcpy(z, q->l1, (size_t)q->l1_bytes);
+                    free(q->l1);
+                    q->l1 = malloc((size_t)need);
+                    if(!q->l1){ free(z); return IMG_ENOMEM; }
+                    memcpy(q->l1, z, (size_t)need);
+                    q->l1_bytes = (size_t)need;
+                    wr_be64_i(((uint8_t[]){0}), 0); /* no-op */
+                    {
+                        uint8_t b[8]; wr_be64_i(b, a);
+                        rc = img_io_write_full(q->io, 40, b, 8);
+                    }
+                    q->h.l1_table_offset = a;
+                    if(rc == IMG_OK) rc = img_io_write_full(q->io, a, q->l1, (size_t)need);
+                }
+            }
+        } else {
+            /* 原地扩展（清零新增部分） */
+            rc = img_io_write_full(q->io, q->h.l1_table_offset + q->h.l1_size*8,
+                                   z, (size_t)(need - q->h.l1_size*8));
+            if(rc == IMG_OK){
+                uint8_t *nl = realloc(q->l1, (size_t)need);
+                if(!nl){ free(z); return IMG_ENOMEM; }
+                memset(nl + q->l1_bytes, 0, (size_t)(need - q->l1_bytes));
+                q->l1 = nl; q->l1_bytes = (size_t)need;
+            }
+        }
+        free(z);
+        if(rc) return rc;
+        q->h.l1_size = (uint32_t)new_l1;
+        int rc2 = wr32(q->io, 36, q->h.l1_size);     /* 头里 l1_size */
+        if(rc2) return rc2;
+    }
+
+    if(prog) img_prog_count(prog, 1, 2);
+    /* 改虚拟大小（头偏移 24） */
+    {
+        uint8_t b[8]; wr_be64_i(b, new_size);
+        int rc = img_io_write_full(q->io, 24, b, 8);
+        if(rc) return rc;
+    }
+    q->h.size = new_size;
+    if(prog){ img_prog_count(prog,2,2); img_prog_done(prog, "扩盘完成"); }
+    return img_io_sync(q->io);
+}

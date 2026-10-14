@@ -1,0 +1,34 @@
+# 构建产物
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.o
+*.a
+*.so
+*.so.*
+*.gcda
+*.gcno
+
+# 工具编译出的可执行文件（可由源码重建）
+tools/imgdump
+tools/imgpart
+tools/imgparts
+tools/imglayout
+tools/imgq2test
+tools/imgresize
+tools/imgtest_progress
+
+# 镜像类（绝不能入库）
+*.qcow2
+*.raw
+*.img
+*.iso
+*.wim
+*.esd
+
+# 编辑器
+.DS_Store
+*.swp
+*~
