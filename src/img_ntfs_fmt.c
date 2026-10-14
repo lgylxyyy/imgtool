@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>   /* optind/optarg (getopt) */
 #include <time.h>        /* ★ 必须在 ntfs 头之前，否则 ntfstime.h 重定义 timespec */
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -25,9 +26,27 @@
 static img_ntfs_ctx *g_fmt_ctx = NULL;
 img_ntfs_ctx *img_ntfs_get_active_ctx(void){ return g_fmt_ctx; }
 
+static img_ntfs_ctx *g_ext_ctx = NULL;
+void img_ntfs_ctx_activate(img_qcow2 *q, uint64_t lba, uint64_t bytes){
+    if(g_ext_ctx){ img_ntfs_ctx_free(g_ext_ctx); g_ext_ctx = NULL; }
+    g_ext_ctx = img_ntfs_ctx_new(q, lba, bytes);
+    g_fmt_ctx  = g_ext_ctx;
+}
+void img_ntfs_ctx_deactivate(void){
+    g_fmt_ctx  = NULL;
+    if(g_ext_ctx){ img_ntfs_ctx_free(g_ext_ctx); g_ext_ctx = NULL; }
+}
+img_ntfs_ctx_t *img_ntfs_ctx_current(void){ return (img_ntfs_ctx_t*)g_fmt_ctx; }
+
 /* ---------- 10 个回调（dev->d_private 就是我们的 ctx）---------- */
 
-static int  o_open (struct ntfs_device *d, int fl){ (void)d; (void)fl; return img_ntfs_cb_open ((void*)img_ntfs_get_active_ctx(), fl); }
+static int  o_open (struct ntfs_device *d, int fl){
+    (void)d; (void)fl;
+    img_ntfs_ctx *c = img_ntfs_get_active_ctx();
+    if(getenv("IMG_NTFS_DEBUG"))
+        fprintf(stderr,"  [dbg] o_open ctx=%p (OUR ops=%s)\n",(void*)c, c?"":"← NULL!");
+    return img_ntfs_cb_open ((void*)c, fl);
+}
 static int  o_close(struct ntfs_device *d){ (void)d; return img_ntfs_cb_close((void*)img_ntfs_get_active_ctx()); }
 /* ★ mkntfs 用 ntfs_device_alloc(name,0,&ops,NULL) 建设备，d_private 是 NULL，
  *   所以必须从我们自己的全局上下文取，不能指望 d_private。 */
@@ -100,6 +119,11 @@ int img_ntfs_format(img_qcow2 *q, const img_ntfs_fmt_opts_t *o, img_prog *prog){
     argv[argc++] = (char*)"imgtool-dev";
     argv[argc] = NULL;
 
+    /* getopt 全局状态跨调用不重置会越界（实测段错误）——每次调用前清干净 */
+    optind  = 1;      /* glibc: 置 1 或 0 均可；置 0 额外重解析 POSIX 环境 */
+    opterr  = 1;
+    optarg  = NULL;
+    optopt  = 0;
     int rc = mkntfs_main(argc, argv);
 
     g_fmt_ctx = NULL;

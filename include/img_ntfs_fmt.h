@@ -3,6 +3,7 @@
 #define IMG_NTFS_FMT_H
 #include "img_qcow2.h"
 #include "img_progress.h"
+typedef struct img_ntfs_ctx img_ntfs_ctx_t;
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,6 +26,14 @@ void img_ntfs_fmt_defaults(img_ntfs_fmt_opts_t *o, uint64_t lba, uint64_t bytes)
  * 内部：构造 argv → 调用 ntfsprogs 的 mkntfs main()，
  *       其设备 I/O 经由【我们提供的 ntfs_device_unix_io_ops】落到 qcow2。 */
 int img_ntfs_format(img_qcow2 *q, const img_ntfs_fmt_opts_t *o, img_prog *prog);
+
+/* 手工激活/停用设备上下文。
+ * mkntfs 由 img_ntfs_format 内部自动处理；
+ * ntfscp / ntfsls 等同样走 ntfs_device_default_io_ops 的工具，需要调用方
+ * 在调用它们的 main() 之前激活、之后停用。 */
+void img_ntfs_ctx_activate(img_qcow2 *q, uint64_t partition_lba, uint64_t partition_bytes);
+void img_ntfs_ctx_deactivate(void);
+img_ntfs_ctx_t *img_ntfs_ctx_current(void);
 
 /* 校验分区是否为合法 NTFS（结构自洽）；out 可为 NULL */
 typedef struct {
