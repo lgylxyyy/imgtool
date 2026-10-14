@@ -132,11 +132,11 @@ THIRD_PARTY.md —— 记录所有开源项目与链接，贴进 App 设置页
 | 2a | 分区管理 | ✅ | GPT/MBR 读写增删 · MBR↔GPT 互转 · sgdisk `No problems found` + fdisk |
 | 2c | 约束层 | ✅ | 政策移至 App，工具层只留技术硬检查 · 尺寸表导出 |
 | 2d | 分区调整 | ✅ | resize(自动调后方) / fill_remaining(尾部零空余) · 实测 0 扇区 |
-| 2b | **格式化器** | | |
-| 2b.1 | ├ FAT32 | ✅ | mtools 交叉验证：读写/子目录/卷标/容量全对 |
-| 2b.2 | ├ **NTFS** | 🔨 **当前** | 方案已定：ntfs-3g submodule + qcow2 device 后端（可行性已实证） |
-| 2b.3 | └ exFAT | ⬜ | |
-| 2e | **恢复映像** | 🔨 | Winre.wim 已定位(415MB) · 待写入恢复分区 |
+| 2b | **格式化器** | ✅ FAT32+NTFS | |
+| 2b.1 | ├ FAT32 | ✅ | mtools 交叉验证全对 |
+| 2b.2 | ├ **NTFS** | ✅ | 进程内格式化（ELF 前插，上游零改动）+ ntfscp/ntfsls 写读 · 与 mkntfs 对拍仅 9 字节序列号差 |
+| 2b.3 | └ exFAT | ⬜ | （优先级低于引导链）|
+| 2e | **恢复映像** | 🟡 **一半** | ✅ 415MB Winre.wim 已写入恢复分区(2.9s) 且读回校验一致 · ⬜ 待 BCD recoverySequence |
 | 3 | **bccheck 自检** | ⬜ | 26 项检查，替代"挂虚拟机验证" |
 | 4 | **fixboot + BCD 写入** | ⬜ | ⭐ 恢复分区③ BCD 恢复序列靠它 |
 | 5 | WIM 流式 + 部署 | ⬜ | 干掉 11GB 临时目录 |
@@ -144,6 +144,6 @@ THIRD_PARTY.md —— 记录所有开源项目与链接，贴进 App 设置页
 
 ### 未闭环的关键路径
 ```
-NTFS 格式化器 ──→ 恢复分区能装 winre.wim ──→ 部署 Windows ──→ bccheck/fixboot
-     ↑ 现在卡这
+NTFS 格式化器 ✅ ──→ 恢复分区能装 winre.wim ✅ ──→ ⬜ BCD 写入 ──→ bccheck/fixboot
+        ↑ 已打通（L2 ② 完成）
 ```
