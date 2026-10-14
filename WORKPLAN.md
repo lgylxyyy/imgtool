@@ -120,3 +120,30 @@ THIRD_PARTY.md —— 记录所有开源项目与链接，贴进 App 设置页
 - [ ] 阶段 4 · fixboot + BCD 写入
 - [ ] 阶段 5 · WIM 流式 + 部署
 - [ ] 阶段 6 · Android 打包验证
+
+---
+
+## 阶段进度表（实时）
+
+| # | 阶段 | 状态 | 交付物 / 验证 |
+|---|---|---|---|
+| 0 | 架构骨架 | ✅ | 类型/进度/IO/CMake · 零警告 |
+| 1 | qcow2 核心 | ✅ | 读+写+创建+扩盘 · sha256 对拍 / qemu-img check / QEMU 独立解析 三重验证 |
+| 2a | 分区管理 | ✅ | GPT/MBR 读写增删 · MBR↔GPT 互转 · sgdisk `No problems found` + fdisk |
+| 2c | 约束层 | ✅ | 政策移至 App，工具层只留技术硬检查 · 尺寸表导出 |
+| 2d | 分区调整 | ✅ | resize(自动调后方) / fill_remaining(尾部零空余) · 实测 0 扇区 |
+| 2b | **格式化器** | | |
+| 2b.1 | ├ FAT32 | ✅ | mtools 交叉验证：读写/子目录/卷标/容量全对 |
+| 2b.2 | ├ **NTFS** | 🔨 **当前** | 方案已定：ntfs-3g submodule + qcow2 device 后端（可行性已实证） |
+| 2b.3 | └ exFAT | ⬜ | |
+| 2e | **恢复映像** | 🔨 | Winre.wim 已定位(415MB) · 待写入恢复分区 |
+| 3 | **bccheck 自检** | ⬜ | 26 项检查，替代"挂虚拟机验证" |
+| 4 | **fixboot + BCD 写入** | ⬜ | ⭐ 恢复分区③ BCD 恢复序列靠它 |
+| 5 | WIM 流式 + 部署 | ⬜ | 干掉 11GB 临时目录 |
+| 6 | Android 打包验证 | ⬜ | NDK 交叉编译 + 无root无FUSE跑通 |
+
+### 未闭环的关键路径
+```
+NTFS 格式化器 ──→ 恢复分区能装 winre.wim ──→ 部署 Windows ──→ bccheck/fixboot
+     ↑ 现在卡这
+```
