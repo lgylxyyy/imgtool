@@ -1,0 +1,11 @@
+# NTFS 设备后端验证（需要系统 libntfs-3g-dev；缺失时自动跳过）
+find_path(NTFS_INC ntfs-3g/volume.h)
+find_library(NTFS_LIB ntfs-3g)
+if(NTFS_INC AND NTFS_LIB)
+  add_executable(ntfs_dev_test ntfs_dev_test.c)
+  target_include_directories(ntfs_dev_test PRIVATE ${NTFS_INC})
+  target_link_libraries(ntfs_dev_test PRIVATE imgtool ${NTFS_LIB})
+  message(STATUS "imgtool: NTFS 设备后端测试已启用 (${NTFS_LIB})")
+else()
+  message(STATUS "imgtool: 未找到 libntfs-3g dev，跳过 NTFS 设备后端测试")
+endif()
