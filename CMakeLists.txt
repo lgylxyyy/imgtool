@@ -61,3 +61,29 @@ if(IMG_BUILD_TESTS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt)
 endif()
 
 message(STATUS "imgtool: C=${CMAKE_C_COMPILER}  build=${CMAKE_BUILD_TYPE}  zlib=${IMG_WITH_ZLIB}")
+
+# ═══════════════════════════════════════════════════════════════
+# NTFS 格式化模块（可选：-DIMG_WITH_NTFS=ON/OFF，默认 OFF）
+#   依赖系统 libntfs-3g-dev；启用后 imgtool 内含 GPL-2.0+ 代码
+#   （mkntfs 对象，经 ELF 符号前插接入，上游源码零改动）
+# ═══════════════════════════════════════════════════════════════
+option(IMG_WITH_NTFS "Enable in-process NTFS formatting (pulls in GPL mkntfs objects)" OFF)
+if(IMG_WITH_NTFS)
+  find_path(NTFSDEV_INC ntfs-3g/device.h)
+  find_library(NTFSDEV_LIB ntfs-3g)
+  # mkntfs 对象：由 third_party_ntfs3g.md 描述的构建流程产出
+  file(GLOB MKNTFS_OBJS "${CMAKE_CURRENT_SOURCE_DIR}/../build/mkntfs_obj/mkntfs-*.o")
+  if(NTFSDEV_INC AND NTFSDEV_LIB AND MKNTFS_OBJS)
+    target_sources(imgtool       PRIVATE src/img_ntfs_fmt.c ${MKNTFS_OBJS})
+    target_include_directories(imgtool       PRIVATE ${NTFSDEV_INC})
+    target_link_libraries(imgtool       PUBLIC ${NTFSDEV_LIB})
+    target_sources(imgtool_shared PRIVATE src/img_ntfs_fmt.c ${MKNTFS_OBJS})
+    target_include_directories(imgtool_shared PRIVATE ${NTFSDEV_INC})
+    target_link_libraries(imgtool_shared PUBLIC ${NTFSDEV_LIB})
+    add_compile_definitions(IMG_WITH_NTFS=1)
+    message(STATUS "imgtool: NTFS 格式化模块已启用 (GPL-2.0+)")
+  else()
+    message(WARNING "imgtool: IMG_WITH_NTFS=ON 但缺依赖，已跳过"
+                    " (需要 libntfs-3g-dev 与 ../build/mkntfs_obj/*.o)")
+  endif()
+endif()

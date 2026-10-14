@@ -27,18 +27,18 @@ img_ntfs_ctx *img_ntfs_get_active_ctx(void){ return g_fmt_ctx; }
 
 /* ---------- 10 个回调（dev->d_private 就是我们的 ctx）---------- */
 
-static int  o_open (struct ntfs_device *d, int fl){ (void)fl; return img_ntfs_cb_open ((void*)img_ntfs_get_active_ctx(), fl); }
-static int  o_close(struct ntfs_device *d){ return img_ntfs_cb_close((void*)img_ntfs_get_active_ctx()); }
+static int  o_open (struct ntfs_device *d, int fl){ (void)d; (void)fl; return img_ntfs_cb_open ((void*)img_ntfs_get_active_ctx(), fl); }
+static int  o_close(struct ntfs_device *d){ (void)d; return img_ntfs_cb_close((void*)img_ntfs_get_active_ctx()); }
 /* ★ mkntfs 用 ntfs_device_alloc(name,0,&ops,NULL) 建设备，d_private 是 NULL，
  *   所以必须从我们自己的全局上下文取，不能指望 d_private。 */
-static s64 o_seek (struct ntfs_device *d, s64 o, int w){ return img_ntfs_cb_seek((void*)img_ntfs_get_active_ctx(),(long long)o,w); }
-static s64 o_read (struct ntfs_device *d, void *b, s64 c){ return img_ntfs_cb_read((void*)img_ntfs_get_active_ctx(),b,(long long)c); }
-static s64 o_write(struct ntfs_device *d, const void *b, s64 c){ return img_ntfs_cb_write((void*)img_ntfs_get_active_ctx(),b,(long long)c); }
-static s64 o_pread(struct ntfs_device *d, void *b, s64 c, s64 o){ return img_ntfs_cb_pread((void*)img_ntfs_get_active_ctx(),b,(long long)c,(long long)o); }
-static s64 o_pwrite(struct ntfs_device *d, const void *b, s64 c, s64 o){ return img_ntfs_cb_pwrite((void*)img_ntfs_get_active_ctx(),b,(long long)c,(long long)o); }
-static int  o_sync (struct ntfs_device *d){ return img_ntfs_cb_sync((void*)img_ntfs_get_active_ctx()); }
-static int  o_stat (struct ntfs_device *d, struct stat *s){ return img_ntfs_cb_stat((void*)img_ntfs_get_active_ctx(), s); }
-static int  o_ioctl(struct ntfs_device *d, unsigned long r, void *a){ return img_ntfs_cb_ioctl((void*)img_ntfs_get_active_ctx(),r,a); }
+static s64 o_seek (struct ntfs_device *d, s64 o, int w){ (void)d; return img_ntfs_cb_seek((void*)img_ntfs_get_active_ctx(),(long long)o,w); }
+static s64 o_read (struct ntfs_device *d, void *b, s64 c){ (void)d; return img_ntfs_cb_read((void*)img_ntfs_get_active_ctx(),b,(long long)c); }
+static s64 o_write(struct ntfs_device *d, const void *b, s64 c){ (void)d; return img_ntfs_cb_write((void*)img_ntfs_get_active_ctx(),b,(long long)c); }
+static s64 o_pread(struct ntfs_device *d, void *b, s64 c, s64 o){ (void)d; return img_ntfs_cb_pread((void*)img_ntfs_get_active_ctx(),b,(long long)c,(long long)o); }
+static s64 o_pwrite(struct ntfs_device *d, const void *b, s64 c, s64 o){ (void)d; return img_ntfs_cb_pwrite((void*)img_ntfs_get_active_ctx(),b,(long long)c,(long long)o); }
+static int  o_sync (struct ntfs_device *d){ (void)d; return img_ntfs_cb_sync((void*)img_ntfs_get_active_ctx()); }
+static int  o_stat (struct ntfs_device *d, struct stat *s){ (void)d; return img_ntfs_cb_stat((void*)img_ntfs_get_active_ctx(), s); }
+static int  o_ioctl(struct ntfs_device *d, unsigned long r, void *a){ (void)d; return img_ntfs_cb_ioctl((void*)img_ntfs_get_active_ctx(),r,a); }
 
 /* ★★ 我们的定义（覆盖 libntfs-3g 里的同名全局量）★★ */
 struct ntfs_device_operations ntfs_device_unix_io_ops = {
