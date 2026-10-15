@@ -114,6 +114,37 @@ void img_ring_add(const char *line);
 int  img_ring_dump(void *ud, int (*cb)(void *ud, const char *line), int max);
 int  img_ring_count(void);
 
+
+/* ---------- 失败上下文（App 拿字段自己渲染本地化卡片）----------
+ * 事件里已有语义码（event/action/error_code + 各数值），这里补一份"可直接给 UI"的
+ * 结构化失败快照：App 用自己的语言渲染卡片，不必解析日志/JSON。*/
+typedef struct {
+    char cmd[64];        /* 哪个命令失败 */
+    char code[48];       /* 稳定错误码，如 FAT-ENOSPC（★ App 本地化查表的键）*/
+    int  rc;             /* img_err_t */
+    char at[256];        /* 失败位置（路径/分区/LBA）*/
+    char what[256];      /* 干到哪一步（"写入 NTFS"）*/
+    char status[256];    /* 当前状态："已完成 / 失败 / 该分区处于半写状态" */
+    char img[512];       /* 镜像路径 */
+    char ctx[256];       /* 命令与参数 */
+    char log[560];       /* 日志文件路径（App 可提示用户一并发）*/
+    char events[2048];   /* 事件尾部（内存环形缓冲，机器格式）*/
+    int  n_events;
+} img_error_info_t;
+void img_error_info(img_error_info_t *out);      /* 取"上一次失败"的上下文（无失败则 code 为空）*/
+/* 内部：失败时记录快照（img_result_fail / img_error_report 都会调）*/
+void img_error_record(const char *cmd, const char *code, int rc, const char *at,
+                      const char *what, const char *why);
+
+/* 文案查表：App 可以直接用，也可以用自己的 i18n 覆盖（key = error_code / action）
+ * lang: "zh"（默认）| "en"；查不到返回通用文案（不会返回 NULL）*/
+const char *img_error_cause  (const char *code, int rc, const char *lang);
+const char *img_error_suggest(const char *code, int rc, const char *lang);
+const char *img_action_text  (const char *action, const char *lang);
+void img_set_lang(const char *lang);              /* 库兜底文案的默认语言（env: IMGTOOL_LANG）*/
+void img_set_image(const char *path);             /* 记录当前镜像（卡片/.error.txt 会用）*/
+const char *img_get_lang(void);
+
 /* ---------- 失败卡片（0c 完整版；这里先落地最小可用） ---------- */
 void img_error_report(int rc, const char *code, const char *mod, const char *op,
                       const char *where, const char *why, const char *suggest);

@@ -58,6 +58,7 @@ int main(int argc, char **argv){
         if(!strcmp(key,"log")){ log=val; continue; }
         if(!strcmp(key,"log-level")){ lvl=val; continue; }
         if(!strcmp(key,"log-max")){ logmax=val; continue; }
+        if(!strcmp(key,"lang")){ img_set_lang(val); continue; }
         if(!strcmp(key,"progress")){ progress=val; continue; }
         if(!eq){ fprintf(stderr,"参数 %s 缺少 =值（例如 --lba=2048）\n",a); img_args_free(args); return 2; }
         img_args_set(args,key,val);
@@ -71,6 +72,7 @@ int main(int argc, char **argv){
     if(helpcmd){ print_help(img_cmd_find(helpcmd)); img_args_free(args); return 0; }
     if(!cmd){ fprintf(stderr,"用法: imgcmd <命令> [--参数=值 ...] | --list | --help=<命令>\n"); img_args_free(args); return 2; }
 
+    { const char *el=getenv("IMGTOOL_LANG"); if(el&&*el) img_set_lang(el); }   /* env 兜底 */
     /* 屏幕输出形态：默认 tty → bar（人话行），非 tty → json；可用 --progress 强制 */
     {
         bool human;

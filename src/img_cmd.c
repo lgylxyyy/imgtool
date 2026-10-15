@@ -165,6 +165,7 @@ void img_result_fail(img_result *r,int rc,const char *code,const char *at,
         img_ev_emit(&e);
     }
     /* ★ 人话失败卡片（屏幕 + <镜像>.error.txt）：用户能整段复制发给我们 */
+    img_error_record(r->cmd, r->code, rc, r->at, NULL, r->why);   /* 结构化快照：App 渲染本地化卡片 */
     img_fail_card(r->cmd, r->code, r->at, r->why, r->suggest);
 }
 
@@ -246,6 +247,7 @@ img_ctx *img_ctx_open(const char *image_path, bool writable, bool check_size,
     img_ctx *c=calloc(1,sizeof *c);
     if(!c) return NULL;
     snprintf(c->path,sizeof c->path,"%s",image_path);
+    img_set_image(image_path);        /* 卡片/.error.txt 要用（即使没开日志）*/
     c->writable=writable; c->check_size=check_size;
     img_lock_init(&c->lk);
     img_io_opts_t o={0}; o.writable=writable;
