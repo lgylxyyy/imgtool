@@ -63,19 +63,24 @@ int main(int argc,char**argv){
             if(rc==IMG_OK && img_ntfs_file_size(fs,argv[5],&sz)==IMG_OK)
                 printf("    写入后大小: %llu 字节\n",(unsigned long long)sz);
         } else if(!strcmp(cmd,"reagent")){
-        /* reagent <Winre.wim相对路径> <BCD恢复GUID>  → 生成并写入 ReAgent.xml */
-        rc=img_ntfs_write_reagent(fs, argv[4], argv[5]);
+        /* reagent <目录> <WinreLocation路径> <BCD恢复GUID> [分区字节偏移]
+         *   例: reagent /Recovery/WindowsRE '\Recovery\WindowsRE' 7619dcc9-... 
+         *   分区偏移缺省用本分区的 lba*512；写 OS 分区那份副本时要显式给恢复分区的偏移 */
+        if(argc<7){ printf("用法: reagent <目录> <WinreLocation路径> <BCD GUID> [分区字节偏移]\n"); rc=IMG_EINVAL; }
+        else {
+        uint64_t off = (argc>=8) ? strtoull(argv[7],NULL,0) : lba*512;
+        rc=img_ntfs_write_reagent(fs, argv[4], argv[5], argv[6], off);
         if(rc==IMG_OK){
+            /* argv[4] 就是目录本身（不是 wim 路径），不要再往上剥一层 */
             char full[512];
-            char d[256]; snprintf(d,sizeof d,"%s",argv[4]);
-            char *sl=strrchr(d,'/'); if(sl) *sl=0;
-            snprintf(full,sizeof full,"/%s/ReAgent.xml", d);
+            snprintf(full,sizeof full,"%s/ReAgent.xml", argv[4]);
             void*b=NULL; size_t n=0;
             if(img_ntfs_read_file(fs, full, &b, &n)==IMG_OK){
                 printf("  ── %s (%zu 字节) ──\n", full, n);
                 printf("%s", (char*)b);
                 free(b);
             }
+        }
         }
     } else if(!strcmp(cmd,"export")){
         /* export <路径在NTFS里> <宿主文件>  —— 读出到宿主 */
@@ -98,11 +103,7 @@ int main(int argc,char**argv){
         /* put 的复核路径应是 NTFS 目标(argv[5])，不是本地源(argv[4]) */
         const char *vpath = "/";
         if(!strcmp(cmd,"mkdir") && argc>4) vpath = argv[4];
-        else if(!strcmp(cmd,"put") && argc>5) {
-            vpath = argv[5];
-            char *sl = strrchr((char*)vpath,'/');
-            /* 列父目录，能看到文件本身 */
-        }
+        else if(!strcmp(cmd,"put") && argc>5) vpath = argv[5];
         printf("  ── 上游 ntfsls 复核 %s ──\n", vpath);
         upstream_ls(q,lba,pb, vpath);
     }

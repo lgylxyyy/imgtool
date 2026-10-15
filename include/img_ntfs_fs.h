@@ -40,9 +40,17 @@ int img_ntfs_read_file(img_ntfs_fs *fs, const char *abs_path, void **out, size_t
 /* 把内存数据写成文件（ESP 里常有几个 KB 的小文件） */
 int img_ntfs_put_file_mem(img_ntfs_fs *fs, const void *data, size_t len,
                           const char *dst_abs_path);
-/* 生成并写入 ReAgent.xml（WinRE 注册文件，见实现注释） */
-int img_ntfs_write_reagent(img_ntfs_fs *fs, const char *winre_wim_rel,
-                           const char *bcd_guid);
+/* 生成并写入 ReAgent.xml（WinRE 注册文件）
+ * ★ 格式必须与 Windows 自己写的【完全一致】；真值来自官方 Windows 11 28000
+ *   镜像里的 \Windows\System32\Recovery\ReAgent.xml（见函数实现注释）。
+ * winre_dir_abs : 分区内目录，如 "/Recovery/WindowsRE"
+ * winre_loc     : 写进 XML 的 WinreLocation path（Windows 惯例反斜杠，如 "\Recovery\WindowsRE"）
+ * bcd_guid      : BCD 里 WinRE 加载器对象 GUID（reagentc /info 的 BCD identifier）
+ * part_off      : WinRE 所在分区的【字节偏移】（Windows 写的就是分区起始偏移）
+ * 返回 IMG_OK / IMG_E* */
+int img_ntfs_write_reagent(img_ntfs_fs *fs, const char *winre_dir_abs,
+                           const char *winre_loc, const char *bcd_guid,
+                           uint64_t part_off);
 /* 写文件：自动创建父目录，覆盖已存在文件。prog 可为 NULL */
 int img_ntfs_put_file(img_ntfs_fs *fs, const char *local_path,
                       const char *dst_abs_path, img_prog *prog);

@@ -585,3 +585,65 @@ int img_bcd_patch_device_guids(img_bcd *b, const char *obj_guid, const char *eid
     free(d);
     return rc==0 ? IMG_OK : IMG_EIO;
 }
+
+/* 内存 GUID 布局 → 文本（guid_text_to_bytes 的逆运算） */
+static void guid_bytes_to_text(const uint8_t *b, char *out /* ≥37 字节 */){
+    snprintf(out, 37,
+        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+        b[3],b[2],b[1],b[0], b[5],b[4], b[7],b[6], b[8],b[9],
+        b[10],b[11],b[12],b[13],b[14],b[15]);
+}
+
+/* 读 device 元素里的分区/磁盘 GUID（文本）。非「分区设备」(type≠6) → IMG_EFORMAT */
+int img_bcd_get_device_guids(img_bcd *b, const char *obj_guid, const char *eid,
+                             char *part_out, char *disk_out){
+    if(!b||!obj_guid||!eid||!part_out||!disk_out) return IMG_EINVAL;
+    part_out[0]='\0'; disk_out[0]='\0';
+    hive_node_h o=find_object(b,obj_guid); if(!o) return IMG_ENOENT;
+    hive_node_h els=hivex_node_get_child(b->h,o,"Elements");
+    hive_node_h el =els?hivex_node_get_child(b->h,els,eid):0;
+    if(!el||hivex_node_nr_values(b->h,el)==0) return IMG_ENOENT;
+    hive_value_h *vs=hivex_node_values(b->h,el);
+    hive_type t; size_t len=0;
+    char *d=hivex_value_value(b->h,vs[0],&t,&len);
+    free(vs);
+    if(!d) return IMG_EIO;
+    if(t!=hive_t_binary || len<88){ free(d); return IMG_ECORRUPT; }
+    unsigned ty; memcpy(&ty,d+16,4);
+    if(ty!=6){ free(d); return IMG_EFORMAT; }   /* 只要「分区设备」 */
+    guid_bytes_to_text((const uint8_t*)d+32, part_out);
+    guid_bytes_to_text((const uint8_t*)d+56, disk_out);
+    free(d);
+    return IMG_OK;
+}
+
+/* 枚举 Objects 下所有对象 GUID —— 换盘重建时要遍历全部 device 对象 */
+int img_bcd_list_objects(img_bcd *b, char ***out_guids, size_t *out_n){
+    if(!b||!out_guids||!out_n) return IMG_EINVAL;
+    *out_guids=NULL; *out_n=0;
+    hive_node_h objs=hivex_node_get_child(b->h, hivex_root(b->h), "Objects");
+    if(!objs) return IMG_ENOENT;
+    hive_node_h *ch=hivex_node_children(b->h, objs);
+    if(!ch) return IMG_EIO;
+    size_t n=0; while(ch[n]) n++;
+    char **arr=calloc(n?n:1, sizeof *arr);
+    if(!arr){ free(ch); return IMG_ENOMEM; }
+    size_t k=0;
+    for(size_t i=0;i<n;i++){
+        char *nm=hivex_node_name(b->h, ch[i]);
+        if(!nm) continue;
+        const char *s=nm; if(s[0]=='{') s++;
+        size_t L=strlen(s);
+        char *c=malloc(L+1);
+        if(c){ memcpy(c,s,L+1); if(L && c[L-1]=='}') c[L-1]='\0'; arr[k++]=c; }
+        free(nm);
+    }
+    free(ch);
+    *out_guids=arr; *out_n=k;
+    return IMG_OK;
+}
+void img_bcd_free_object_list(char **guids, size_t n){
+    if(!guids) return;
+    for(size_t i=0;i<n;i++) free(guids[i]);
+    free(guids);
+}

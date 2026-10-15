@@ -363,25 +363,46 @@ int img_ntfs_put_file(img_ntfs_fs *fs, const char *local_path,
 /* ---------- ReAgent.xml（WinRE 注册） ----------
  * 官方要求恢复分区里有 Winre.wim + ReAgent.xml；
  * reagentc 靠它把位置注册为 \\?\\GLOBALROOT\\device\\harddiskN\\partitionM\\... */
-int img_ntfs_write_reagent(img_ntfs_fs *fs, const char *winre_wim_rel,
-                           const char *bcd_guid){
-    if(!fs||!winre_wim_rel||!bcd_guid) return IMG_EINVAL;
-    char dir[256]; snprintf(dir,sizeof dir,"%s",winre_wim_rel);
-    char *sl = strrchr(dir,'/');
-    if(!sl) sl = strrchr(dir,'\\');
-    if(sl) *sl=0;
-    char dnorm[256]; snprintf(dnorm,sizeof dnorm,"%s",dir);
-    for(char *p=dnorm; *p; p++) if(*p=='\\') *p='/';
-    char xml[1024];
+int img_ntfs_write_reagent(img_ntfs_fs *fs, const char *winre_dir_abs,
+                           const char *winre_loc, const char *bcd_guid,
+                           uint64_t part_off){
+    if(!fs||!winre_dir_abs||!winre_loc||!bcd_guid) return IMG_EINVAL;
+    /* ★ 格式真值：官方 Windows 11 28000 镜像里的
+     *   \Windows\System32\Recovery\ReAgent.xml（我们灌系统用的 ESD 里就带着），
+     *   与公开实测样本一致：
+     *     <WindowsRE version="2.0">
+     *       <WinreBCD id="{GUID}"/>                       ← reagentc /info 的 BCD identifier
+     *       <WinreLocation path="\Recovery\WindowsRE" id="0" offset="<分区字节偏移>" guid="{0}"/>
+     *       ...
+     *       <InstallState state="1"/>                     ← 1 = 已启用
+     *   早期我自造了 <RecoveryEnvironment>/<WinreBCD value=...> 字段名 ——
+     *   自己写的检查器能过、Windows 完全不认（"自洽但外部不认"的典型坑）。*/
+    char xml[2048];
     snprintf(xml,sizeof xml,
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n"
-        "<RecoveryEnvironment>\r\n"
-        "  <WinreBCD value=\"{%s}\"/>\r\n"
-        "  <WinreLocation value=\"%s\"/>\r\n"
-        "  <WinreWimFilePath value=\"%s\"/>\r\n"
-        "  <WinREState value=\"1\"/>\r\n"
-        "</RecoveryEnvironment>\r\n",
-        bcd_guid, dir, winre_wim_rel);
+        "<?xml version='1.0' encoding='utf-8' standalone='yes'?>\r\n"
+        "<WindowsRE version=\"2.0\">\r\n"
+        "\t<WinreBCD id=\"{%s}\"></WinreBCD>\r\n"
+        "\t<WinreLocation path=\"%s\" id=\"0\" offset=\"%llu\" "
+            "guid=\"{00000000-0000-0000-0000-000000000000}\"></WinreLocation>\r\n"
+        "\t<ImageLocation path=\"\" id=\"0\" offset=\"0\" "
+            "guid=\"{00000000-0000-0000-0000-000000000000}\"></ImageLocation>\r\n"
+        "\t<PBRImageLocation path=\"\" id=\"0\" offset=\"0\" "
+            "guid=\"{00000000-0000-0000-0000-000000000000}\" index=\"0\"></PBRImageLocation>\r\n"
+        "\t<PBRCustomImageLocation path=\"\" id=\"0\" offset=\"0\" "
+            "guid=\"{00000000-0000-0000-0000-000000000000}\" index=\"0\"></PBRCustomImageLocation>\r\n"
+        "\t<InstallState state=\"1\"></InstallState>\r\n"
+        "\t<OsInstallAvailable state=\"0\"></OsInstallAvailable>\r\n"
+        "\t<CustomImageAvailable state=\"0\"></CustomImageAvailable>\r\n"
+        "\t<WinREStaged state=\"0\"></WinREStaged>\r\n"
+        "\t<ScheduledOperation state=\"4\"></ScheduledOperation>\r\n"
+        "\t<OperationParam path=\"\"></OperationParam>\r\n"
+        "\t<OperationPermanent state=\"0\"></OperationPermanent>\r\n"
+        "\t<OsBuildVersion path=\"\"></OsBuildVersion>\r\n"
+        "\t<OemTool state=\"0\"></OemTool>\r\n"
+        "</WindowsRE>\r\n",
+        bcd_guid, winre_loc, (unsigned long long)part_off);
+    char dnorm[256]; snprintf(dnorm,sizeof dnorm,"%s",winre_dir_abs);
+    for(char *p=dnorm; *p; p++) if(*p=='\\') *p='/';
     int rc = img_ntfs_mkdir_p(fs, dnorm[0]?dnorm:"/");
     if(rc!=IMG_OK) return rc;
     char full[512];
