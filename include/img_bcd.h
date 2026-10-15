@@ -115,6 +115,9 @@ int img_bcd_set_element_binary(img_bcd *b, const char *guid, const char *eid,
                                const void *data, size_t len);
 int img_bcd_get_element_binary(img_bcd *b, const char *guid, const char *eid,
                                void *out, size_t cap, size_t *out_len);
+/* 把 device 对象里的分区 GUID / 磁盘 GUID 换成新盘的值（换盘重建后必做） */
+int img_bcd_patch_device_guids(img_bcd *b, const char *obj_guid, const char *eid,
+                               const char *part_guid, const char *disk_guid);
 int img_bcd_set_ramdisksdi_partition(img_bcd *b, const char *ramdisk_guid,
                                      const char *part_guid, const char *disk_guid);
 

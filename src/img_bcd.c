@@ -547,3 +547,41 @@ int img_bcd_get_element_binary(img_bcd *b, const char *guid, const char *eid,
     free(d);
     return IMG_OK;
 }
+
+/* 把某个 device 对象的【分区 GUID】与【磁盘 GUID】替换成新盘的值
+ *
+ * 场景：参考镜像 BCD 的 OS 加载器里，device 对象写死了源盘的
+ *   分区唯一 GUID 与 GPT 磁盘 GUID；换盘/重建分区后必须改，
+ *   否则 bootmgr 解析不到设备 → 0xc0000098。
+ *
+ * 88 字节结构（见 img_bcd_make_partition_device 注释）：
+ *   [32..47] 分区 GUID   [56..71] 磁盘 GUID
+ * 只改这两段，其余字节原样保留。 */
+int img_bcd_patch_device_guids(img_bcd *b, const char *obj_guid, const char *eid,
+                               const char *part_guid, const char *disk_guid){
+    if(!b||!obj_guid||!eid||!part_guid||!disk_guid) return IMG_EINVAL;
+    hive_node_h o=find_object(b,obj_guid); if(!o) return IMG_ENOENT;
+    hive_node_h els=hivex_node_get_child(b->h,o,"Elements");
+    hive_node_h el =els?hivex_node_get_child(b->h,els,eid):0;
+    if(!el||hivex_node_nr_values(b->h,el)==0) return IMG_ENOENT;
+    hive_value_h *vals=hivex_node_values(b->h,el);
+    hive_type t; size_t len=0;
+    char *d=hivex_value_value(b->h,vals[0],&t,&len);
+    free(vals);
+    if(!d) return IMG_EIO;
+    if(t!=hive_t_binary || len<88){ free(d); return IMG_ECORRUPT; }
+
+    uint8_t pg[16], dg[16];
+    /* 复用 make_partition_device 里的 GUID 解析：先造一份再取它的两段 */
+    uint8_t tmp[88];
+    if(img_bcd_make_partition_device(part_guid,disk_guid,tmp)!=IMG_OK){ free(d); return IMG_EINVAL; }
+    memcpy(pg, tmp+32, 16);
+    memcpy(dg, tmp+56, 16);
+
+    memcpy(d+32, pg, 16);
+    memcpy(d+56, dg, 16);
+    hive_set_value sv={ .key=(char*)"element", .t=hive_t_binary, .len=len, .value=d };
+    int rc=hivex_node_set_value(b->h, el, &sv, 0);
+    free(d);
+    return rc==0 ? IMG_OK : IMG_EIO;
+}

@@ -31,3 +31,7 @@ target_link_libraries(imgraw PRIVATE imgtool)
 add_executable(imgntfsfs imgntfsfs.c)
 target_link_libraries(imgntfsfs PRIVATE imgtool)
 target_sources(imgntfsfs PRIVATE /workspace/build/mkntfs_obj/ntfsls.o /workspace/build/mkntfs_obj/ntfscat.o)
+
+add_executable(imggenbcd imggenbcd.c ../src/img_bcd.c)
+target_include_directories(imggenbcd PRIVATE ${HIVEX_INC})
+target_link_libraries(imggenbcd PRIVATE imgtool ${HIVEX_LIB})

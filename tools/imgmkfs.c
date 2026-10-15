@@ -39,7 +39,13 @@ int main(int argc,char**argv){
     }
 
     uint64_t lba;
-    if(!strcmp(argv[2],"--mkfs-latest")){
+    /* ★ 参数错位修复：用法写的是 `--mkfs <lba>`，但原代码只判 --check/--mkfs-latest，
+     *   把 "--mkfs" 当 LBA 解析（strtoull 得 0）→ 一直报"找不到该分区"。*/
+    if(!strcmp(argv[2],"--mkfs")){
+        if(argc<4){ fprintf(stderr,"❌ --mkfs 需要 <lba>\n"); return 2; }
+        lba = strtoull(argv[3],NULL,0);
+        /* label 顺延到 argv[4]，后面的 --spc/--fats 扫描从 argv[4] 起 */
+    } else if(!strcmp(argv[2],"--mkfs-latest")){
         img_parttable_t t;
         if(img_parttable_read(q,&t,0)!=IMG_OK){ fprintf(stderr,"❌ 读分区表\n"); return 1; }
         lba=0;
@@ -48,13 +54,18 @@ int main(int argc,char**argv){
         if(!lba){ fprintf(stderr,"❌ 没有分区\n"); return 1; }
     } else lba=strtoull(argv[2],NULL,0);
 
-    const char *label = (argc>3 && argv[3][0]!='-') ? argv[3] : "NO NAME";
+    const char *label;
+    if(!strcmp(argv[2],"--mkfs"))
+        label = (argc>4 && argv[4][0]!='-') ? argv[4] : "NO NAME";
+    else
+        label = (argc>3 && argv[3][0]!='-') ? argv[3] : "NO NAME";
     img_fat32_opts_t o; memset(&o,0,sizeof o);
     o.partition_lba = lba;
     o.label = label;
     o.hidden_sectors = (uint32_t)lba;
     o.num_fats = 2; o.drive_number=0x80;
-    for(int i=3;i+1<argc;i++){
+    int scan_from = !strcmp(argv[2],"--mkfs") ? 4 : 3;
+    for(int i=scan_from;i+1<argc;i++){
         if(!strcmp(argv[i],"--spc"))  o.sectors_per_cluster=(uint8_t)atoi(argv[i+1]);
         if(!strcmp(argv[i],"--fats")) o.num_fats=(uint8_t)atoi(argv[i+1]);
     }
