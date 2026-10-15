@@ -432,6 +432,13 @@ int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *ou
             (w_std||w_root)
               ? (w_std ? "在标准路径找到恢复映像" : "在分区根目录找到恢复映像")
               : "恢复分区内没有 winre.wim");
+        /* ReAgent.xml —— reagentc 靠它注册恢复位置（官方规范第 9 项）*/
+        bool r_std = ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/ReAgent.xml");
+        bool r_root= r_std ? false : ntfs_path_exists(q,lba,sz,"/ReAgent.xml");
+        add(out,"rec.reagent","ReAgent.xml 存在",IMG_CK_WARN, r_std||r_root,
+            (r_std||r_root)
+              ? (r_std ? "在标准路径找到（reagentc 可识别）" : "在根目录找到")
+              : "缺 ReAgent.xml — Windows 自带的 reagentc 认不出恢复位置");
         add(out,"rec.bootsdi","boot.sdi 存在",IMG_CK_WARN, s_std||s_root,
             (s_std||s_root)
               ? (s_std ? "在标准路径找到" : "在根目录找到")

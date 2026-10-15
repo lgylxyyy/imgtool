@@ -38,4 +38,7 @@ target_link_libraries(imggenbcd PRIVATE imgtool ${HIVEX_LIB})
 
 add_executable(imgfatfs imgfatfs.c)
 target_link_libraries(imgfatfs PRIVATE imgtool)
-target_sources(imgfatfs PRIVATE src/img_fat32_fs.c)
+# img_fat32_fs.c 已在主库中，勿重复编译
+
+add_executable(imgwimls imgwimls.c)
+target_link_libraries(imgwimls PRIVATE wim)

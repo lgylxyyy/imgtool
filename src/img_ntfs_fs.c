@@ -228,6 +228,55 @@ int img_ntfs_read_file(img_ntfs_fs *fs, const char *abs_path, void **out, size_t
 }
 
 /* ---------- 写文件 ---------- */
+/* 内存数据写文件（与 put_file 同逻辑，只是数据来源不同）*/
+int img_ntfs_put_file_mem(img_ntfs_fs *fs, const void *data, size_t len,
+                          const char *dst_abs_path){
+    if(!fs||!fs->vol||!data||!dst_abs_path) return IMG_EINVAL;
+    /* 父目录 */
+    char parent[512]; snprintf(parent,sizeof parent,"%s",dst_abs_path);
+    char *slash = strrchr(parent,'/');
+    if(slash && slash!=parent){ *slash=0;
+        int rc = img_ntfs_mkdir_p(fs, parent);
+        if(rc!=IMG_OK) return rc;
+    }
+    /* 末级名字 */
+    const char *fname = strrchr(dst_abs_path,'/');
+    fname = fname ? fname+1 : dst_abs_path;
+    if(!fname[0]) return IMG_EINVAL;
+    char parentdir[512];
+    snprintf(parentdir,sizeof parentdir,"%.*s",(int)(fname-dst_abs_path), dst_abs_path);
+    if(parentdir[0]=='/' && parentdir[1]==0) parentdir[0]=0;
+
+    ntfs_inode *dir = parentdir[0] ? lookup(fs->vol, parentdir, NULL)
+                                   : ntfs_inode_open(fs->vol, FILE_root);
+    if(!dir) return IMG_ENOENT;
+
+    ntfschar *uname=NULL; size_t ulen=strlen(fname);
+    if(ntfs_mbstoucs((const char*)fname,&uname) < 0){ ntfs_inode_close(dir); return IMG_EINVAL; }
+    errno=0;
+    MFT_REF ref = ntfs_inode_lookup_by_name(dir, uname, ulen);
+    int lerr = (ref==(MFT_REF)-1) ? errno : 0;
+    ntfs_inode *file;
+    if(lerr!=0 && lerr!=ENOENT){ free(uname); ntfs_inode_close(dir); return IMG_EIO; }
+    if(mftref_ok(ref)) file = ntfs_inode_open(fs->vol, ref);
+    else               file = ntfs_create(dir, 0, uname, (u8)ulen, S_IFREG);
+    free(uname);
+    ntfs_inode_close(dir);
+    if(!file) return IMG_EIO;
+
+    ntfs_attr *na = ntfs_attr_open(file, AT_DATA, NULL, 0);
+    if(!na){ ntfs_inode_close(file); return IMG_EIO; }
+    if(ntfs_attr_truncate(na, 0)<0){ ntfs_attr_close(na); ntfs_inode_close(file); return IMG_EIO; }
+    int rc = IMG_OK;
+    if(len){
+        s64 w = ntfs_attr_pwrite(na, 0, (s64)len, data);
+        if(w != (s64)len) rc = (errno==ENOSPC)?IMG_EFULL:IMG_EIO;
+    }
+    ntfs_attr_close(na);
+    if(ntfs_inode_close(file)<0 && rc==IMG_OK) rc=IMG_EIO;
+    return rc;
+}
+
 int img_ntfs_put_file(img_ntfs_fs *fs, const char *local_path,
                       const char *dst_abs_path, img_prog *prog){
     if(!fs||!fs->vol||!local_path||!dst_abs_path) return IMG_EINVAL;
@@ -308,4 +357,34 @@ int img_ntfs_put_file(img_ntfs_fs *fs, const char *local_path,
     if(ntfs_inode_close(file)<0 && rc==IMG_OK) rc=IMG_EIO;
     if(rc==IMG_OK && prog) img_prog_done(prog,"文件写入完成");
     return rc;
+}
+
+
+/* ---------- ReAgent.xml（WinRE 注册） ----------
+ * 官方要求恢复分区里有 Winre.wim + ReAgent.xml；
+ * reagentc 靠它把位置注册为 \\?\\GLOBALROOT\\device\\harddiskN\\partitionM\\... */
+int img_ntfs_write_reagent(img_ntfs_fs *fs, const char *winre_wim_rel,
+                           const char *bcd_guid){
+    if(!fs||!winre_wim_rel||!bcd_guid) return IMG_EINVAL;
+    char dir[256]; snprintf(dir,sizeof dir,"%s",winre_wim_rel);
+    char *sl = strrchr(dir,'/');
+    if(!sl) sl = strrchr(dir,'\\');
+    if(sl) *sl=0;
+    char dnorm[256]; snprintf(dnorm,sizeof dnorm,"%s",dir);
+    for(char *p=dnorm; *p; p++) if(*p=='\\') *p='/';
+    char xml[1024];
+    snprintf(xml,sizeof xml,
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n"
+        "<RecoveryEnvironment>\r\n"
+        "  <WinreBCD value=\"{%s}\"/>\r\n"
+        "  <WinreLocation value=\"%s\"/>\r\n"
+        "  <WinreWimFilePath value=\"%s\"/>\r\n"
+        "  <WinREState value=\"1\"/>\r\n"
+        "</RecoveryEnvironment>\r\n",
+        bcd_guid, dir, winre_wim_rel);
+    int rc = img_ntfs_mkdir_p(fs, dnorm[0]?dnorm:"/");
+    if(rc!=IMG_OK) return rc;
+    char full[512];
+    snprintf(full,sizeof full, "%s/ReAgent.xml", dnorm[0]?dnorm:"");   /* 空目录 = 根，避免 "//" */
+    return img_ntfs_put_file_mem(fs, xml, strlen(xml), full);
 }

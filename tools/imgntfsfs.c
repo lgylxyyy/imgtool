@@ -62,7 +62,33 @@ int main(int argc,char**argv){
             uint64_t sz=0;
             if(rc==IMG_OK && img_ntfs_file_size(fs,argv[5],&sz)==IMG_OK)
                 printf("    写入后大小: %llu 字节\n",(unsigned long long)sz);
-        } else if(!strcmp(cmd,"exists")){
+        } else if(!strcmp(cmd,"reagent")){
+        /* reagent <Winre.wim相对路径> <BCD恢复GUID>  → 生成并写入 ReAgent.xml */
+        rc=img_ntfs_write_reagent(fs, argv[4], argv[5]);
+        if(rc==IMG_OK){
+            char full[512];
+            char d[256]; snprintf(d,sizeof d,"%s",argv[4]);
+            char *sl=strrchr(d,'/'); if(sl) *sl=0;
+            snprintf(full,sizeof full,"/%s/ReAgent.xml", d);
+            void*b=NULL; size_t n=0;
+            if(img_ntfs_read_file(fs, full, &b, &n)==IMG_OK){
+                printf("  ── %s (%zu 字节) ──\n", full, n);
+                printf("%s", (char*)b);
+                free(b);
+            }
+        }
+    } else if(!strcmp(cmd,"export")){
+        /* export <路径在NTFS里> <宿主文件>  —— 读出到宿主 */
+        void *b=NULL; size_t n=0;
+        rc=img_ntfs_read_file(fs, argv[4], &b, &n);
+        if(rc==IMG_OK){
+            FILE *fp=fopen(argv[5], "wb");
+            if(!fp){ printf("❌ 宿主文件写不开\n"); rc=IMG_EIO; }
+            else { if(n) fwrite(b,1,n,fp); fclose(fp);
+                   printf("  ✅ %s → %s  %llu 字节\n", argv[4], argv[5], (unsigned long long)n); }
+            free(b);
+        }
+    } else if(!strcmp(cmd,"exists")){
             printf("  exists %s: %s\n", argv[4], img_ntfs_path_exists(fs,argv[4])?"是":"否");
         } else { printf("未知命令\n"); rc=1; }
         img_ntfs_umount(fs);

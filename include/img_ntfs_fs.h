@@ -37,6 +37,12 @@ bool img_ntfs_path_exists(img_ntfs_fs *fs, const char *abs_path);
 /* 读整个文件到内存（调用方 free）。*out_len 返回字节数 */
 int img_ntfs_read_file(img_ntfs_fs *fs, const char *abs_path, void **out, size_t *out_len);
 
+/* 把内存数据写成文件（ESP 里常有几个 KB 的小文件） */
+int img_ntfs_put_file_mem(img_ntfs_fs *fs, const void *data, size_t len,
+                          const char *dst_abs_path);
+/* 生成并写入 ReAgent.xml（WinRE 注册文件，见实现注释） */
+int img_ntfs_write_reagent(img_ntfs_fs *fs, const char *winre_wim_rel,
+                           const char *bcd_guid);
 /* 写文件：自动创建父目录，覆盖已存在文件。prog 可为 NULL */
 int img_ntfs_put_file(img_ntfs_fs *fs, const char *local_path,
                       const char *dst_abs_path, img_prog *prog);

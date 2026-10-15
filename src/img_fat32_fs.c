@@ -136,7 +136,20 @@ static void name_to_83(const char *nm, char out[12]){
 }
 /* ★ 写盘用的是【补满 11 字节】的 8.3；比较时必须用【去尾空格】版，
  *   否则 "EFI" 与 "EFI        " 永不相等 —— 这个坑我踩过一次。*/
-static void name_to_83_trim(const char *nm, char out[12]){
+/* 比较用的规范形：去尾空格 + 基名/扩展名之间用点号（与 dir_find 里现拼的 n 一致）。
+ * ★ 只去尾空格还不够 —— 'HELLO   TXT'（补空格形）与 'HELLO.TXT'（点号形）
+ *   永远不相等。必须两边都规范成【点号形】。*/
+static void name_to_83_dot(const char *nm, char out[12]){
+    char pad[12]; name_to_83(nm,pad);
+    int j=0;
+    for(int i=0;i<8 && pad[i] && pad[i]!=' ';i++) out[j++]=pad[i];
+    if(pad[8] && pad[8]!=' '){
+        out[j++]='.';
+        for(int i=8;i<11 && pad[i] && pad[i]!=' ';i++) out[j++]=pad[i];
+    }
+    out[j]=0;
+}
+__attribute__((unused)) static void name_to_83_trim(const char *nm, char out[12]){
     char pad[12]; name_to_83(nm, pad);
     int i=11; while(i>0 && pad[i-1]==' ') i--;
     pad[i]=0;
@@ -149,7 +162,7 @@ static int dir_find(img_fat32_fs *fs, uint32_t dirclus, const char *want, dir_en
     uint8_t *buf = malloc(csz);
     if(!buf) return IMG_ENOMEM;
     memset(out,0,sizeof *out);
-    char want83[12]; name_to_83_trim(want, want83);
+    char want83[12]; name_to_83_dot(want, want83);
     char lfn[260]; lfn[0]=0;
     bool have_lfn=false;
     uint32_t c = dirclus;
