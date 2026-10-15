@@ -45,6 +45,13 @@ void img_log_set_level(img_lv_t lv);
 img_lv_t img_log_level(void);
 bool img_log_enabled(img_lv_t lv);
 /* 会话头（版本/命令/镜像指纹）：立刻写一行；发生轮转时自动在新文件头补写 */
+/* 老 CLI 一行接入：扫描 argv 里的 --log=/--log-level=/--log-max=/--log
+ *   （不给值的 --log 用 <第一个参数>.imgtool.log 当默认路径）
+ *   返回是否打开了日志；没传 --log 就是什么都不做（返回 0，不算错）。 */
+int  img_log_cli(int argc, char **argv, const char *tool);
+/* 把 argv 里我们认识的开关抽掉（不想动原参数解析的工具可调用它得到干净的 argv）*/
+int  img_log_strip_args(int argc, char **argv, char **out, int outcap);
+
 void img_log_session(const char *tool, const char *argv, const char *img, uint64_t img_size);
 /* 屏幕消费者（0c 用；现在挂上去也只是原样打里程碑行）*/
 void img_out_open_fd(int fd, bool human);

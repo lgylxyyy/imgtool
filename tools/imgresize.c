@@ -2,6 +2,7 @@
             <image.qcow2> fill   <idx>
             <image.qcow2> show */
 #include "img_partition.h"
+#include "img_event.h"
 #include "img_constraints.h"
 #include <stdio.h>
 #include <string.h>
@@ -32,6 +33,9 @@ static void show(img_qcow2 *q){
     }
 }
 int main(int argc,char**argv){
+    /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
+       也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
+    img_log_cli(argc, argv, "imgresize");
     if(argc<3){ fprintf(stderr,"用法: %s <image> show|resize|fill ...\n",argv[0]); return 2; }
     img_qcow2 *q=open_rw(argv[1]);
     if(!q){ fprintf(stderr,"❌ 打不开\n"); return 1; }

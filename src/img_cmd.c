@@ -328,6 +328,7 @@ int img_cmd_exec(const char *name, img_ctx *ctx, const img_args *in, img_result 
     rc=c->run(ctx,use,out);
     img_lock_release(lk);
     if(tmp) img_args_free(tmp);
+    img_cancel_reset();            /* ★ 本次命令结束 → 清取消标志，避免污染下一个命令 */
     if(rc!=IMG_OK && out->ok)          /* handler 忘了填 err：兜一层，保证信封永远完整 */
         img_result_fail(out,rc,"CMD-FAILED",name,img_strerror(rc),NULL);
     return rc;

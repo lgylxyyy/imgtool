@@ -1,6 +1,7 @@
 /* imgntfscp <img.qcow2> <part_lba> <src_file> <dst_in_ntfs>
  *  经 ntfs_device 前插把文件写进 qcow2 里的 NTFS 分区（无 loop/无 FUSE/无 root） */
 #include "img_qcow2.h"
+#include "img_event.h"
 #include "img_partition.h"
 #include "img_ntfs_fmt.h"
 #include <stdio.h>
@@ -10,6 +11,9 @@
 #include <unistd.h>
 extern int ntfscp_main(int argc,char**argv);
 int main(int argc,char**argv){
+    /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
+       也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
+    img_log_cli(argc, argv, "imgntfscp");
     if(argc<5){ fprintf(stderr,"用法: %s <img> <part_lba> <src> <dst>\n",argv[0]); return 2; }
     uint64_t lba=strtoull(argv[2],NULL,0);
     img_io_opts_t io={0}; io.writable=true;

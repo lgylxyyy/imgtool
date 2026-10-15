@@ -466,3 +466,47 @@ void img_error_report(int rc,const char *code,const char *mod,const char *op,
         suggest?suggest:"重试；若复现请把本段与日志文件一起反馈");
     if(n>0) write_all(G.out_fd,b,(size_t)n);
 }
+
+/* ---------- 老 CLI 的 --log 接入 ---------- */
+int img_log_cli(int argc, char **argv, const char *tool){
+    const char *path=NULL, *lvl=NULL, *maxb=NULL; bool plain=false;
+    for(int i=1;i<argc;i++){
+        const char *a=argv[i];
+        if(!a || a[0]!='-') continue;
+        if(!strcmp(a,"--log")){ plain=true; continue; }           /* 不给值 → 用默认路径 */
+        if(!strncmp(a,"--log=",6)) path=a+6;
+        else if(!strncmp(a,"--log-level=",12)) lvl=a+12;
+        else if(!strncmp(a,"--log-max=",10))   maxb=a+10;
+    }
+    if(!path && !plain) return 0;                                 /* 没要日志：什么都不做 */
+    if(!path && plain){
+        /* 默认放镜像旁边：<argv[1]>.imgtool.log（拿不到参数就用 cwd 下的名字）*/
+        const char *seed = (argc>1 && argv[1] && argv[1][0]!='-') ? argv[1] : "imgtool";
+        static char def[480];
+        snprintf(def,sizeof def,"%s.imgtool.log",seed);
+        path=def;
+    }
+    img_lv_t lv=IMG_LV_INFO;
+    if(lvl){
+        if(!strcmp(lvl,"error")) lv=IMG_LV_ERROR; else if(!strcmp(lvl,"warn")) lv=IMG_LV_WARN;
+        else if(!strcmp(lvl,"debug")) lv=IMG_LV_DEBUG; else if(!strcmp(lvl,"trace")) lv=IMG_LV_TRACE;
+    }
+    size_t mb=4u*1024*1024;
+    if(maxb){ uint64_t v=strtoull(maxb,NULL,0); if(v>0) mb=(size_t)v; }
+    if(img_log_open(path,lv,mb,1)!=IMG_OK) return -1;
+    img_log_session(tool?tool:"imgtool", argc>1?argv[1]:"", NULL, 0);
+    return 1;
+}
+int img_log_strip_args(int argc, char **argv, char **out, int outcap){
+    int n=0;
+    for(int i=0;i<argc && n<outcap;i++){
+        const char *a=argv[i];
+        if(a && a[0]=='-' && (!strncmp(a,"--log",5))) continue;   /* 连带它的值一起跳过：
+                                                                   * --log=xx 整个跳；下一项要跳 */
+        if(a && (!strcmp(a,"--log")||!strcmp(a,"--log-level")||!strcmp(a,"--log-max")) && i+1<argc){
+            i++; continue;
+        }
+        out[n++]=argv[i];
+    }
+    return n;
+}

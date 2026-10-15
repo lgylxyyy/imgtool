@@ -3,6 +3,7 @@
  *   imgq2test write  <qcow2>     （读回校验）
  */
 #include "img_qcow2.h"
+#include "img_event.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,9 @@ static void fill_pat(uint8_t *b, size_t n, uint64_t seed){
 }
 
 int main(int argc,char**argv){
+    /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
+       也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
+    img_log_cli(argc, argv, "imgq2test");
     if(argc<3){ fprintf(stderr,
         "用法:\n  %s create <out.qcow2> <bytes>\n  %s write  <in.qcow2>\n  %s expand <qcow2> <new_bytes>\n",
         argv[0],argv[0],argv[0]); return 2; }

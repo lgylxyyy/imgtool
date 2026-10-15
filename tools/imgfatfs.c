@@ -1,6 +1,7 @@
 /* imgfatfs — FAT32 文件系统读写 CLI
  *  imgfatfs <qcow2> <part_lba> <mkdir|put|get|export|ls|rm|exists> ... */
 #include "img_fat32_fs.h"
+#include "img_event.h"
 #include "img_qcow2.h"
 #include "img_partition.h"
 #include <stdio.h>
@@ -18,6 +19,9 @@ static void show(void *ud,const char*nm,bool d,uint64_t sz){
     (void)ud; printf("  %-40s %s %llu\n", nm, d?"<DIR>":"    ", (unsigned long long)sz);
 }
 int main(int argc,char**argv){
+    /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
+       也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
+    img_log_cli(argc, argv, "imgfatfs");
     if(argc<5){ fprintf(stderr,"用法: %s <qcow2> <part_lba> mkdir|put|get|export|ls|rm|exists ...\n",argv[0]); return 2; }
     uint64_t lba=strtoull(argv[2],NULL,0);
     img_qcow2 *q=op(argv[1]);

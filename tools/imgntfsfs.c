@@ -4,6 +4,7 @@
  *  ★ 校验策略：写用我们的 img_ntfs_fs，读用【上游 ntfsls/ntfscat】（同一进程内前插），
  *    两边都通过才算数 —— 避免"自己写自己读"的自证陷阱。 */
 #include "img_ntfs_fs.h"
+#include "img_event.h"
 #include "img_qcow2.h"
 #include "img_partition.h"
 #include "img_ntfs_fmt.h"
@@ -34,6 +35,9 @@ static void upstream_ls(img_qcow2 *q, uint64_t lba, uint64_t sz, const char *pat
     img_ntfs_ctx_deactivate();
 }
 int main(int argc,char**argv){
+    /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
+       也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
+    img_log_cli(argc, argv, "imgntfsfs");
     if(argc<4){ fprintf(stderr,"用法见文件头\n"); return 2; }
     uint64_t lba=strtoull(argv[2],NULL,0);
     img_qcow2 *q=open_q(argv[1]);

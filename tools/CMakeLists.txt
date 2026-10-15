@@ -41,6 +41,7 @@ target_link_libraries(imgfatfs PRIVATE imgtool)
 # img_fat32_fs.c 已在主库中，勿重复编译
 
 add_executable(imgwimls imgwimls.c)
-target_link_libraries(imgwimls PRIVATE wim)
+# 接了 --log 就要链 imgtool（img_log_cli 在里面）；wimlib 由 imgtool 传递
+target_link_libraries(imgwimls PRIVATE imgtool wim)
 add_executable(imgcmd imgcmd.c)
 target_link_libraries(imgcmd PRIVATE imgtool)   # wimlib 由 imgtool 传递过来

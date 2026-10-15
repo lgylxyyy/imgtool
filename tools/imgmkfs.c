@@ -2,6 +2,7 @@
  *        <image.qcow2> --check <lba>                                校验
  *        <image.qcow2> --mkfs-latest                                格式化最后一个分区 */
 #include "img_fat32.h"
+#include "img_event.h"
 #include "img_partition.h"
 #include <stdio.h>
 #include <string.h>
@@ -18,6 +19,9 @@ static img_qcow2 *openq(const char*p){
     return q;
 }
 int main(int argc,char**argv){
+    /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
+       也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
+    img_log_cli(argc, argv, "imgmkfs");
     if(argc<3){ fprintf(stderr,"用法: %s <image> --mkfs <lba> [label] | --check <lba> | --mkfs-latest\n",argv[0]); return 2; }
     img_qcow2 *q = openq(argv[1]);
     if(!q){ fprintf(stderr,"❌ 打不开\n"); return 1; }

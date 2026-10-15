@@ -35,3 +35,6 @@ target_link_libraries(fd_test PRIVATE imgtool)
 
 add_executable(thread_test thread_test.c)
 target_link_libraries(thread_test PRIVATE imgtool)
+
+add_executable(cancel_test cancel_test.c)
+target_link_libraries(cancel_test PRIVATE imgtool)

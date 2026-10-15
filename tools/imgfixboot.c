@@ -1,6 +1,7 @@
 /* imgfixboot <dst.qcow2> <dst_lba> [--tpl <image> <lba>]
  *  从模板取 NTFS 引导代码写到目标分区；不给模板则做校验 */
 #include "img_fixboot.h"
+#include "img_event.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,9 @@ static img_qcow2 *op(const char *p){
     return q;
 }
 int main(int argc,char**argv){
+    /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
+       也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
+    img_log_cli(argc, argv, "imgfixboot");
     if(argc<3){ fprintf(stderr,"用法: %s <dst> <lba> [--tpl <img> <lba>] [--verify]\n",argv[0]); return 2; }
     uint64_t dlba=strtoull(argv[2],NULL,0);
     img_qcow2 *d=op(argv[1]); if(!d){printf("❌ 打不开 dst\n");return 1;}

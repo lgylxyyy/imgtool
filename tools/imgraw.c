@@ -3,10 +3,14 @@
  *  imgraw write <img> <offset> in.bin
  *  imgraw seek  <img> <offset> <len>   （打印前64字节 hex 用于核对）*/
 #include "img_qcow2.h"
+#include "img_event.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 int main(int argc,char**argv){
+    /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
+       也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
+    img_log_cli(argc, argv, "imgraw");
     if(argc<5){ fprintf(stderr,"用法: %s read|write|seek <img> <offset> <len|file>\n",argv[0]); return 2; }
     const char *mode=argv[1];
     img_io_opts_t io={0}; io.writable = strcmp(mode,"read")&&strcmp(mode,"seek") ? true : true;

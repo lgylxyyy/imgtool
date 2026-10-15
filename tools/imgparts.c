@@ -1,10 +1,14 @@
 /* imgparts <image.qcow2>  → 打印分区表 JSON + 人读版 */
 #include "img_partition.h"
+#include "img_event.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
 int main(int argc,char**argv){
+    /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
+       也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
+    img_log_cli(argc, argv, "imgparts");
     if(argc<2){ fprintf(stderr,"用法: %s <image.qcow2>\n",argv[0]); return 2; }
     img_io_opts_t io={0};
     img_io *f=img_io_open_path(argv[1],&io);

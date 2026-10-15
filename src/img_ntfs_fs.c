@@ -4,6 +4,7 @@
 /* img_ntfs_fs.c — NTFS 文件系统写入（Stage B）
  * 内部用 libntfs-3g 的公开 API（见 include/img_ntfs_fs.h 的决策记录） */
 #include "img_ntfs_fs.h"
+#include "img_event.h"
 #include "ntfs_bridge.h"
 #include "img_ntfs_fmt.h"
 #include "img_ntfs_dev.h"
@@ -344,6 +345,7 @@ int img_ntfs_put_file(img_ntfs_fs *fs, const char *local_path,
               img_prog_bytes(prog,0,fsz); }
     s64 done=0; int rc=IMG_OK;
     for(;;){
+        if(img_cancelled()){ rc=IMG_ECANCELLED; break; }   /* ★ 取消检查点（每 1MiB 一次）*/
         ssize_t r = read(fd, buf, CHUNK);
         if(r<0){ rc=IMG_EIO; break; }
         if(r==0) break;

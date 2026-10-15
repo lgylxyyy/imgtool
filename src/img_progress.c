@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "img_progress.h"
+#include "img_event.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -120,7 +121,9 @@ void img_prog_done(img_prog *p, const char *msg){
     do_emit(p,1);
 }
 void img_prog_cancel(img_prog *p){
-    if(p) p->cancelled = 1;
+    if(!p) return;
+    p->cancelled = 1;
+    img_cancel();                    /* ★ 同时置全局标志：模块的取消检查点读的是它 */
 }
 int img_prog_cancelled(const img_prog *p){
     return p ? p->cancelled : 0;

@@ -3,6 +3,7 @@
 #endif
 /* img_ntfs_dev.c — qcow2 → ntfs_device 后端（本文件属我方代码，无 GPL 依赖） */
 #include "img_ntfs_dev.h"
+#include "img_event.h"
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -92,7 +93,11 @@ long long img_ntfs_cb_read(void *dev, void *buf, long long n){
     return r;
 }
 
+/* ★ 取消检查点：wimlib 直灌的所有数据都经这里，返回错误 → ntfs-3g/wimlib 中止，
+ *   从而让"取消"能穿透 wimlib（它自己的进度回调不支持中止）。
+ *   代价：取消时目标分区处于半写状态 → 失败卡片会明确告知"该分区需重做"。*/
 long long img_ntfs_cb_write(void *dev, const void *buf, long long n){
+    if(img_cancelled()){ errno=ECANCELED; return -1; }
     img_ntfs_ctx *c = ctx_of(dev, NULL);
     if(!c){ errno = EINVAL; return -1; }
     long long r = do_write(c, buf, n, c->pos);
@@ -107,6 +112,7 @@ long long img_ntfs_cb_pread(void *dev, void *buf, long long n, long long off){
 }
 
 long long img_ntfs_cb_pwrite(void *dev, const void *buf, long long n, long long off){
+    if(img_cancelled()){ errno=ECANCELED; return -1; }
     img_ntfs_ctx *c = ctx_of(dev, NULL);
     if(!c || off < 0){ errno = EINVAL; return -1; }
     return do_write(c, buf, n, (uint64_t)off);

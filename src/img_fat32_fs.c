@@ -607,10 +607,9 @@ static int put_prepare(img_fat32_fs *fs, const char *dst_abs_path,
     if(rc) return rc;
     *existed=e.found;
     if(old) *old=e;
-    if(e.found){
-        if(e.is_dir) return IMG_ENOTSUP;
-        if(e.cluster>=2){ int f=free_chain(fs,e.cluster); if(f!=IMG_OK) return f; }
-    }
+    /* ★ 覆盖写【不再先删旧链】：先保留旧数据，等新数据写完、目录项改成功后再释放。
+     *   这样中途取消/失败时旧文件完好无损（原先先删旧链 → 取消后留下悬空的目录项）。*/
+    if(e.is_dir) return IMG_ENOTSUP;
     return IMG_OK;
 }
 /* ② 分配 need 个簇并连成链（失败时自行回收已分配的） */
@@ -635,7 +634,11 @@ static int put_finalize(img_fat32_fs *fs, uint32_t dir, const char *nm,
         put_u16(d+20,(uint16_t)(first>>16));
         put_u16(d+26,(uint16_t)(first&0xFFFF));
         put_u32(d+28, size);
-        return wr(fs, old->slot_off, d, ENTRY_SIZE);
+        int w = wr(fs, old->slot_off, d, ENTRY_SIZE);
+        if(w) return w;
+        /* 新数据已就位 → 才释放旧链（顺序反了会让失败/取消变成悬空指针）*/
+        if(old->cluster>=2) free_chain(fs, old->cluster);
+        return IMG_OK;
     }
     return dir_add_entry(fs, dir, nm, first, size, false);
 }

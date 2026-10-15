@@ -4,6 +4,7 @@
  *   imgpart add    <image.qcow2> <sectors> <type> [name]   ← 尾部加分区并写回
  */
 #include "img_partition.h"
+#include "img_event.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -26,6 +27,9 @@ static void show(img_qcow2 *q){
 }
 
 int main(int argc,char**argv){
+    /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
+       也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
+    img_log_cli(argc, argv, "imgpart");
     if(argc<3){ fprintf(stderr,
       "用法:\n  %s show <image.qcow2>\n  %s mk <out.qcow2> <bytes> mbr|gpt\n"
       "  %s add <image.qcow2> <sectors> <mbrTypeHex|gptGuid> [name]\n"

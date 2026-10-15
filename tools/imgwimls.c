@@ -6,6 +6,7 @@
  * 用 wimlib_iterate_dir_tree 回调遍历（extract_xml_data 只给统计信息，
  * 完整文件列表必须走这个 API）。 */
 #include <stdio.h>
+#include "img_event.h"
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -46,6 +47,9 @@ static int on_entry(const struct wimlib_dir_entry *de, void *ctx){
 }
 
 int main(int argc,char**argv){
+    /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
+       也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
+    img_log_cli(argc, argv, "imgwimls");
     if(argc<2){ fprintf(stderr,"用法: %s <wim|esd> [index] [路径] [--all] [--filter 子串] [--limit N]\n",argv[0]); return 2; }
     int idx = (argc>2)?atoi(argv[2]):0;
     const char *path = (argc>3 && argv[3][0]!='-')?argv[3]:"";  /* wimlib 根路径是空串 */

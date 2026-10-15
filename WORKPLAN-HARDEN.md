@@ -70,12 +70,17 @@ FAT    真正的问题所在：多处 `while(c>=2 && c<FAT32_EOC)` 沿链走，
 |---|---|---|
 | P0-1 簇链加界 | ✅ 已提交 `5d91c9e` | 反向用例 `tests/corrupt-chain-test.sh`：环状 FAT 从"永久死循环"变为 <2s 返回 `IMG_ECORRUPT`；顺带修出 2 个真缺陷（rm 丢 free_chain 错误码、空目录判断传 NULL 回调） |
 | P0-附加 非法参数 | ✅ 已提交 `a71e0c3` `7c18145` | 见下表：130 条非法输入，修前 4 崩（含 1 处**毁镜像**），修后 **0 崩 0 毁盘** |
-| P0-2 取消接线 | ⬜ 未做 | — |
-| P1-3 CLI 进度可见 | 🟡 部分：事件流 + 人话行 + 失败卡片 + `.error.txt` 已通（`6261aef` `a2a35cc` `5914928` 及本次 0c 提交） | 成功路径 `▶/✔` 人话行、失败卡片（原因/位置/建议/事件尾部）实测见下 |
-| P1-4 FAT 写分块 | ⬜ 未做 | — |
+| P0-2 取消接线 | ✅ | `cancel_test` 7/7：中途取消→`IMG_ECANCELLED`、**不留半成品文件**、**剩余空间回基线（不漏簇）**、不污染下一次、**覆盖写时取消旧文件完好**。检查点在 FAT/NTFS 每 1MiB 一处，并通过 `ntfs_device` 回调**穿透 wimlib** 直灌 |
+| P1-3 CLI 进度可见 | ✅ | 事件流 + 人话行 + 失败卡片 + `.error.txt` + **16 个老 CLI 全部接上 `--log`**（共享 `img_log_cli`，各自零改动）；`--progress=bar|json|none` |
+| P1-4 FAT 写分块 | ✅ | 1MiB 流式写：写 64MB 源文件 **MaxRSS=9.5MB**（原 64MB+，Android OOM 风险归零）；mtools 抽回 md5 逐字节一致；顺带改成"先写新、后释放旧"→ 覆盖写失败不再产生悬空目录项 |
 | 0e 尺寸估算 + check_size | ✅ 估算 + 开关都通 | `wim.size` 命令：真实 ESD → `data_bytes=6861906464`（与上一轮实测 6.86GB 一致）、`file_count=32707`（一致）、`est_ntfs_bytes=7483201632`（含元数据+8% 余量）；`fat.put --check_size=1` 提前拦下并给"剩余 196MB / 需要 286MB"；非法索引 → `WIM-IDX-INVALID` |
 | C 命令表骨架 | ✅ `a2a35cc` | `--list`（App 生成界面用）/`--help` 自动生成/统一信封/22 条验收全绿 |
 | B 并发 + fd 契约 | ✅ `5914928` | `fd_test` 15 条 · `thread_test` 4 组全绿；契约见 DESIGN-OUTPUT.md 第七节 |
+
+### 回归入口（改完代码先跑它）
+```bash
+tests/run_all.sh      # 7 套：cmd_test 27 条 · corrupt-chain · fd 15 条 · thread 4 组 · cancel 7 条 · bcd · recovery_bcd
+```
 
 ### 0c 实测（人话行 + 失败卡片）
 

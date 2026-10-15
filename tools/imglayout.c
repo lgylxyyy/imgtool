@@ -5,6 +5,7 @@
  *   imglayout convert <image> gpt|mbr         表类型互转
  */
 #include "img_constraints.h"
+#include "img_event.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -27,6 +28,9 @@ static void human(char *b,size_t c,uint64_t v){
 }
 
 int main(int argc,char**argv){
+    /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
+       也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
+    img_log_cli(argc, argv, "imglayout");
     if(argc<2){ fprintf(stderr,
         "用法:\n  %s limits\n  %s mk <out.qcow2> <bytes> gpt|mbr [--esp MiB] [--msr MiB] [--sys MiB] [--rec MiB]\n"
         "  %s check <image.qcow2>\n  %s convert <image.qcow2> gpt|mbr\n",

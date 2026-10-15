@@ -258,7 +258,20 @@ static int cmd_wim_size(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
-/* ================= 命令 6：cmd.list（自描述：App 可据此自动生成界面） ================= */
+/* ================= 命令 6：ctl.cancel（请求取消当前操作） =================
+ * ★ 用法：另一个线程调用它（或 App 直接调 img_cancel()）。取消是【协作式】的：
+ *   正在跑的操作在自己的检查点（每 1MiB/每个目录项前）看到标志就退出，
+ *   并且【不写目录项 + 释放已分配簇链】→ FAT 路径不留半成品。
+ *   NTFS/wimlib 直灌路径做不到回滚 → 卡片会明确告知"该分区需重做"。*/
+static int cmd_ctl_cancel(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx; (void)in;
+    img_cancel();
+    img_result_bool(out,"cancelled",true);
+    img_result_str(out,"note","已置取消标志；正在跑的操作会在下一个检查点退出");
+    return IMG_OK;
+}
+
+/* ================= 命令 7：cmd.list（自描述：App 可据此自动生成界面） ================= */
 static int cmd_cmd_list(img_ctx *ctx, const img_args *in, img_result *out){
     (void)ctx; (void)in;
     static char buf[16384];
@@ -280,6 +293,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_FATLS,  (int)(sizeof A_FATLS /sizeof A_FATLS[0]),  cmd_fat_ls},
     {"wim.size",  "1.0", "估算某个 WIM/ESD 镜像展开后需要多少空间（工具给数字，App 定政策）",
         A_WIMSIZE,(int)(sizeof A_WIMSIZE/sizeof A_WIMSIZE[0]), cmd_wim_size},
+    {"ctl.cancel","1.0", "请求取消正在执行的操作（另一线程调用；协作式，下一个检查点生效）",
+        NULL, 0, cmd_ctl_cancel},
     {"cmd.list",  "1.0", "导出命令表（名字/参数规格/帮助）——App 可据此自动生成界面",
         NULL, 0, cmd_cmd_list},
 };

@@ -1,11 +1,15 @@
 /* imgbc <image.qcow2> [--uefi|--bios|--auto]   引导链自检
  * 输出：每项一行 JSON + 一行汇总；退出码 = 未通过的必需项数 */
 #include "img_bootcheck.h"
+#include "img_event.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
 int main(int argc,char**argv){
+    /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
+       也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
+    img_log_cli(argc, argv, "imgbc");
     if(argc<2){ fprintf(stderr,"用法: %s <image.qcow2> [--uefi|--bios|--auto]\n",argv[0]); return 2; }
     img_boot_mode_t mode = IMG_BOOT_AUTO;
     for(int i=2;i<argc;i++){

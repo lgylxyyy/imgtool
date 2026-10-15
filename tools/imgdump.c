@@ -1,10 +1,14 @@
 /* imgdump <image> <offset> <len> [--info]  → 把 guest 区域写到 stdout 或打印头信息 */
 #include "img_qcow2.h"
+#include "img_event.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 int main(int argc,char**argv){
+    /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
+       也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
+    img_log_cli(argc, argv, "imgdump");
     if(argc<2){ fprintf(stderr,"用法: %s <image.qcow2> [offset len] [--info]\n",argv[0]); return 2; }
     bool info=false; uint64_t off=0; size_t len=0; bool have_range=false;
     for(int i=2;i<argc;i++){

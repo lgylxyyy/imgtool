@@ -11,11 +11,15 @@
  *         参考 BCD 没有 DisplayOrder（例如 ESP 上那份精简的 Recovery\BCD）时
  *         自动退化为「只做 ESP 重映射」。 */
 #include "img_bcd.h"
+#include "img_event.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 int main(int argc,char**argv){
+    /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
+       也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
+    img_log_cli(argc, argv, "imggenbcd");
     if(argc<5){ fprintf(stderr,"用法: %s <参考BCD> <输出BCD> <partGuid> <diskGuid> [espPartGuid]\n",argv[0]); return 2; }
     img_bcd *b = img_bcd_open_file(argv[1]);
     if(!b){ printf("❌ 打不开参考 BCD\n"); return 1; }
