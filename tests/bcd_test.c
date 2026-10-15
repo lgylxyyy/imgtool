@@ -39,9 +39,9 @@ int main(int argc, char **argv){
     rc = img_bcd_set_bootmgr_name(b, "Icdqcow2 Windows");
     ENSURE(rc==IMG_OK, "修改返回 OK");
 
-    printf("⑥ 修改 RecoverySequence\n");
+    printf("⑥ RecoverySequence（元素 ID 未确认 → 应返回 IMG_ENOTSUP 拒绝写入）\n");
     rc = img_bcd_set_recovery_sequence(b, "b0b53260-3b27-4f0a-8d0f-6b3e0c1a2b3c");
-    ENSURE(rc==IMG_OK, "修改返回 OK");
+    ENSURE(rc==IMG_ENOTSUP, "未确认 ID 时拒绝写入（防止污染 Timeout 元素）");
 
     printf("⑦ 落盘\n");
     rc = img_bcd_save(b, dst);
@@ -55,10 +55,6 @@ int main(int argc, char **argv){
     printf("     显示名 = %s\n", nm?nm:"(null)");
     ENSURE(nm && strcmp(nm,"Icdqcow2 Windows")==0, "显示名已生效");
     free(nm);
-    char *rs = img_bcd_get_string(c, IMG_BCD_GUID_BOOTMGR, IMG_BCD_EL_RECOVERYSEQ);
-    printf("     RecoverySequence = %s\n", rs?rs:"(null)");
-    ENSURE(rs && strstr(rs,"b0b53260")!=NULL, "RecoverySequence 已生效");
-    free(rs);
     char g2[64];
     ENSURE(img_bcd_get_display_order_first(c,g2,sizeof g2)==IMG_OK && strcmp(g2,guid)==0,
            "DisplayOrder 未被破坏");
