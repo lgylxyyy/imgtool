@@ -3,6 +3,7 @@
 #endif
 /* img_fat32_fs.c — FAT32 文件系统读写（全自研，见头文件说明） */
 #include "img_fat32_fs.h"
+#include "img_event.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,14 @@
 
 #define FAT32_EOC     0x0FFFFFF8u   /* >= 这个值就是链尾 */
 #define FAT32_MASK    0x0FFFFFFFu
+
+/* ---------- 链遍历保护 ---------- */
+/* ★ 沿簇链走时必须有上界：FAT 被写坏成环（或对手给的镜像故意成环）时，
+ *   只靠"走到 EOC 停"会【永久死循环】—— 实测表现为 ls/export 挂住不返回、
+ *   CPU 跑满，只能杀进程。任何链条最多经过"簇总数"个簇，超过必为环。
+ *   用法： uint64_t guard=0;
+ *          while(c>=2 && c<FAT32_EOC){ if(FAT32_CHAIN_GUARD(fs,guard)) return IMG_ECORRUPT; ... } */
+#define FAT32_CHAIN_GUARD(fs, cnt)  (++(cnt) > (uint64_t)(fs)->L.cluster_count)
 #define ATTR_DIR      0x10
 #define ATTR_LFN      0x0F
 #define ATTR_VOLUME   0x08
@@ -88,7 +97,9 @@ __attribute__((unused)) static uint32_t alloc_cluster(img_fat32_fs *fs){
 }
 
 __attribute__((unused)) static int free_chain(img_fat32_fs *fs, uint32_t c){
+    uint64_t guard=0;
     while(c >= 2 && c < FAT32_EOC){
+        if(FAT32_CHAIN_GUARD(fs,guard)) return IMG_ECORRUPT;
         uint32_t n=0;
         if(fat_get(fs, c, &n)) return IMG_EIO;
         if(fat_set(fs, c, 0)) return IMG_EIO;
@@ -173,14 +184,16 @@ static void ent_83_name(const uint8_t *e, char out[12]){
     out[j]=0;
 }
 
-/* 目录里是否已经存在某个 11 字节 8.3 名（跳过 LFN 项、卷标项与已删除项） */
+/* 目录里是否已经存在某个 11 字节 8.3 名（跳过 LFN 项、卷标项与已删除项）
+ * 返回 1=已存在 · 0=不存在 · -1=镜像损坏（簇链成环/读失败） */
 static int dir_has_83(img_fat32_fs *fs, uint32_t dirclus, const uint8_t n83[11]){
     size_t csz = (size_t)fs->L.sectors_per_cluster * 512;
     uint8_t *buf = malloc(csz);
-    if(!buf) return 0;
-    uint32_t c = dirclus;
+    if(!buf) return -1;
+    uint32_t c = dirclus; uint64_t guard=0;
     while(c>=2 && c<FAT32_EOC){
-        if(rd(fs, clus_off(fs,c), buf, csz)){ free(buf); return 0; }
+        if(FAT32_CHAIN_GUARD(fs,guard)){ free(buf); return -1; }
+        if(rd(fs, clus_off(fs,c), buf, csz)){ free(buf); return -1; }
         for(size_t i=0;i+ENTRY_SIZE<=csz;i+=ENTRY_SIZE){
             uint8_t *e = buf+i;
             if(e[0]==0x00){ free(buf); return 0; }              /* 目录结束 */
@@ -205,7 +218,10 @@ static void make_short_83(img_fat32_fs *fs, uint32_t dirclus, const char *name,
                           uint8_t out83[11], bool *aliased){
     char pad[12]; name_to_83(name, pad);
     if(aliased) *aliased=false;
-    if(!dir_has_83(fs, dirclus, (const uint8_t*)pad)){ memcpy(out83,pad,11); return; }
+    {   int hv = dir_has_83(fs, dirclus, (const uint8_t*)pad);
+        if(hv<0){ memcpy(out83,pad,11); return; }      /* 损坏：改名没意义，退回规范名 */
+        if(!hv){ memcpy(out83,pad,11); return; }
+    }
     int blen=0; while(blen<8 && pad[blen]!=' ') blen++;
     char ext[3]; for(int k=0;k<3;k++) ext[k]=pad[8+k];
     for(int n=1;n<1000000;n++){
@@ -216,7 +232,9 @@ static void make_short_83(img_fat32_fs *fs, uint32_t dirclus, const char *name,
         memcpy(cand, pad, (size_t)keep);
         memcpy(cand+keep, num, (size_t)nl);
         memcpy(cand+8, ext, 3);
-        if(!dir_has_83(fs, dirclus, cand)){ memcpy(out83,cand,11); if(aliased) *aliased=true; return; }
+        int cv = dir_has_83(fs, dirclus, cand);
+        if(cv<0) break;                                 /* 损坏：放弃找唯一名 */
+        if(!cv){ memcpy(out83,cand,11); if(aliased) *aliased=true; return; }
     }
     memcpy(out83, pad, 11);
 }
@@ -253,7 +271,9 @@ static int dir_find(img_fat32_fs *fs, uint32_t dirclus, const char *want, dir_en
     dir_ent fb83; memset(&fb83,0,sizeof fb83);
     bool have_fb83=false;
     uint32_t c = dirclus;
+    uint64_t guard=0;
     while(c>=2 && c<FAT32_EOC){
+        if(FAT32_CHAIN_GUARD(fs,guard)){ free(buf); return IMG_ECORRUPT; }
         uint64_t coff = clus_off(fs, c);
         if(rd(fs, coff, buf, csz)){ free(buf); return IMG_EIO; }
         for(size_t i=0;i+ENTRY_SIZE<=csz;i+=ENTRY_SIZE){
@@ -376,7 +396,9 @@ static int dir_make_room(img_fat32_fs *fs, uint32_t dirclus, int nslots, uint64_
     uint8_t *buf = malloc(csz);
     if(!buf) return IMG_ENOMEM;
     uint32_t c = dirclus, prev=0;
+    uint64_t guard=0;
     while(c>=2 && c<FAT32_EOC){
+        if(FAT32_CHAIN_GUARD(fs,guard)){ free(buf); return IMG_ECORRUPT; }
         uint64_t coff = clus_off(fs, c);
         if(rd(fs, coff, buf, csz)){ free(buf); return IMG_EIO; }
         int run=0; uint64_t run_start=0;
@@ -481,6 +503,22 @@ static int dir_add_entry(img_fat32_fs *fs, uint32_t dirclus, const char *name,
     /* 8.3 项（用 make_short_83 定下的唯一短名，而不是再算一遍） */
     uint8_t d[ENTRY_SIZE]; memset(d,0,ENTRY_SIZE);
     memcpy(d, n83, 11);
+    /* ★ 目录项字节明细（debug 档）：这一行就是为了"写成功但外部不认"那类问题
+     *   准备的 —— LFN type/簇号、attr、短名别名，一眼能看出异常。*/
+    {
+        img_ev e;
+        if(img_ev_init(&e,IMG_LV_DEBUG,"fat32","entry",IMG_OK,"写入目录项")){
+            char n83s[13]; memcpy(n83s,n83,11); n83s[11]=0;
+            img_ev_str(&e,"name",name);
+            img_ev_str(&e,"short",n83s);
+            img_ev_u64(&e,"attr",is_dir?ATTR_DIR:(d[11]|0));
+            img_ev_u64(&e,"lfn",(uint64_t)lfn_slots);
+            img_ev_u64(&e,"alias",aliased?1u:0u);
+            img_ev_u64(&e,"clus",clus);
+            img_ev_u64(&e,"size",size);
+            img_ev_emit(&e);
+        }
+    }
     d[11] = is_dir ? ATTR_DIR : 0x00;
     put_u16(d+20, (uint16_t)(clus >> 16));   /* FstClusHI */
     put_u16(d+26, (uint16_t)(clus & 0xFFFF));/* FstClusLO */
@@ -606,10 +644,15 @@ int img_fat32_put_data(img_fat32_fs *fs, const void *data, size_t len, const cha
 int img_fat32_put_file(img_fat32_fs *fs, const char *local_path,
                        const char *dst_abs_path, img_prog *prog){
     if(!fs||!local_path||!dst_abs_path) return IMG_EINVAL;
+    img_span sp;
+    img_span_prep(&sp,"fat32","put","写入 FAT32");
+    img_span_kv_str(&sp,"path",dst_abs_path);
     int fd = open(local_path, O_RDONLY);
     if(fd<0) return IMG_ENOENT;
     struct stat st; if(fstat(fd,&st)<0){ close(fd); return IMG_EIO; }
     size_t len=(size_t)st.st_size;
+    img_span_kv_u64(&sp,"size",len);
+    img_span_begin(&sp);
     void *buf = len? malloc(len) : malloc(1);
     if(!buf){ close(fd); return IMG_ENOMEM; }
     size_t got=0;
@@ -621,6 +664,8 @@ int img_fat32_put_file(img_fat32_fs *fs, const char *local_path,
     close(fd);
     int rc = write_data(fs, buf, got, dst_abs_path);
     free(buf);
+    img_span_kv_u64(&sp,"written",(uint64_t)got);
+    img_span_end(&sp,rc);
     if(rc==IMG_OK && prog){
         img_prog_phase(prog, IMG_PH_COPY, "写入 FAT32");
         img_prog_op(prog, IMG_OP_WRITE_FILE);
@@ -642,7 +687,9 @@ int img_fat32_read_file(img_fat32_fs *fs, const char *abs_path, void **out, size
     if(!buf) return IMG_ENOMEM;
     size_t csz=(size_t)fs->L.sectors_per_cluster*512;
     uint32_t c=e.cluster, done=0;
+    uint64_t guard=0;
     while(c>=2 && c<FAT32_EOC && done<e.size){
+        if(FAT32_CHAIN_GUARD(fs,guard)){ free(buf); return IMG_ECORRUPT; }
         size_t n = (e.size-done < csz)? (e.size-done) : csz;
         if(rd(fs, clus_off(fs,c), (uint8_t*)buf+done, n)){ free(buf); return IMG_EIO; }
         done += n;
@@ -668,7 +715,9 @@ int img_fat32_list_dir(img_fat32_fs *fs, const char *abs_path, img_fat32_list_cb
     if(!buf) return IMG_ENOMEM;
     char lfn[260]; lfn[0]=0; bool have=false;
     uint32_t c=dir;
+    uint64_t guard=0;
     while(c>=2 && c<FAT32_EOC){
+        if(FAT32_CHAIN_GUARD(fs,guard)){ free(buf); return IMG_ECORRUPT; }
         if(rd(fs, clus_off(fs,c), buf, csz)){ free(buf); return IMG_EIO; }
         bool stop=false;
         for(size_t i=0;i+ENTRY_SIZE<=csz;i+=ENTRY_SIZE){
@@ -708,6 +757,11 @@ int img_fat32_list_dir(img_fat32_fs *fs, const char *abs_path, img_fat32_list_cb
     return IMG_OK;
 }
 
+/* 只数条目（用于判断目录是否为空）*/
+static void count_cb(void *ud, const char *nm, bool d, uint64_t sz){
+    (void)nm;(void)d;(void)sz; (*(int*)ud)++;
+}
+
 int img_fat32_rm(img_fat32_fs *fs, const char *abs_path){
     if(!fs||!abs_path) return IMG_EINVAL;
     uint32_t dir; char nm[256];
@@ -715,14 +769,25 @@ int img_fat32_rm(img_fat32_fs *fs, const char *abs_path){
     dir_ent e;
     if(dir_find(fs, dir, nm, &e)!=IMG_OK || !e.found) return IMG_ENOENT;
     if(e.is_dir){
-        /* 只允许删空目录 */
-        int cnt=0;
-        img_fat32_list_dir(fs, abs_path, (img_fat32_list_cb){0}, NULL);
-        /* 简化：非空时仍尝试删除会破坏数据，这里保守返回 ENOTEMPTY */
-        /* （App 层需要递归删除时可自己先递归 rm）*/
-        (void)cnt;
+        /* 只允许删空目录：非空时保守返回 ENOTEMPTY
+         * ★ 原先这里写的是 img_fat32_list_dir(..., (img_fat32_list_cb){0}, ...) ——
+         *   传了个 NULL 回调（死代码）。目前靠 list_dir 内部 `!cb` 检查侥幸没崩，
+         *   但谁把那个检查一去掉就是空指针调用。改成明确判空。
+         *   （App 层要递归删除时自己先递归 rm）*/
+        uint32_t d2; char nm2[256]; int cnt=0;
+        if(split_parent(fs, abs_path, &d2, nm2, sizeof nm2)==IMG_OK){
+            dir_ent sub;
+            if(dir_find(fs, d2, nm2, &sub)==IMG_OK && sub.found)
+                img_fat32_list_dir(fs, abs_path, count_cb, &cnt);
+        }
+        if(cnt>2) return IMG_ENOTSUP;      /* 只有 . 与 .. 才算空 */
     }
-    if(e.cluster>=2) free_chain(fs, e.cluster);
+    if(e.cluster>=2){
+        /* ★ 必须检查返回值：链损坏时 free_chain 现在会返回 IMG_ECORRUPT，
+         *   原先丢掉返回值 = 以为释放成功、把目录项标删，留下断链的半删除状态。*/
+        int frc = free_chain(fs, e.cluster);
+        if(frc!=IMG_OK) return frc;
+    }
     uint8_t d[ENTRY_SIZE];
     if(rd(fs, e.slot_off, d, ENTRY_SIZE)) return IMG_EIO;
     d[0]=0xE5;
