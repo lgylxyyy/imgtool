@@ -17,3 +17,6 @@ target_link_libraries(imgmkfs PRIVATE imgtool)
 
 add_executable(imgbc imgbc.c)
 target_link_libraries(imgbc PRIVATE imgtool)
+
+add_executable(imgfixboot imgfixboot.c)
+target_link_libraries(imgfixboot PRIVATE imgtool)

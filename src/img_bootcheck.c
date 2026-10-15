@@ -344,11 +344,15 @@ int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *ou
         if(img_qcow2_read_full(q,lbaB*512,b10,sizeof b10)==IMG_OK){
             bool allnz=false;
             for(size_t i=512;i<sizeof b10 && !allnz;i++) if(b10[i]){ allnz=true; break; }
+            /* 升级为硬指标：BIOS 必须有引导代码（mkntfs 不写，得跑 img_fixboot）
+             * 依据：实测 mkntfs 格式化后扇区1..9 差 3825 字节全零；
+             *       真实 Windows 安装与 Xlite 的该段【逐字节相同】= 官方机器码 */
             add(out,"ntfs.code","NTFS $Boot 扇区 0..9 有引导器代码",
-                out->is_uefi?IMG_CK_INFO:IMG_CK_WARN, allnz,
+                out->is_uefi?IMG_CK_INFO:IMG_CK_REQUIRED, allnz,
                 out->is_uefi
                   ? (allnz?"检测到引导代码":"扇区1-9 全零（UEFI 不依赖此处，仅参考）")
-                  : (allnz?"检测到引导代码":"扇区1-9 全零 — BIOS 靠这段进入 bootmgr，缺了起不来"));
+                  : (allnz?"检测到引导代码"
+                          :"扇区1-9 全零 — mkntfs 不写引导代码，必须跑 imgfixboot 补上"));
         }
     }
     if(ntp>=0){   /* ---- 系统文件：查 ntp ---- */

@@ -28,6 +28,7 @@ set(IMG_SOURCES
   src/img_constraints.c
   src/img_fat32.c
   src/img_ntfs_dev.c
+  src/img_fixboot.c
 )
 
 # ---- zlib（qcow2 压缩簇必需；安卓 NDK 自带或可交叉编译）----
