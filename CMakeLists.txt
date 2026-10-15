@@ -20,6 +20,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 set(IMG_SOURCES
   src/img_types.c
+  src/img_event.c
   src/img_progress.c
   src/img_io.c
   src/img_qcow2.c
