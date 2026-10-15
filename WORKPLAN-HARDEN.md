@@ -65,9 +65,52 @@ FAT    真正的问题所在：多处 `while(c>=2 && c<FAT32_EOC)` 沿链走，
 
 ---
 ## 执行记录（边做边填）
+
 | 阶段 | 状态 | 自验结果 |
 |---|---|---|
-| P0-1 | | |
-| P0-2 | | |
-| P1-3 | | |
-| P1-4 | | |
+| P0-1 簇链加界 | ✅ 已提交 `5d91c9e` | 反向用例 `tests/corrupt-chain-test.sh`：环状 FAT 从"永久死循环"变为 <2s 返回 `IMG_ECORRUPT`；顺带修出 2 个真缺陷（rm 丢 free_chain 错误码、空目录判断传 NULL 回调） |
+| P0-附加 非法参数 | ✅ 已提交 `a71e0c3` `7c18145` | 见下表：130 条非法输入，修前 4 崩（含 1 处**毁镜像**），修后 **0 崩 0 毁盘** |
+| P0-2 取消接线 | ⬜ 未做 | — |
+| P1-3 CLI 进度可见 | 🟡 部分（事件流骨架 `c7d2b1e` 已就绪） | 里程碑/心跳/轮转已可验证；人话渲染与失败卡片未做 |
+| P1-4 FAT 写分块 | ⬜ 未做 | — |
+
+### 非法参数矩阵结果（回答"App 传参会不会炸"）
+
+```
+第一轮 NULL/空串/垃圾：90 条   修前 2 崩  →  修后 0 崩
+第二轮 极端值（真实镜像）：40 条  修前 2 崩  →  修后 0 崩 · 0 毁数据
+```
+修掉的 4 处（都是真 bug，已提交）：
+```
+1. img_bcd_open_file(NULL)            NULL 直传 libhivex → 段错误
+2. img_ev_emit(未 init 的结构)         段错误 → 加 magic 哨兵拒绝
+3. img_qcow2_read_full(len 传错)       越界写调用方缓冲区 → 崩（改成先判范围、一字不写）
+4. img_qcow2_expand(UINT64_MAX)       ★ 把镜像头部 size 改成 UINT64_MAX，
+   img_qcow2_write(offset+len 回绕)      qemu-img 从此打不开（毁用户数据，比崩更糟）
+```
+复现命令：
+```bash
+# UBSan 版库（ASAN 在 proot 沙箱起不来：影子内存 mmap 受限）
+cmake -B build-ub -DCMAKE_C_FLAGS="-fsanitize=undefined -fno-sanitize-recover=all -g" \
+      -DIMG_WITH_NTFS=ON -DIMG_BUILD_TOOLS=OFF -DIMG_BUILD_TESTS=OFF && cmake --build build-ub -j4
+gcc -fsanitize=undefined -g -Iinclude -DIMG_HAVE_ZLIB=1 -DIMG_WITH_NTFS=1 -o /tmp/argfuzz \
+    tests/argfuzz.c src/img_bcd.c build-ub/libimgtool.a -lntfs-3g -lwim -lz -lhivex
+/tmp/argfuzz        # → 90 条 / 崩溃 0
+
+# 第二个矩阵需要一张模板盘 + 工作目录（每用例复制一张独立盘再跑）
+T=build/tools; W=/tmp/afz; rm -rf $W; mkdir -p $W
+$T/imglayout mk $W/tpl.qcow2 $((20*1024*1024*1024)) gpt --esp 200 --msr 16
+LBA=$($T/imgpart show $W/tpl.qcow2 | python3 -c "import sys,json;d=json.load(sys.stdin);print([p['first'] for p in d['parts'] if p['typeGuid'].startswith('c12a7328')][0])")
+$T/imgmkfs $W/tpl.qcow2 --mkfs $LBA TEST
+/tmp/argfuzz_img $W/tpl.qcow2 $LBA $W     # → 40 条 / 崩溃 0 / 用例盘全部通过 qemu-img check
+```
+
+### 尚未覆盖（诚实清单，别当成已经安全）
+```
+⬜ 并发：库用全局状态（img_event 的 G、ntfs ctx）→ 同一时刻只能一个操作；
+    App 多线程同时调会互相踩。需要"句柄化 + 锁"或明确契约（未做）
+⬜ fd 生命周期：App 提前关 fd / 传错 fd（传了别的文件）→ 未测
+⬜ 32 位 Android（arm32，size_t 32 位）→ 未测（当前只在 64 位下验过）
+⬜ 超时/卡死：底层读卡住无法中断（P0-2 取消接线后可缓解）
+⬜ 内存峰值：img_fat32_put_file 整文件进内存（P1-4）
+```
