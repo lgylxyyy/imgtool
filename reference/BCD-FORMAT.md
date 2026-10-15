@@ -142,3 +142,41 @@ NewStoreRoot/                    ← 根名固定（不是 "BCD"）
 ## 六、许可证
 
 `libhivex`：**LGPL-2.1+**（动态链接即可）。已在 THIRD_PARTY.md 登记。
+
+---
+
+# 六、GUID 列表元素的存储类型（血泪教训）
+
+元素 ID 的 `format` 段决定**存储类型**：
+
+| format 段 | 含义 | 存储为 | 结尾 |
+|---|---|---|---|
+| 2 = string | 字符串 | `REG_SZ` (hive_t=1) | 单 NUL |
+| 3 = GUID | **单个** GUID | `REG_SZ` (hive_t=1) 存 `{...}` 文本 | 单 NUL |
+| 4 = GUID list | **GUID 列表** | `REG_MULTI_SZ` (hive_t=7) | **双 NUL** |
+| 5 = integer | 整数 | `REG_BINARY` (hive_t=3) 小端 | — |
+| 6 = boolean | 布尔 | `REG_BINARY` (hive_t=3) | — |
+
+实测对照：
+```
+DisplayOrder      24000001   t=7  len=80   尾部 00 00  ← REG_MULTI_SZ ✓
+ToolsDisplayOrder 24000010   t=7  len=80   尾部 00 00
+RecoverySequence  14000008   t=7  len=80   尾部 00 00  ← 同上（修对后）
+```
+
+> ⚠ **把 GUID 列表写成 REG_SZ 会让 bootmgr 直接判定整个 BCD 无效**，
+> 报 `0xc0000098`「BCD 不含有效操作系统信息」—— 且失败发生在读 BCD 阶段，
+> OS 条目根本没机会被尝试。这正是"加了个恢复条目反而开不了机"的原因。
+
+# 七、device 对象（88 字节分区设备）
+
+```
+[0..15]  GUID = 0
+[16..19] type = 6 分区设备 / 5 本地设备(跟 BCD 所在分区) / 1 ramdisk
+[24..27] size = 72
+[32..47] 分区唯一 GUID（前3段小端、后2段按字节）
+[56..71] 磁盘 GUID（同编码）
+```
+> ⚠ ramdisk 的 `ramdisksdidevice` 在官方 ISO 里是 `type=5 本地设备`；
+> 若 WIM 在**独立分区**上，必须改成 `type=6` 显式指向该分区，否则 bootmgr
+> 会去 BCD 所在分区找 wim → 失败。
