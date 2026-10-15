@@ -32,3 +32,4 @@ tools/imgtest_progress
 .DS_Store
 *.swp
 *~
+imgtool-dev
