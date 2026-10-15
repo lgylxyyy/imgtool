@@ -12,7 +12,7 @@ static const char *ISO_BCD = "/tmp/iso/bcd";
 int main(int argc, char **argv){
     const char *src = argc>1?argv[1]:"reference/bcd-reference-uefi.bin";
     const char *dst = argc>2?argv[2]:"/tmp/bcd_recovery.bin";
-    const char *WIM = "/Recovery/WindowsRE/winre.wim";
+    const char *WIM = argc>3?argv[3]:"/Recovery/WindowsRE/winre.wim";
 
     FILE *fp=fopen(ISO_BCD,"rb");
     if(!fp){ printf("❌ 缺少官方 ISO BCD 参考 %s（先解 ISO）\n", ISO_BCD); return 2; }
@@ -39,8 +39,12 @@ int main(int argc, char **argv){
                                         WIM)==IMG_OK, "补丁返回 OK");
 
     printf("⑤ 改 ramdiskoptions 的 boot.sdi 路径\n");
-    ENSURE(img_bcd_set_string(b, IMG_BCD_GUID_ISO_RAMDISK, IMG_BCD_EL_BOOTSDI_PATH,
-                              "\\Recovery\\WindowsRE\\boot.sdi")==IMG_OK, "写入 OK");
+    /* boot.sdi 路径跟随 WIM 同目录推导不了就用同级约定：与 WIM 同目录 */
+    { char sdi[256]; snprintf(sdi,sizeof sdi, "%s", WIM);
+      char *slash=strrchr(sdi,'/');
+      if(slash){ strcpy(slash+1, "boot.sdi"); }
+      else { snprintf(sdi,sizeof sdi, "/boot.sdi"); }
+      ENSURE(img_bcd_set_string(b, IMG_BCD_GUID_ISO_RAMDISK, IMG_BCD_EL_BOOTSDI_PATH, sdi)==IMG_OK, "写入 boot.sdi 路径"); }
 
     printf("⑥ 挂到 bootmgr 的 RecoverySequence(14000008)\n");
     ENSURE(img_bcd_set_recovery_sequence(b, IMG_BCD_GUID_ISO_WINPE)==IMG_OK, "写入 OK");

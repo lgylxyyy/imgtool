@@ -20,3 +20,10 @@ target_link_libraries(imgbc PRIVATE imgtool)
 
 add_executable(imgfixboot imgfixboot.c)
 target_link_libraries(imgfixboot PRIVATE imgtool)
+
+add_executable(imgntfscp imgntfscp.c)
+target_link_libraries(imgntfscp PRIVATE imgtool)
+target_sources(imgntfscp PRIVATE /workspace/build/mkntfs_obj/ntfscp.o)
+
+add_executable(imgraw imgraw.c)
+target_link_libraries(imgraw PRIVATE imgtool)

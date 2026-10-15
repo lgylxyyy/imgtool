@@ -420,9 +420,20 @@ int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *ou
         uint64_t sz=(t.parts[P.rec].last_lba-t.parts[P.rec].first_lba+1)*512;
         add(out,"rec.type","恢复分区类型 GUID de94bba4",IMG_CK_INFO,true,
             "LBA %llu",(unsigned long long)lba);
-        bool has_wim = ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/winre.wim");
-        add(out,"rec.winre","winre.wim 存在",IMG_CK_WARN,has_wim,
-            has_wim?"找到恢复映像":"恢复分区内没有 winre.wim");
+        /* 兼容两种布局：标准路径 /Recovery/WindowsRE/ 与 根目录（本工具链当前用根目录，
+         * 因为 ntfscp 只能建文件不能建目录 —— 建目录属 NTFS 写入能力，见 Stage B）*/
+        bool w_std  = ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/winre.wim");
+        bool w_root = w_std ? false : ntfs_path_exists(q,lba,sz,"/Winre.wim");
+        bool s_std  = ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/boot.sdi");
+        bool s_root = s_std ? false : ntfs_path_exists(q,lba,sz,"/boot.sdi");
+        add(out,"rec.winre","winre.wim 存在",IMG_CK_WARN, w_std||w_root,
+            (w_std||w_root)
+              ? (w_std ? "在标准路径找到恢复映像" : "在分区根目录找到恢复映像")
+              : "恢复分区内没有 winre.wim");
+        add(out,"rec.bootsdi","boot.sdi 存在",IMG_CK_WARN, s_std||s_root,
+            (s_std||s_root)
+              ? (s_std ? "在标准路径找到" : "在根目录找到")
+              : "缺 boot.sdi — ramdisk 无法加载 winre.wim（高级启动会失败）");
     }
 
     if(prog) img_prog_done(prog,"检查完成");
