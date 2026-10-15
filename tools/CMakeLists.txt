@@ -27,3 +27,7 @@ target_sources(imgntfscp PRIVATE /workspace/build/mkntfs_obj/ntfscp.o)
 
 add_executable(imgraw imgraw.c)
 target_link_libraries(imgraw PRIVATE imgtool)
+
+add_executable(imgntfsfs imgntfsfs.c)
+target_link_libraries(imgntfsfs PRIVATE imgtool)
+target_sources(imgntfsfs PRIVATE /workspace/build/mkntfs_obj/ntfsls.o /workspace/build/mkntfs_obj/ntfscat.o)

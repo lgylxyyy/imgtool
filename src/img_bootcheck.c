@@ -6,6 +6,7 @@
 #include "img_fat32.h"
 #include "img_ntfs_fmt.h"
 #include "img_ntfs_dev.h"
+#include "ntfs_bridge.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -15,28 +16,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <ntfs-3g/types.h>
-#include <ntfs-3g/layout.h>
-#include <ntfs-3g/volume.h>
-#include <ntfs-3g/device.h>
-#include <ntfs-3g/inode.h>
-#include <ntfs-3g/unistr.h>
-#include <ntfs-3g/dir.h>
 
-/* ---------- ntfs_device_operations 桥接（复用同一套回调） ---------- */
-static s64  b_seek (struct ntfs_device *d, s64 o, int w){ (void)d; return img_ntfs_cb_seek((void*)img_ntfs_get_active_ctx(),(long long)o,w); }
-static s64  b_read (struct ntfs_device *d, void *p, s64 c){ (void)d; return img_ntfs_cb_read((void*)img_ntfs_get_active_ctx(),p,(long long)c); }
-static s64  b_pread(struct ntfs_device *d, void *p, s64 c, s64 o){ (void)d; return img_ntfs_cb_pread((void*)img_ntfs_get_active_ctx(),p,(long long)c,(long long)o); }
-static s64  b_write(struct ntfs_device *d, const void *p, s64 c){ (void)d; return img_ntfs_cb_write((void*)img_ntfs_get_active_ctx(),p,(long long)c); }
-static s64  b_pwrite(struct ntfs_device *d, const void *p, s64 c, s64 o){ (void)d; return img_ntfs_cb_pwrite((void*)img_ntfs_get_active_ctx(),p,(long long)c,(long long)o); }
-static int  b_open (struct ntfs_device *d, int f){ (void)d;(void)f; return img_ntfs_cb_open((void*)img_ntfs_get_active_ctx(),0); }
-static int  b_close(struct ntfs_device *d){ (void)d; return img_ntfs_cb_close((void*)img_ntfs_get_active_ctx()); }
-static int  b_sync (struct ntfs_device *d){ (void)d; return img_ntfs_cb_sync((void*)img_ntfs_get_active_ctx()); }
-static int  b_stat (struct ntfs_device *d, struct stat *s){ (void)d; return img_ntfs_cb_stat((void*)img_ntfs_get_active_ctx(),s); }
-static int  b_ioctl(struct ntfs_device *d, unsigned long r, void *a){ (void)d; return img_ntfs_cb_ioctl((void*)img_ntfs_get_active_ctx(),r,a); }
-
-static struct ntfs_device_operations ROPS = { b_open,b_close,b_seek,b_read,b_write,
-                                               b_pread,b_pwrite,b_sync,b_stat,b_ioctl };
+/* 设备桥接统一在 ntfs_bridge.c（本文件用 img_ntfs_device_ops()）*/
 
 /* ---------- 用 libntfs-3g 查 NTFS 里某个路径是否存在 ---------- */
 static bool ntfs_path_exists(img_qcow2 *q, uint64_t lba, uint64_t bytes, const char *path){
@@ -45,7 +26,7 @@ static bool ntfs_path_exists(img_qcow2 *q, uint64_t lba, uint64_t bytes, const c
     img_ntfs_ctx_activate(q,lba,bytes);
     int dfd = open("imgtool-dev", O_RDWR|O_CREAT|O_TRUNC, 0666);
     if(dfd>=0) close(dfd);
-    struct ntfs_device *dev = ntfs_device_alloc("imgtool-dev",0,&ROPS,NULL);
+    struct ntfs_device *dev = ntfs_device_alloc("imgtool-dev",0,img_ntfs_device_ops(),NULL);
     if(!dev){ img_ntfs_ctx_deactivate(); return false; }
 
     ntfs_volume *vol = ntfs_device_mount(dev, NTFS_MNT_RDONLY);
@@ -435,9 +416,17 @@ int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *ou
             attr_ok ? "" : ((attr & IMG_GPT_ATTR_PLATFORM_REQUIRED) ? "bit63" : "bit0 必需位"));
         /* 兼容两种布局：标准路径 /Recovery/WindowsRE/ 与 根目录（本工具链当前用根目录，
          * 因为 ntfscp 只能建文件不能建目录 —— 建目录属 NTFS 写入能力，见 Stage B）*/
-        bool w_std  = ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/winre.wim");
-        bool w_root = w_std ? false : ntfs_path_exists(q,lba,sz,"/Winre.wim");
-        bool s_std  = ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/boot.sdi");
+        /* Windows 把它写作 Winre.wim，bcdedit/reagentc 用 winre.wim —— 两种都试。
+         * 实测 ntfs_inode_lookup_by_name 在本环境对首字母大小写是敏感的，
+         * 真实卷上也常混用，故显式枚举常见写法而不是依赖大小写折叠。 */
+        bool w_std  = ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/Winre.wim")
+                   || ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/winre.wim")
+                   || ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/WINRE.WIM");
+        bool w_root = w_std ? false
+                   : (ntfs_path_exists(q,lba,sz,"/Winre.wim")
+                   || ntfs_path_exists(q,lba,sz,"/winre.wim"));
+        bool s_std  = ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/boot.sdi")
+                   || ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/Boot.sdi");
         bool s_root = s_std ? false : ntfs_path_exists(q,lba,sz,"/boot.sdi");
         add(out,"rec.winre","winre.wim 存在",IMG_CK_WARN, w_std||w_root,
             (w_std||w_root)
