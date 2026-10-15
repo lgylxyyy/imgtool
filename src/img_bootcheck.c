@@ -292,6 +292,12 @@ int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *ou
 
     parts_t P = locate_parts(q,&t);
     P.os = find_os_partition(q,&t,P.os);   /* 用 \Windows 存在性确认，而非只看容量 */
+    int actp = -1;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t.parts[i].used && t.parts[i].status==0x80){ actp=i; break; }
+    /* ★ $Boot 引导代码的检查对象要分模式：
+     *   UEFI 用系统分区（其实 ESP 不是 NTFS，此项仅作参考）
+     *   BIOS 必须查【活动分区】—— bootsect.exe 把引导代码写在那里 */
 
     /* ── ① 分区表层 ── */
     if(out->is_uefi){
@@ -323,23 +329,30 @@ int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *ou
     int ntp = -1;
     if(out->is_uefi) ntp = P.os;
     else ntp = P.os>=0?P.os:P.bootp;
-    if(ntp>=0){
-        uint64_t lba=t.parts[ntp].first_lba;
-        img_ntfs_info_t ni;
-        int nrc = img_ntfs_probe(q,lba,&ni);
-        add(out,"ntfs.boot","NTFS $Boot 扇区",IMG_CK_REQUIRED,nrc==IMG_OK,
-            nrc==IMG_OK? "OEM=NTFS spc=%u 总扇区=%llu":"读不到或签名不对 (%s)",
-            nrc==IMG_OK?(unsigned)ni.sectors_per_cluster:0,
-            nrc==IMG_OK?(unsigned long long)ni.total_sectors:0ULL,
-            nrc!=IMG_OK?img_strerror(nrc):"");
+    int bcp = out->is_uefi ? ntp : (actp>=0 ? actp : ntp);   /* 引导代码所在分区 */
+    if(bcp>=0){
+        /* ---- $Boot 扇区与引导代码：查 bcp ---- */
+        uint64_t lbaB=t.parts[bcp].first_lba;
+        img_ntfs_info_t niB;
+        int nrcB = img_ntfs_probe(q,lbaB,&niB);
+        add(out,"ntfs.boot","NTFS $Boot 扇区",IMG_CK_REQUIRED,nrcB==IMG_OK,
+            nrcB==IMG_OK? "OEM=NTFS spc=%u 总扇区=%llu (LBA %llu)":"读不到或签名不对 (%s)",
+            nrcB==IMG_OK?(unsigned)niB.sectors_per_cluster:0,
+            nrcB==IMG_OK?(unsigned long long)niB.total_sectors:0ULL,
+            (unsigned long long)lbaB, nrcB!=IMG_OK?img_strerror(nrcB):"");
         uint8_t b10[10*512];
-        if(img_qcow2_read_full(q,lba*512,b10,sizeof b10)==IMG_OK){
-            bool allnz = false;
-            /* 扇区1..9 应有引导器代码（至少非全零）*/
+        if(img_qcow2_read_full(q,lbaB*512,b10,sizeof b10)==IMG_OK){
+            bool allnz=false;
             for(size_t i=512;i<sizeof b10 && !allnz;i++) if(b10[i]){ allnz=true; break; }
-            add(out,"ntfs.code","NTFS $Boot 扇区 0..9 有引导器代码",IMG_CK_WARN,allnz,
-                allnz?"检测到引导代码":"扇区1-9 全零 — mkntfs 只写0，Windows 就是靠这里启动");
+            add(out,"ntfs.code","NTFS $Boot 扇区 0..9 有引导器代码",
+                out->is_uefi?IMG_CK_INFO:IMG_CK_WARN, allnz,
+                out->is_uefi
+                  ? (allnz?"检测到引导代码":"扇区1-9 全零（UEFI 不依赖此处，仅参考）")
+                  : (allnz?"检测到引导代码":"扇区1-9 全零 — BIOS 靠这段进入 bootmgr，缺了起不来"));
         }
+    }
+    if(ntp>=0){   /* ---- 系统文件：查 ntp ---- */
+        uint64_t lba=t.parts[ntp].first_lba;
         uint64_t sz=(t.parts[ntp].last_lba-t.parts[ntp].first_lba+1)*512;
         add(out,"ntfs.winload","系统文件 \\Windows\\system32\\winload",
             IMG_CK_REQUIRED,
