@@ -10,6 +10,9 @@
 #include <sys/stat.h>
 
 img_ntfs_ctx *img_ntfs_ctx_new(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes){
+    /* 注意：part_lba 是【分区起始扇区】，这里会 ×512 得到字节基址。
+     * 所有传进来的读写偏移都必须是【相对分区起点】的，不是相对整盘 ——
+     * mkntfs/ntfscp 看到的就是一块独立裸盘，它不知道外面还有分区表。 */
     if(!q || part_bytes == 0) return NULL;
     img_ntfs_ctx *c = calloc(1, sizeof *c);
     if(!c) return NULL;
