@@ -25,8 +25,8 @@ int main(int argc, char **argv){
            "bootmgr 有 Device(12000002)");
     ENSURE(img_bcd_has_element(b, IMG_BCD_GUID_BOOTMGR, IMG_BCD_EL_DISPLAYORDER),
            "bootmgr 有 DisplayOrder(24000001)");
-    ENSURE(img_bcd_has_element(b, IMG_BCD_GUID_BOOTMGR, IMG_BCD_EL_RECOVERYSEQ),
-           "bootmgr 有 RecoverySequence(25000004)");
+    ENSURE(!img_bcd_has_element(b, IMG_BCD_GUID_BOOTMGR, IMG_BCD_EL_RECOVERYSEQ),
+           "参考 BCD 原本没有 RecoverySequence（符合预期，4 份真值都是如此）");
 
     printf("④ 读 bootmgr 的 device 路径（应为相对路径，可移植）\n");
     char *dev = img_bcd_get_string(b, IMG_BCD_GUID_BOOTMGR, IMG_BCD_EL_DEVICE);
@@ -39,9 +39,11 @@ int main(int argc, char **argv){
     rc = img_bcd_set_bootmgr_name(b, "Icdqcow2 Windows");
     ENSURE(rc==IMG_OK, "修改返回 OK");
 
-    printf("⑥ RecoverySequence（元素 ID 未确认 → 应返回 IMG_ENOTSUP 拒绝写入）\n");
+    printf("⑥ 写 RecoverySequence（权威 ID = 14000008，GUID list）\n");
     rc = img_bcd_set_recovery_sequence(b, "b0b53260-3b27-4f0a-8d0f-6b3e0c1a2b3c");
-    ENSURE(rc==IMG_ENOTSUP, "未确认 ID 时拒绝写入（防止污染 Timeout 元素）");
+    ENSURE(rc==IMG_OK, "写入返回 OK");
+    ENSURE(img_bcd_has_element(b, IMG_BCD_GUID_BOOTMGR, IMG_BCD_EL_RECOVERYSEQ),
+           "bootmgr 下出现 14000008 元素");
 
     printf("⑦ 落盘\n");
     rc = img_bcd_save(b, dst);
@@ -55,6 +57,14 @@ int main(int argc, char **argv){
     printf("     显示名 = %s\n", nm?nm:"(null)");
     ENSURE(nm && strcmp(nm,"Icdqcow2 Windows")==0, "显示名已生效");
     free(nm);
+    char *rs = img_bcd_get_string(c, IMG_BCD_GUID_BOOTMGR, IMG_BCD_EL_RECOVERYSEQ);
+    printf("     RecoverySequence = %s\n", rs?rs:"(null)");
+    ENSURE(rs && strstr(rs,"b0b53260")!=NULL, "RecoverySequence 重读校验生效");
+    free(rs);
+    /* 同时确认没写坏 Timeout(25000004) —— 一旦写错元素就会在这里露馅 */
+    char *to = img_bcd_get_string(c, IMG_BCD_GUID_BOOTMGR, "25000004");
+    ENSURE(to==NULL, "Timeout(25000004) 是整数，get_string 正确返回 NULL（不产出垃圾）");
+    free(to);
     char g2[64];
     ENSURE(img_bcd_get_display_order_first(c,g2,sizeof g2)==IMG_OK && strcmp(g2,guid)==0,
            "DisplayOrder 未被破坏");

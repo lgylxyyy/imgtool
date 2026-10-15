@@ -37,16 +37,36 @@ extern "C" {
 #define IMG_BCD_EL_INHERITS      "14000006"
 #define IMG_BCD_EL_SYSROOT       "22000002"
 #define IMG_BCD_EL_DISPLAYORDER  "24000001"
-/* ★ 元素 ID 实测修正（来自 4 份真实 BCD 对照）：
- *   25000004 实测值恒为小数字 3/30/30/3 —— 这是【Timeout(秒)】，不是 RecoverySequence。
- *   24000001 = DisplayOrder (GUID 列表, t=7)
- *   24000010 = ToolsDisplayOrder (GUID 列表, t=7)
- *   23000003 = 指向默认加载器的 GUID 字符串
- *   32000004 = RAMDisk SDI 路径（\boot\boot.sdi，存在于官方 ISO BCD）
- *   26000010 / 26000022 / 260000b0 = WinPE 加载器开关
- * ⚠ RecoverySequence 的真实元素 ID 尚未从真值反推到（4 份参考 BCD 均未配置该项）
- *   —— 在拿到权威 ID 之前，img_bcd_set_recovery_sequence 返回 IMG_ENOTSUP，避免写出坏 BCD。*/
-#define IMG_BCD_EL_RECOVERYSEQ   "25000004"   /* ⚠ 已证实是 Timeout，勿用 */
+/* 元素 ID 权威来源：geoffchappell.com/notes/windows/boot/bcd/elements.htm
+ * （bcdedit /? + BCDSRV.DLL 类型库反查，2026-10 经 Tavily 检索确认）
+ *
+ * ★ 元素 ID 是个 dword，按位段解读（这是理解一切的钥匙）：
+ *     0xF0000000 = class   1=library  2=application  3=device  4=template
+ *     0x0F000000 = format  1=device   2=string       3=GUID    4=GUID list
+ *                                    5=integer      6=boolean 7=integer list
+ *
+ * 已确认的元素（格式括号里是 format 段）：
+ *   11000001 (device)    Description           二进制结构 88B
+ *   12000002 (string)    Device                文件路径
+ *   12000004 (string)    OSDevice / 显示名
+ *   12000005 (string)    Locale
+ *   14000006 (GUID list) Inherits
+ *   14000008 (GUID list) ★RecoverySequence     ← bcdedit 名 recoverysequence，Vista+
+ *   1500004b (integer)   ...
+ *   16000009 (boolean)   recoveryenabled
+ *   16000060 (boolean)   DetectHAL
+ *   21000001 (device)    OSLoader OSDevice
+ *   22000002 (string)    SystemRoot            \Windows
+ *   23000003 (GUID)      ResumeObject          ← 单个 GUID（不是列表！）
+ *   24000001 (GUID list) DisplayOrder
+ *   24000010 (GUID list) ToolsDisplayOrder
+ *   25000004 (integer)   Timeout(秒)           ← 我曾误认成 RecoverySequence
+ *   250000e0 (integer)   bootstatuspolicy
+ *   32000004 (string)    RAMDisk SDI 路径      \boot\boot.sdi
+ */
+#define IMG_BCD_EL_RECOVERYSEQ   "14000008"   /* GUID list — 已确认 */
+#define IMG_BCD_EL_RECOVERYENAB  "16000009"   /* boolean   — bcdedit recoveryenabled */
+
 
 typedef struct img_bcd img_bcd;   /* 不透明句柄 */
 

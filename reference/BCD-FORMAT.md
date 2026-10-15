@@ -47,6 +47,51 @@ NewStoreRoot/                    ← 根名固定（不是 "BCD"）
     {d14b9cb3-…}/  Windows Resume (winresume.efi)
 ```
 
+## 三·〇、★ 元素 ID 的编码规律（权威）
+
+> 来源：Geoff Chappell《BCD Elements》
+> geoffchappell.com/notes/windows/boot/bcd/elements.htm
+> （bcdedit /? + BCDSRV.DLL 类型库反查，2026-10 经 Tavily 检索确认）
+
+元素 ID 是个 dword，按**位段**解读：
+
+| 掩码 | 含义 | 取值 |
+|---|---|---|
+| `0xF0000000` | **class** | 1=library 2=application 3=device 4=template |
+| `0x0F000000` | **format** | 1=device 2=string 3=GUID 4=GUID list<br>5=integer 6=boolean 7=integer list |
+
+**据此可直接读出任意元素的类型**，例如：
+```
+14000008 → class=1(lib)  format=4(GUID list)   → RecoverySequence
+24000001 → class=2(app)  format=4(GUID list)   → DisplayOrder
+25000004 → class=2(app)  format=5(integer)     → Timeout(秒) ★非RecoverySequence
+22000002 → class=2(app)  format=2(string)      → SystemRoot
+23000003 → class=2(app)  format=3(单个GUID)    → ResumeObject
+16000009 → class=1(lib)  format=6(boolean)     → recoveryenabled
+```
+
+## 三·一、已确认元素一览
+
+| ID | 类型 | 含义 | bcdedit 名 |
+|---|---|---|---|
+| 11000001 | device(二进制88B) | Description | description |
+| 12000002 | string | Device（文件路径） | device |
+| 12000004 | string | OSDevice / 显示名 | osdevice / description |
+| 12000005 | string | Locale | locale |
+| 14000006 | GUID list | Inherits | inherit |
+| **14000008** | **GUID list** | **★ RecoverySequence** | **recoverysequence** |
+| 1500004b | integer | — | — |
+| 16000009 | boolean | 自动恢复开关 | recoveryenabled |
+| 16000060 | boolean | DetectHAL | detecthal |
+| 21000001 | device | OSLoader OSDevice | — |
+| 22000002 | string | SystemRoot | systemroot |
+| 23000003 | 单 GUID | ResumeObject | resumeobject |
+| 24000001 | GUID list | DisplayOrder | displayorder |
+| 24000010 | GUID list | ToolsDisplayOrder | toolsdisplayorder |
+| **25000004** | **integer** | **Timeout(秒)** | timeout |
+| 250000e0 | integer | bootstatuspolicy | bootstatuspolicy |
+| 32000004 | string | RAMDisk SDI 路径 | ramdisksdipath |
+
 ## 三、元素 ID 命名规律
 
 ```
