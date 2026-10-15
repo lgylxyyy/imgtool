@@ -3,6 +3,7 @@
 #include "img_cmd.h"
 #include "img_io.h"
 #include "img_event.h"
+#include "img_lock.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -229,6 +230,7 @@ int img_result_json(const img_result *r, char *buf, int cap){
 
 /* ================= 上下文 ================= */
 struct img_ctx {
+    img_lock_t lk;               /* ★ 同一句柄串行：并发调同一张盘会踩内部缓存 */
     char     path[512];
     bool     writable, check_size;
     img_io  *io;
@@ -243,6 +245,7 @@ img_ctx *img_ctx_open(const char *image_path, bool writable, bool check_size,
     if(!c) return NULL;
     snprintf(c->path,sizeof c->path,"%s",image_path);
     c->writable=writable; c->check_size=check_size;
+    img_lock_init(&c->lk);
     img_io_opts_t o={0}; o.writable=writable;
     c->io=img_io_open_path(c->path,&o);
     if(!c->io){ if(err) snprintf(err,errcap,"打不开镜像：%s",c->path); free(c); return NULL; }
@@ -252,6 +255,7 @@ void img_ctx_close(img_ctx *c){
     if(!c) return;
     if(c->q){ img_qcow2_close(c->q); c->q=NULL; }
     if(c->io){ img_io_close(c->io); c->io=NULL; }
+    img_lock_destroy(&c->lk);
     free(c);
 }
 const char  *img_ctx_path(const img_ctx *c){ return c?c->path:""; }
@@ -296,13 +300,31 @@ int img_cmd_exec(const char *name, img_ctx *ctx, const img_args *in, img_result 
         img_result_fail(out,IMG_ENOENT,"CMD-NOTFOUND",name,"没有这个命令","用 --list 查看可用命令");
         return IMG_ENOENT;
     }
+    /* ★ 镜像路径的权威来源是 ctx（App 先打开镜像再调命令）。
+     *   所以：ctx 存在而 args 里没给 img 时，自动注入 —— 否则每个命令都得让
+     *   App 重复传一遍路径，还会出现"ctx 是 A 盘、--img 是 B 盘"的不一致。*/
+    img_args *tmp=NULL;
+    const img_args *use=in;
+    if(ctx && (!in || !img_args_get(in,"img"))){
+        tmp=img_args_new();
+        if(in) for(int i=0;i<in->n;i++) img_args_set(tmp,in->a[i].k,in->a[i].v);
+        img_args_set(tmp,"img",img_ctx_path(ctx));
+        use=tmp;
+    }
     char why[256];
-    int rc=img_args_validate(in,c->args,c->nargs,why,sizeof why);
+    int rc=img_args_validate(use,c->args,c->nargs,why,sizeof why);
     if(rc!=IMG_OK){
+        if(tmp) img_args_free(tmp);
         img_result_fail(out,rc,"CMD-ARG-BAD",name,why,"检查参数名/类型；用 --help=<命令> 看用法");
         return rc;
     }
-    rc=c->run(ctx,in,out);
+    /* ★ 同一句柄串行：App 从多个线程调同一个 ctx 时排队执行，
+     *   避免踩坏 qcow2 的 L1/L2 缓存与 L2 表缓冲 */
+    img_lock_t *lk = ctx ? &ctx->lk : NULL;
+    img_lock_acquire(lk);
+    rc=c->run(ctx,use,out);
+    img_lock_release(lk);
+    if(tmp) img_args_free(tmp);
     if(rc!=IMG_OK && out->ok)          /* handler 忘了填 err：兜一层，保证信封永远完整 */
         img_result_fail(out,rc,"CMD-FAILED",name,img_strerror(rc),NULL);
     return rc;

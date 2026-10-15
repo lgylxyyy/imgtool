@@ -28,3 +28,10 @@ if(HIVEX_INC AND HIVEX_LIB)
   target_include_directories(recovery_bcd_test PRIVATE ${HIVEX_INC})
   target_link_libraries(recovery_bcd_test PRIVATE imgtool ${HIVEX_LIB})
 endif()
+
+# ---- 健壮性验证 ----
+add_executable(fd_test fd_test.c)
+target_link_libraries(fd_test PRIVATE imgtool)
+
+add_executable(thread_test thread_test.c)
+target_link_libraries(thread_test PRIVATE imgtool)

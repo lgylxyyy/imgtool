@@ -60,6 +60,23 @@ img_io *img_io_open_path(const char *path, const img_io_opts_t *o){
 }
 
 img_io *img_io_open_fd(int fd, bool take_ownership, const img_io_opts_t *o){
+    /* ★ fd 生命周期契约（DESIGN-OUTPUT.md 第八节）：
+     *   take_ownership=true → img_io_close() 会关掉它；false → 调用方自己关，
+     *   且必须保证在 img_io_close() 之前一直有效（App 侧别提前 close）。
+     *   这里先做基本校验：fd 必须有效、可 seek、且是普通文件/块设备
+     *   （传进来目录 fd、管道、已关闭的 fd 都会立刻得到明确错误，而不是后面莫名失败）*/
+    if(fd<0) return NULL;
+    struct stat st;
+    if(fstat(fd,&st)<0) return NULL;
+    if(!S_ISREG(st.st_mode) && !S_ISBLK(st.st_mode)) return NULL;
+    {
+        int fl=fcntl(fd,F_GETFL);
+        if(fl<0) return NULL;
+        int acc=fl & O_ACCMODE;
+        if(o && o->writable && acc==O_RDONLY) return NULL;
+        off_t cur=lseek(fd,0,SEEK_CUR);      /* 管道/不可 seek 在这里就会被拒 */
+        if(cur==(off_t)-1) return NULL;
+    }
     if(fd < 0) return NULL;
     img_io *io = calloc(1,sizeof *io);
     if(!io) return NULL;

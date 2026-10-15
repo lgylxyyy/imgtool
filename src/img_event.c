@@ -14,6 +14,7 @@
  */
 #include "img_event.h"
 #include "img_types.h"
+#include "img_lock.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -134,6 +135,8 @@ void img_log_session(const char *tool,const char *argv,const char *img,uint64_t 
 static const char *LVPRE[5]={ "✖","⚠"," ","·"," " };
 static void pump(const char *line,size_t n,img_lv_t lv){
     if(log_on(lv)){
+        img_lock_t *lk=img_global_lock();   /* ★ 并发写日志会交错成半行/坏 JSON */
+        img_lock_acquire(lk);
         write_all(G.fd,line,n);
         if(G.fd>=0){ G.written+=n; rotate_if_needed(); }
         if(G.out_fd>=0){
@@ -145,6 +148,7 @@ static void pump(const char *line,size_t n,img_lv_t lv){
                 if(m>0) write_all(G.out_fd,b,(size_t)m);
             }
         }
+        img_lock_release(lk);
     }
 }
 
@@ -156,10 +160,13 @@ void img_ring_add(const char *line){
     char *cp=malloc(n+1);
     if(!cp) return;
     memcpy(cp,line,n); cp[n]=0;
+    img_lock_t *lk=img_global_lock();
+    img_lock_acquire(lk);
     if(ring[ring_head]) free(ring[ring_head]);
     ring[ring_head]=cp;
     ring_head=(ring_head+1)%RING_CAP;
     if(ring_n<RING_CAP) ring_n++;
+    img_lock_release(lk);
 }
 int img_ring_count(void){ return ring_n; }
 int img_ring_dump(void *ud,int (*cb)(void*,const char*),int max){
