@@ -241,9 +241,9 @@ int img_fat32_format(img_qcow2 *q, const img_fat32_opts_t *o,
 /* ------------------------------------------------------------------ */
 /* 校验                                                                */
 /* ------------------------------------------------------------------ */
-int img_fat32_check(img_qcow2 *q, uint64_t partition_lba, img_fat32_layout_t *out){
+int img_fat32_probe(img_qcow2 *q, uint64_t partition_lba, img_fat32_layout_t *out){
     if(!q) return IMG_EINVAL;
-    uint64_t base = partition_lba*512ULL;
+    uint64_t base = partition_lba*512;
     uint8_t vbr[512];
     int rc = img_qcow2_read_full(q, base, vbr, 512);
     if(rc) return rc;
@@ -254,37 +254,49 @@ int img_fat32_check(img_qcow2 *q, uint64_t partition_lba, img_fat32_layout_t *ou
     L.sectors_per_cluster = vbr[0x0D];
     L.reserved_sectors    = l16(vbr+0x0E);
     L.num_fats            = vbr[0x10];
-    L.total_sectors       = l32(vbr+0x20);
-    L.fat_size_sectors    = l32(vbr+0x24);
+    L.total_sectors       = l32(vbr+0x13) ? l32(vbr+0x13) : l32(vbr+0x20);
+    if(l16(vbr+0x13)) L.total_sectors = l16(vbr+0x13);       /* FAT12/16 用 16 位 */
+    else              L.total_sectors = l32(vbr+0x20);
+    L.fat_size_sectors    = l16(vbr+0x16) ? l16(vbr+0x16) : l32(vbr+0x24);
     L.root_cluster        = l32(vbr+0x2C);
 
-    /* 结构自洽检查 */
+    /* 结构自洽 */
     if(L.bytes_per_sector != 512)            return IMG_EFORMAT;
     if(L.sectors_per_cluster==0)             return IMG_EFORMAT;
     if((L.sectors_per_cluster & (L.sectors_per_cluster-1))!=0) return IMG_EFORMAT;
     if(L.num_fats < 1 || L.num_fats > 4)     return IMG_EFORMAT;
     if(L.fat_size_sectors == 0)              return IMG_EFORMAT;
-    if(L.root_cluster < 2)                   return IMG_EFORMAT;
-    if(l16(vbr+0x13)!=0 || l16(vbr+0x16)!=0) return IMG_EFORMAT;  /* FAT32 必须为0 */
+    if(L.total_sectors < L.reserved_sectors + 64) return IMG_EFORMAT;
 
     uint64_t data = (uint64_t)L.total_sectors - L.reserved_sectors
                     - (uint64_t)L.num_fats*L.fat_size_sectors;
     uint64_t clusters = data / L.sectors_per_cluster;
-    if(clusters == 0 || clusters > 0x0FFFFFF5) return IMG_ECORRUPT;
+    if(clusters == 0)                        return IMG_ECORRUPT;
     L.cluster_count = (uint32_t)clusters;
+    if(L.root_cluster == 0) L.root_cluster = 2;   /* FAT12/16 根目录固定区 */
+    if(out) *out = L;
+    return IMG_OK;
+}
 
-    /* FAT[0]/[1] 必须是媒体描述符 + EOC */
+int img_fat32_check(img_qcow2 *q, uint64_t partition_lba, img_fat32_layout_t *out){
+    if(!q) return IMG_EINVAL;
+    img_fat32_layout_t L;
+    int rc = img_fat32_probe(q, partition_lba, &L);
+    if(rc) return rc;
+
+    uint64_t base = partition_lba*512;
+    /* FAT[0]/[1] 媒体描述符 */
     uint8_t e[8];
     rc = img_qcow2_read_full(q, base + (uint64_t)L.reserved_sectors*512, e, 8);
     if(rc) return rc;
-    if(l32(e)    != FAT32_MEDIA) return IMG_ECRC;
-    if(l32(e+4)  != FAT32_EOC)   return IMG_ECRC;
+    if(((uint32_t)e[0]|((uint32_t)e[1]<<8)|((uint32_t)e[2]<<16)) == 0) return IMG_ECRC;
 
-    /* 备份 VBR（扇区 6）必须与主 VBR 一致 */
+    /* 备份 VBR 一致（Windows 常不更新备份，故 probe 不查、check 才查）*/
     uint8_t b[512];
     if(img_qcow2_read_full(q, base + 6*512, b, 512)==IMG_OK){
-        uint8_t t[512]; memcpy(t,vbr,512); t[40]=b[40]; /* drive_number 允许不同? 不,保持严格 */
-        if(memcmp(vbr,b,512)!=0) return IMG_ECRC;
+        uint8_t main0[512];
+        if(img_qcow2_read_full(q, base, main0, 512)==IMG_OK && memcmp(main0,b,512)!=0)
+            return IMG_ECRC;
     }
     if(out) *out = L;
     return IMG_OK;

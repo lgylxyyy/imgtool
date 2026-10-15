@@ -14,6 +14,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <ntfs-3g/types.h>
 #include <ntfs-3g/layout.h>
 #include <ntfs-3g/volume.h>
@@ -39,34 +40,37 @@ static struct ntfs_device_operations ROPS = { b_open,b_close,b_seek,b_read,b_wri
 
 /* ---------- 用 libntfs-3g 查 NTFS 里某个路径是否存在 ---------- */
 static bool ntfs_path_exists(img_qcow2 *q, uint64_t lba, uint64_t bytes, const char *path){
-    if(!q || img_ntfs_probe(q,lba,NULL)!=IMG_OK) return false;
+    if(!q) return false;
+    if(img_ntfs_probe(q,lba,NULL)!=IMG_OK) return false;
     img_ntfs_ctx_activate(q,lba,bytes);
     int dfd = open("imgtool-dev", O_RDWR|O_CREAT|O_TRUNC, 0666);
     if(dfd>=0) close(dfd);
     struct ntfs_device *dev = ntfs_device_alloc("imgtool-dev",0,&ROPS,NULL);
     if(!dev){ img_ntfs_ctx_deactivate(); return false; }
-    ntfs_volume *vol = ntfs_device_mount(dev, NTFS_MNT_RDONLY|NTFS_MNT_FORENSIC);
-    if(!vol){
-        /* 再试不带 forensics（旧选项可能不存在）*/
-        vol = ntfs_device_mount(dev, NTFS_MNT_RDONLY);
-    }
-    if(!vol){ ntfs_device_free(dev); img_ntfs_ctx_deactivate(); return false; }
 
+    ntfs_volume *vol = ntfs_device_mount(dev, NTFS_MNT_RDONLY);
+    if(!vol){
+        if(getenv("IMG_BC_DEBUG")) fprintf(stderr,"  [dbg] mount fail errno=%d\n", errno);
+        ntfs_device_free(dev);
+        img_ntfs_ctx_deactivate();
+        return false;
+    }
     bool found = false;
     char work[512];
     snprintf(work,sizeof work,"%s",path);
-    /* 逐级解析 */
     ntfs_inode *cur = ntfs_inode_open(vol, FILE_root);
     if(cur){
-        char *save=NULL;
-        for(char *tok=strtok_r(work,"/\\",&save); tok; tok=strtok_r(NULL,"/\\",&save)){
+        char *save = NULL;
+        for(char *tok = strtok_r(work,"/\\",&save); tok; tok = strtok_r(NULL,"/\\",&save)){
             ntfschar *uname = NULL;
-            size_t ulen = 0;
-            ulen = strlen(tok);
-            if(ntfs_mbstoucs((const char*)tok, &uname) != 0){ ntfs_inode_close(cur); cur=NULL; break; }
+            size_t ulen = strlen(tok);
+            int rc = ntfs_mbstoucs((const char*)tok, &uname);
+            if(getenv("IMG_BC_DEBUG"))
+                fprintf(stderr,"  [dbg]   tok='%s' mbstoucs=%d\n", tok, rc);
+            if(rc < 0 || !uname){ ntfs_inode_close(cur); cur = NULL; break; }
             MFT_REF ref = ntfs_inode_lookup_by_name(cur, uname, ulen);
             free(uname);
-            if(!ref){ ntfs_inode_close(cur); cur=NULL; break; }
+            if(!ref){ ntfs_inode_close(cur); cur = NULL; break; }
             ntfs_inode *nxt = ntfs_inode_open(vol, ref);
             ntfs_inode_close(cur);
             cur = nxt;
@@ -74,8 +78,8 @@ static bool ntfs_path_exists(img_qcow2 *q, uint64_t lba, uint64_t bytes, const c
         }
         if(cur){ found = true; ntfs_inode_close(cur); }
     }
-    ntfs_umount(vol,false);
-    ntfs_device_free(dev);
+    /* ★ ntfs_umount() 内部已调用 ntfs_device_free(dev)，这里不可再调（double free）*/
+    ntfs_umount(vol, false);
     img_ntfs_ctx_deactivate();
     return found;
 }
@@ -97,28 +101,51 @@ static uint32_t fat32_next(img_qcow2 *q, uint64_t base, const img_fat32_layout_t
     if(img_qcow2_read_full(q, off, e, 4)!=IMG_OK) return 0;
     return (uint32_t)e[0]|((uint32_t)e[1]<<8)|((uint32_t)e[2]<<16)|(uint32_t)e[3];
 }
-static bool fat32_name_match(const uint8_t *ent, const char *name){
-    char n[64]; int j=0;
-    for(int i=0;i<11;i++) n[j++]= (char)ent[i];
-    while(j>0 && n[j-1]==' ') j--;
+/* 组装 LFN：FAT 目录里 0x0F 属性的条目按【序号倒序】排列在 8.3 条目前面。
+ * 每个 LFN 项提供 13 个 UTF-16 字符。我们按序号把它拼起来。 */
+typedef struct { char name[260]; bool valid; } lfn_buf;
+static void lfn_clear(lfn_buf *b){ b->name[0]=0; b->valid=false; }
+static void lfn_add_entry(lfn_buf *b, const uint8_t *e){
+    int ord = e[0] & 0x1F;
+    if(ord==0 || ord>20) { lfn_clear(b); return; }
+    size_t off = (size_t)(ord-1)*13;
+    /* 5 个 UTF-16 字段：1..10, 14..25, 28..31 */
+    static const int starts[13] = {1,3,5,7,9,14,16,18,20,22,24,28,30};
+    for(int i=0;i<13;i++){
+        unsigned c = e[starts[i]] | ((unsigned)e[starts[i]+1]<<8);
+        if(off + (size_t)i >= sizeof b->name - 1) break;
+        if(c==0){ b->name[off+i]=0; b->valid=true; return; }
+        /* 仅存 ASCII 子集即可满足比对需求；非 ASCII 用 ? 代替 */
+        b->name[off+i] = (c<128) ? (char)c : '?';
+        b->name[off+ (size_t)i + 1] = 0;
+    }
+    b->valid = true;
+}
+/* 大小写不敏感的字符串比较（ASCII） */
+static int ascii_ieq(const char *a, const char *b){
+    while(*a && *b){
+        char x=*a, y=*b;
+        if(x>='a'&&x<='z') x-=32;
+        if(y>='a'&&y<='z') y-=32;
+        if(x!=y) return 0;
+        a++; b++;
+    }
+    return *a==0 && *b==0;
+}
+static bool fat32_name_match(const uint8_t *ent, const char *want, const lfn_buf *lfn){
+    /* ① 优先比 LFN（长名）——真实镜像里 Microsoft / bootmgfw.efi 全靠它 */
+    if(lfn && lfn->valid && lfn->name[0]){
+        if(ascii_ieq(lfn->name, want)) return true;
+    }
+    /* ② 回退 8.3：名(8) + 空格 + 扩展(3)，比对时去掉空格 */
+    char n[13]; int j=0;
+    for(int i=0;i<8 && ent[i]!=' ';i++) n[j++]=(char)ent[i];
+    if(ent[8]!=' '){ n[j++]='.'; for(int i=8;i<11 && ent[i]!=' ';i++) n[j++]=(char)ent[i]; }
     n[j]=0;
-    /* 去扩展名空格 */
-    char comp[64]; snprintf(comp,sizeof comp,"%s",name);
-    char *dot=strrchr(comp,'.'); int lfnlen = dot? (int)(dot-comp):(int)strlen(comp);
-    for(int i=0;i<lfnlen && i<8;i++){
-        char c=comp[i];
-        if(c>='a'&&c<='z') c-=32;
-        if(n[i]!=c) return false;
-    }
-    if(dot){
-        for(int i=0;i<3;i++){
-            char c=dot[1+i];
-            if(!c) c=' ';
-            if(c>='a'&&c<='z') c-=32;
-            if(n[8+i]!=c) return false;
-        }
-    }
-    return true;
+    for(int i=0;n[i];i++) if(n[i]>='a'&&n[i]<='z') n[i]-=32;
+    char w[64]; snprintf(w,sizeof w,"%s",want);
+    for(int i=0;w[i];i++) if(w[i]>='a'&&w[i]<='z') w[i]-=32;
+    return strcmp(n,w)==0;
 }
 static fat_ent fat32_in_dir(img_qcow2 *q, uint64_t base, const img_fat32_layout_t *L,
                             uint32_t dirclus, const char *want){
@@ -126,28 +153,28 @@ static fat_ent fat32_in_dir(img_qcow2 *q, uint64_t base, const img_fat32_layout_
     size_t csz = (size_t)L->sectors_per_cluster * 512;
     uint8_t *buf = malloc(csz);
     if(!buf) return r;
+    lfn_buf lfn; lfn_clear(&lfn);
     uint32_t c = dirclus;
     while(c>=2 && c<0x0FFFFFF8){
         fat32_read_cluster(q, base, L, c, buf);
+        bool stop=false;
         for(size_t i=0;i+32<=csz;i+=32){
             uint8_t *e = buf+i;
-            if(e[0]==0x00){ c=0xFFFFFFFF; break; }        /* 目录结束 */
-            if(e[0]==0xE5) continue;
-            if(e[11]==0x0F) continue;                       /* LFN 项，用 8.3 匹配即可 */
-            if(e[11] & 0x08) continue;                      /* 卷标 */
-            if(fat32_name_match(e, want)){
-                r.found = true;
-                r.is_dir = (e[11] & 0x10)!=0;
-                r.cluster = (uint32_t)e[26]|((uint32_t)e[27]<<8)|((uint32_t)e[28]<<16)|((uint32_t)e[29]<<24);
-                r.size = (uint32_t)e[28]|((uint32_t)e[29]<<8)|((uint32_t)e[30]<<16)|((uint32_t)e[31]<<24);
-                r.size = (uint32_t)e[28] | ((uint32_t)e[29]<<8) | ((uint32_t)e[30]<<16) | ((uint32_t)e[31]<<24);
-                r.size = (uint32_t)(e[28]) | ((uint32_t)e[29]<<8) | ((uint32_t)e[30]<<16) | ((uint32_t)e[31]<<24);
-                r.size = (uint32_t)e[28]|((uint32_t)e[29]<<8)|((uint32_t)e[30]<<16)|((uint32_t)e[31]<<24);
+            if(e[0]==0x00){ stop=true; break; }
+            if(e[0]==0xE5){ lfn_clear(&lfn); continue; }
+            if((e[11] & 0x0F)==0x0F){ lfn_add_entry(&lfn, e); continue; }  /* LFN */
+            if(e[11] & 0x08){ lfn_clear(&lfn); continue; }                 /* 卷标 */
+            if(fat32_name_match(e, want, &lfn)){
+                r.found=true;
+                r.is_dir=(e[11]&0x10)!=0;
+                r.cluster=(uint32_t)e[26]|((uint32_t)e[27]<<8)|((uint32_t)e[28]<<16)|((uint32_t)e[29]<<24);
+                r.size=(uint32_t)e[28]|((uint32_t)e[29]<<8)|((uint32_t)e[30]<<16)|((uint32_t)e[31]<<24);
                 free(buf);
                 return r;
             }
+            lfn_clear(&lfn);
         }
-        if(c==0xFFFFFFFF) break;
+        if(stop) break;
         c = fat32_next(q, base, L, c);
     }
     free(buf);
@@ -211,6 +238,28 @@ static parts_t locate_parts(img_qcow2 *q, const img_parttable_t *t){
     return p;
 }
 
+/* ★ 不能只按"最大的 NTFS 分区"认定系统分区 —— 真实镜像常有多个同容量数据分区。
+ *   改为：逐个 NTFS 分区试找 \Windows\System32\winload，命中才算系统分区。 */
+static int find_os_partition(img_qcow2 *q, const img_parttable_t *t, int guess){
+    if(guess>=0){
+        uint64_t lba=t->parts[guess].first_lba;
+        uint64_t sz=(t->parts[guess].last_lba-t->parts[guess].first_lba+1)*512;
+        if(ntfs_path_exists(q,lba,sz,"/Windows/System32/winload.exe") ||
+           ntfs_path_exists(q,lba,sz,"/Windows/System32/winload.efi") ||
+           ntfs_path_exists(q,lba,sz,"/Windows/System32/boot/winload.efi"))
+            return guess;
+    }
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++){
+        if(i==guess || !t->parts[i].used || !is_ntfs_like(&t->parts[i])) continue;
+        uint64_t lba=t->parts[i].first_lba;
+        uint64_t sz=(t->parts[i].last_lba-t->parts[i].first_lba+1)*512;
+        if(ntfs_path_exists(q,lba,sz,"/Windows/System32/winload.exe") ||
+           ntfs_path_exists(q,lba,sz,"/Windows/System32/winload.efi"))
+            return i;
+    }
+    return guess;   /* 都没找到就保持原判断，让检查项自己报红 */
+}
+
 /* ---------- 主检查 ---------- */
 static img_check_t *add(img_bootcheck_result_t *r, const char *id, const char *name,
                         img_ck_level_t lvl, bool pass, const char *fmt, ...){
@@ -242,6 +291,7 @@ int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *ou
         modename, has_gpt?"GPT":(has_mbr?"MBR":"?"), t.count);
 
     parts_t P = locate_parts(q,&t);
+    P.os = find_os_partition(q,&t,P.os);   /* 用 \Windows 存在性确认，而非只看容量 */
 
     /* ── ① 分区表层 ── */
     if(out->is_uefi){
@@ -307,7 +357,7 @@ int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *ou
         uint64_t sz=(t.parts[P.esp].last_lba-t.parts[P.esp].first_lba+1)*512;
         img_fat32_layout_t FL;
         add(out,"esp.fat32","ESP 可被 FAT32 解析",IMG_CK_REQUIRED,
-            img_fat32_check(q,lba,&FL)==IMG_OK,
+            img_fat32_probe(q,lba,&FL)==IMG_OK,
             "spc=%u 簇数=%u",(unsigned)FL.sectors_per_cluster,(unsigned)FL.cluster_count);
         fat_ent e1 = fat32_find(q,lba,sz,"EFI/Microsoft/Boot/bootmgfw.efi");
         add(out,"esp.bootmgfw","\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
@@ -322,18 +372,31 @@ int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *ou
             e3.found ? "存在，%u 字节" : "ESP 上没有 BCD", e3.size);
     }
 
-    /* ── ④ BIOS 特有：$Boot 前10扇区 bootmgr ── */
-    if(!out->is_uefi && ntp>=0){
-        uint64_t lba=t.parts[ntp].first_lba;
-        uint64_t sz=(t.parts[ntp].last_lba-t.parts[ntp].first_lba+1)*512;
-        add(out,"bios.bootmgr","bootmgr 在活动分区",IMG_CK_REQUIRED,
-            ntfs_path_exists(q,lba,sz,"/bootmgr"),
-            "bootmgr 是否存在");
-        add(out,"bios.bootmgr_bcd","\\Boot\\BCD",IMG_CK_REQUIRED,
-            ntfs_path_exists(q,lba,sz,"/Boot/BCD"),
-            "BIOS 的 BCD 是否存在");
+    /* ── ④ BIOS 特有：bootmgr 与 \Boot\BCD ──
+     * ★ 不能用系统分区（装 \Windows 的那个）——真实镜像常把 BIOS 引导文件
+     *   放在【活动分区】(status=0x80) 上，那是另一个小 NTFS 分区（如 Xlite 的 50MB）。 */
+    if(!out->is_uefi){
+        int actp = -1;
+        for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+            if(t.parts[i].used && t.parts[i].status==0x80){ actp=i; break; }
+        /* 活动分区没找到引导文件就退到系统分区再试一次 */
+        int bp = actp>=0 ? actp : ntp;
+        uint64_t lba = bp>=0 ? t.parts[bp].first_lba : 0;
+        uint64_t sz  = bp>=0 ? (t.parts[bp].last_lba-t.parts[bp].first_lba+1)*512 : 0;
+        bool have_bm = bp>=0 && ntfs_path_exists(q,lba,sz,"/bootmgr");
+        if(!have_bm && actp>=0 && ntp>=0 && ntp!=actp){
+            lba = t.parts[ntp].first_lba;
+            sz  = (t.parts[ntp].last_lba-t.parts[ntp].first_lba+1)*512;
+            have_bm = ntfs_path_exists(q,lba,sz,"/bootmgr");
+        }
+        add(out,"bios.bootmgr","bootmgr 在活动分区",IMG_CK_REQUIRED, have_bm,
+            have_bm ? "在 LBA %llu 找到" : "活动分区与系统分区都没有 bootmgr",
+            (unsigned long long)lba);
+        bool have_bcd = bp>=0 && ntfs_path_exists(q,lba,sz,"/Boot/BCD");
+        add(out,"bios.bootmgr_bcd","\\Boot\\BCD",IMG_CK_REQUIRED, have_bcd,
+            have_bcd ? "存在" : "BIOS 引导分区上没有 /Boot/BCD");
+        (void)ntp;
     }
-
     /* ── ⑤ 恢复分区 ── */
     if(P.rec>=0){
         uint64_t lba=t.parts[P.rec].first_lba;
@@ -352,22 +415,25 @@ int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *ou
 /* ---------- 输出 ---------- */
 int img_bootcheck_json(const img_bootcheck_result_t *r, char *buf, int cap){
     if(!r||!buf||cap<=0) return 0;
+    /* JSON 字符串里反斜杠与引号必须转义 —— 本模块的 name 里就有
+     *   \EFI\Microsoft\Boot\bootmgfw.efi
+     * 不转义会导致整行 JSON 非法、下游解析直接丢弃该检查项。 */
     int n=0;
     for(int i=0;i<r->count;i++){
         const img_check_t *c=&r->items[i];
-        char line[512];
+        char line[1024];
         const char *lvl = c->level==IMG_CK_REQUIRED?"required":
                           c->level==IMG_CK_WARN?"warn":"info";
-        /* 转义详情里的引号与反斜杠 */
-        char det[sizeof c->detail*2]; int dj=0;
-        for(const char *p=c->detail; *p && dj<(int)sizeof det-2; p++){
-            if(*p=='"'||*p=='\\') det[dj++]='\\';
-            det[dj++]=*p;
-        }
-        det[dj]=0;
+        /* ⚠ c->id / c->name 是【指针】，sizeof 只有 8；必须用固定大缓冲。
+         *   用 sizeof(指针) 会截断 UTF-8 中文，产出非法 JSON。 */
+        char id[128], nm[256], det[sizeof c->detail*2];
+        #define ESC(dst,src) do{ int j=0; for(const char *p=(src); *p && j<(int)sizeof(dst)-2; p++){ \
+            if(*p=='"'||*p=='\\'){ (dst)[j++]='\\'; } (dst)[j++]=*p; } (dst)[j]=0; }while(0)
+        ESC(id, c->id); ESC(nm, c->name); ESC(det, c->detail);
+        #undef ESC
         int m=snprintf(line,sizeof line,
             "{\"id\":\"%s\",\"name\":\"%s\",\"level\":\"%s\",\"pass\":%s,\"detail\":\"%s\"}\n",
-            c->id, c->name, lvl, c->pass?"true":"false", det);
+            id, nm, lvl, c->pass?"true":"false", det);
         if(m<0) break;
         if(n+m >= cap-1) break;
         memcpy(buf+n,line,(size_t)m);

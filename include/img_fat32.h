@@ -56,7 +56,12 @@ int img_fat32_layout(const img_fat32_opts_t *o, img_fat32_layout_t *out);
 int img_fat32_format(img_qcow2 *q, const img_fat32_opts_t *o,
                      img_fat32_layout_t *out_layout, img_prog *prog);
 
-/* 校验格式结果（返回 IMG_OK = 结构自洽）；也供 bccheck 复用 */
+/* 只做【结构解析】（宽松）：校验 BPB 自洽，不做主/备份 VBR 比对。
+ * 真实镜像里 Windows 常常只更新主 VBR，备份不一致属常见情况，
+ * 若因此判为"不是 FAT32"会误伤。bccheck 用这个。 */
+int img_fat32_probe(img_qcow2 *q, uint64_t partition_lba, img_fat32_layout_t *out);
+
+/* 严格校验（结构自洽 + 主/备份 VBR 一致 + FAT[0/1] 媒体描述符） */
 int img_fat32_check(img_qcow2 *q, uint64_t partition_lba, img_fat32_layout_t *out);
 
 #ifdef __cplusplus

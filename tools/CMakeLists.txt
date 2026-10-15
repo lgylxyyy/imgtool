@@ -14,3 +14,6 @@ target_link_libraries(imgpart PRIVATE imgtool)
 target_link_libraries(imglayout PRIVATE imgtool)
 target_link_libraries(imgresize PRIVATE imgtool)
 target_link_libraries(imgmkfs PRIVATE imgtool)
+
+add_executable(imgbc imgbc.c)
+target_link_libraries(imgbc PRIVATE imgtool)
