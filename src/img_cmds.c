@@ -10,6 +10,7 @@
 #include "img_fat32_fs.h"
 #include "img_event.h"
 #include "img_wim_apply.h"
+#include "img_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,7 +80,12 @@ static const img_arg A_FATPUT[] = {
     {"lba",        IMG_A_U64,  true,  NULL,   "目标分区起始 LBA",         chk_lba},
     {"src",        IMG_A_STR,  true,  NULL,   "本地源文件路径",           NULL},
     {"dst",        IMG_A_STR,  true,  NULL,   "分区内目标路径（/ 开头）", NULL},
-    {"check_size", IMG_A_BOOL, false, "false","写入前校验空间（默认关：App 显式请求才校验）", NULL},
+    {"check_size", IMG_A_BOOL, false, "false","写入前校验【内部分区】空间（默认关：App 显式请求才校验）", NULL},
+    /* ★ 宿主空间：默认开、不可关（它保护的是镜像文件本身 —— 宿主满会把整个
+     *   qcow2 写坏）。工具优先自己查（fstatfs(fd)，路径/SAF fd 都行）；
+     *   查不到时允许 App 把宿主剩余传进来（拿 fd 查不到的云端提供者就是这种情况）。*/
+    {"host_free", IMG_A_U64,  false, NULL, "宿主剩余可用字节（一般不用传，工具自己查；查不到时才传）", NULL},
+    {"reserve",   IMG_A_BOOL, false, "false","写前用 fallocate 真预留宿主空间（立即占用，保证不会中途 ENOSPC）", NULL},
 };
 static int cmd_fat_put(img_ctx *ctx, const img_args *in, img_result *out){
     uint64_t lba=img_args_u64(in,"lba",0);
@@ -117,6 +123,49 @@ static int cmd_fat_put(img_ctx *ctx, const img_args *in, img_result *out){
             img_result_fail(out,IMG_EFULL,"FAT-ENOSPC",dst,why,
                             "换更小的文件，或先扩容该分区（imgresize）");
             return IMG_EFULL;
+        }
+    }
+
+    /* ---- 宿主账（默认开、不可关）----
+     *   需求 = 源文件大小 → qcow2 增长估算（+3% 元数据 + 4MiB，实测保守 15% 过剩）
+     *   剩余 = fstatfs(fd).f_bavail × f_bsize（fd 模式同样可用，Android 也 OK）*/
+    uint64_t est_host = img_host_estimate_write((uint64_t)fsz, false);
+    uint64_t host_free = 0;
+    const char *hf = img_args_get(in,"host_free");
+    if(hf && *hf) host_free = img_args_u64(in,"host_free",0);
+    else          host_free = img_host_free_bytes(img_ctx_io(ctx));
+    if(host_free==0){
+        /* 查不到（如管道类 fd）：留痕但不拦 —— 卡片里会写明"宿主剩余未知" */
+        img_ev e;
+        if(img_ev_init(&e,IMG_LV_WARN,"host","free_unknown",IMG_OK,"宿主剩余空间未知，跳过宿主校验")){
+            img_ev_u64(&e,"need",est_host);
+            img_ev_emit(&e);
+        }
+    } else if(host_free < est_host){
+        img_fat32_unmount(fs);
+        char why[256];
+        /* 小于 1MB 时按 KB 显示，避免"剩余 0 MB"这种看不出量级的提示 */
+        char a[48], b[48];
+        if(host_free>=1048576) snprintf(a,sizeof a,"%llu MB",(unsigned long long)(host_free/1048576));
+        else                   snprintf(a,sizeof a,"%llu KB",(unsigned long long)(host_free/1024));
+        if(est_host>=1048576)  snprintf(b,sizeof b,"%llu MB",(unsigned long long)(est_host/1048576));
+        else                   snprintf(b,sizeof b,"%llu KB",(unsigned long long)(est_host/1024));
+        snprintf(why,sizeof why,"宿主剩余 %s，本次预计需要 %s（qcow2 文件会长大）",a,b);
+        img_result_fail(out,IMG_EFULL,"HOST-ENOSPC",dst,why,
+                        "清理宿主磁盘，或换更小的源文件/更小的镜像");
+        return IMG_EFULL;
+    }
+
+    /* ---- 可选真预留（稀疏文件的 ftruncate 是假承诺，fallocate 才是真占位）---- */
+    if(img_args_bool(in,"reserve",false)){
+        int fdh = img_io_fd(img_ctx_io(ctx));
+        int rrc = img_host_reserve(fdh, est_host);
+        if(rrc!=IMG_OK){
+            img_ev e;                     /* 占不到 ≠ 不能写，只是"无法保证"（部分 Android 存储不支持 fallocate）*/
+            if(img_ev_init(&e,IMG_LV_WARN,"host","reserve_fail",rrc,"fallocate 不支持，无法保证宿主空间")){
+                img_ev_u64(&e,"need",est_host);
+                img_ev_emit(&e);
+            }
         }
     }
 

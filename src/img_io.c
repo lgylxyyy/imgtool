@@ -20,6 +20,7 @@
 
 struct img_io {
     int      fd;
+    char     path[512];   /* 路径模式记录路径（fd 模式为空）*/
     bool     own_fd;       /* 关闭时是否 close() */
     bool     writable;
     bool     is_fd_mode;   /* 调用者给的 fd（Android SAF）*/
@@ -54,7 +55,8 @@ img_io *img_io_open_path(const char *path, const img_io_opts_t *o){
     }
     img_io *io = calloc(1,sizeof *io);
     if(!io){ close(fd); return NULL; }
-    io->fd = fd; io->own_fd = true; io->writable = (flags & O_RDWR)==O_RDWR;
+    io->fd = fd;
+    snprintf(io->path,sizeof io->path,"%s",path); io->own_fd = true; io->writable = (flags & O_RDWR)==O_RDWR;
     io->is_fd_mode = false;
     return io;
 }
@@ -164,6 +166,10 @@ uint64_t img_io_size(img_io *io){
 }
 
 bool     img_io_writable(const img_io *io){ return io && io->writable; }
+const char *img_io_path(const img_io *io){
+    if(!io) return NULL;
+    return (io->is_fd_mode || !io->path[0]) ? NULL : io->path;
+}
 bool     img_io_is_fd(const img_io *io){ return io && io->is_fd_mode; }
 int      img_io_fd(img_io *io){ return io ? io->fd : -1; }
 

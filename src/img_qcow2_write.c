@@ -13,6 +13,7 @@
  *   overwrite → sha256 应恰好变成新值
  */
 #include "img_qcow2_int.h"
+#include "img_host.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -271,6 +272,20 @@ int img_qcow2_write_init(img_qcow2 *q){
 int img_qcow2_write(img_qcow2 *q, uint64_t off, const void *buf, size_t len){
     if(!q||(!buf&&len)) return IMG_EINVAL;
     if(!q->writable) return IMG_ESTATE;
+    /* ★ 宿主空间底线（默认开、不可关 —— 见 img_host.h）：
+     *   每写满 128MB 查一次 fstatfs；低于 IMG_HOST_MIN_FREE 就【停止写】，
+     *   不让"宿主满"变成"写到一半留下半成品镜像"。开销：fstatfs 每 128MB 一次。*/
+    static uint64_t s_host_written;
+    (void)s_host_written;
+    {
+        static uint64_t written_since_check = 0;
+        if(written_since_check == 0 && len){
+            uint64_t freeb = img_host_free_bytes(img_io_is_fd(q->io)?q->io:q->io);
+            if(freeb && freeb < IMG_HOST_MIN_FREE) return IMG_EFULL;
+        }
+        written_since_check += len;
+        if(written_since_check >= (128ull<<20)) written_since_check = 0;
+    }
     /* ★ 越界判定必须防加法溢出：原写法 `off + len > size` 在
      *   off=UINT64_MAX-4096/len=4096 时会回绕成 0 → 判定通过 → 真的按巨大偏移写，
      *   把 L2/头部写坏（实测把镜像 size 字段搞成 UINT64_MAX，qemu-img 从此打不开）。*/

@@ -24,6 +24,7 @@ set(IMG_SOURCES
   src/img_cmd.c
   src/img_cmds.c
   src/img_lock.c
+  src/img_host.c
   src/img_progress.c
   src/img_io.c
   src/img_qcow2.c

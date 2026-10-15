@@ -169,6 +169,12 @@ static void pump(const char *line,size_t n,img_lv_t lv){
     }
 }
 
+/* ---------- 取消标志 ---------- */
+static volatile int g_cancel = 0;
+void img_cancel(void){ g_cancel = 1; }
+void img_cancel_reset(void){ g_cancel = 0; }
+bool img_cancelled(void){ return g_cancel!=0; }
+
 /* ---------- 屏幕人话渲染（Linux 风格；只在 human 模式用） ---------- */
 static const char *ev_str(const img_ev *e, const char *k){
     for(int i=0;i<e->nf;i++) if(!strcmp(e->f[i].k,k) && e->f[i].kind==1) return e->f[i].s;
@@ -355,6 +361,9 @@ void img_ev_errno(img_ev *e,int err){ if(e) e->err=err; }
 void img_ev_emit(img_ev *e){
     if(!e||!e->enabled) return;
     if(e->magic != IMG_EV_MAGIC) return;   /* ★ 未 init 的垃圾结构 → 直接拒（实测会段错误）*/
+    if(G.t0_ms==0) G.t0_ms = now_ms();     /* ★ 没开日志时 G.t0_ms 未初始化，
+                                             *   t=now-0 会显示成"开机以来毫秒"（实测 2.5 亿）。
+                                             *   从首个事件起算，时间戳才有意义 */
     char buf[LINE_CAP];
     W w={ buf+1, buf+1, buf+sizeof buf-2 };
     buf[0]='{';

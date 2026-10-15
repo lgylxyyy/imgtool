@@ -84,6 +84,7 @@ void       img_ctx_close(img_ctx *c);
 const char *img_ctx_path(const img_ctx *c);
 bool        img_ctx_check_size(const img_ctx *c);
 img_qcow2  *img_ctx_qcow2(img_ctx *c);                 /* 惰性打开；失败返回 NULL */
+img_io     *img_ctx_io(img_ctx *c);                    /* 底层 I/O（拿 fd 查宿主空间）*/
 int         img_ctx_parttable(img_ctx *c, img_parttable_t **out);   /* 惰性读 */
 
 /* ---------------- 命令表 ---------------- */

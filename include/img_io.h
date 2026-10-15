@@ -42,6 +42,7 @@ uint64_t img_io_size(img_io *io);
 bool     img_io_writable(const img_io *io);
 bool     img_io_is_fd(const img_io *io);   /* Android 判定用 */
 int      img_io_fd(img_io *io);            /* 不是 fd 模式返回 -1 */
+const char *img_io_path(const img_io *io); /* 路径模式返回路径；fd 模式返回 NULL */
 
 /* 稀疏指示：告诉系统“这段是空的，别占真实空间”。不支持时静默忽略。 */
 int img_io_punch(img_io *io, uint64_t off, uint64_t len);

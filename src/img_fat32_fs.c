@@ -585,58 +585,87 @@ int img_fat32_mkdir_p(img_fat32_fs *fs, const char *abs_path){
     return IMG_OK;
 }
 
-/* 往 dst 写一段数据（已存在则截断重写）。内部供 put_file/put_data 复用 */
-static int write_data(img_fat32_fs *fs, const void *data, size_t len,
-                      const char *dst_abs_path){
-    char nm[256]; uint32_t dir;
-    if(split_parent(fs, dst_abs_path, &dir, nm, sizeof nm)!=IMG_OK){
+/* ---------- 写入三件套（内存路径与流式路径共用，避免两处逻辑分叉） ---------- */
+/* ① 准备：定位父目录（父目录不存在就自动建）→ 找旧项 → 释放旧簇链 */
+static int put_prepare(img_fat32_fs *fs, const char *dst_abs_path,
+                       uint32_t *dir, char *nm, size_t nmcap,
+                       bool *existed, dir_ent *old){
+    if(split_parent(fs, dst_abs_path, dir, nm, nmcap)!=IMG_OK){
         /* ★ 父目录不存在时按头文件承诺【自动建出来】。
          *   原先直接返回 ENOENT —— 头文件写着"自动建父目录"、实现却没有，
-         *   于是往空 ESP 放文件必须调用方先 mkdir，App 里极易漏（实测 142 个文件全失败）。*/
+         *   于是往空 ESP 放文件必须调用方先 mkdir（实测 142 个文件全失败）。*/
         char par[512]; snprintf(par,sizeof par,"%s",dst_abs_path);
         char *sl=strrchr(par,'/');
         if(!sl) return IMG_ENOENT;
         if(sl==par) par[1]='\0'; else *sl='\0';
         int mrc=img_fat32_mkdir_p(fs, par);
         if(mrc!=IMG_OK) return mrc;
-        if(split_parent(fs, dst_abs_path, &dir, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
+        if(split_parent(fs, dst_abs_path, dir, nm, nmcap)!=IMG_OK) return IMG_ENOENT;
     }
     dir_ent e;
-    int rc = dir_find(fs, dir, nm, &e);
+    int rc=dir_find(fs, *dir, nm, &e);
     if(rc) return rc;
+    *existed=e.found;
+    if(old) *old=e;
     if(e.found){
         if(e.is_dir) return IMG_ENOTSUP;
-        if(e.cluster>=2) free_chain(fs, e.cluster);      /* 释放旧簇链 */
+        if(e.cluster>=2){ int f=free_chain(fs,e.cluster); if(f!=IMG_OK) return f; }
     }
-    /* 分配所需簇并写数据 */
-    uint32_t csz=(uint32_t)fs->L.sectors_per_cluster*512;
-    uint32_t need = len? (uint32_t)((len + csz - 1)/csz) : 0;
+    return IMG_OK;
+}
+/* ② 分配 need 个簇并连成链（失败时自行回收已分配的） */
+static int put_alloc_chain(img_fat32_fs *fs, uint32_t need, uint32_t *first_out){
     uint32_t first=0, prev=0;
-    const uint8_t *p=data;
     for(uint32_t i=0;i<need;i++){
-        uint32_t c = alloc_cluster(fs);
+        uint32_t c=alloc_cluster(fs);
         if(!c){ if(first) free_chain(fs,first); return IMG_EFULL; }
         if(!first) first=c;
-        if(prev) fat_set(fs, prev, c);
+        if(prev) fat_set(fs,prev,c);
         prev=c;
-        size_t n = (len - (size_t)i*csz < csz) ? (len - (size_t)i*csz) : csz;
-        uint8_t *tmp = calloc(1,csz);
-        if(!tmp){ if(first) free_chain(fs,first); return IMG_ENOMEM; }
-        memcpy(tmp, p + (size_t)i*csz, n);
-        rc = wr(fs, clus_off(fs,c), tmp, csz);
-        free(tmp);
-        if(rc){ if(first) free_chain(fs,first); return rc; }
     }
-    if(e.found){
-        /* 覆盖已有的 8.3 项（位置已知）*/
+    *first_out=first;
+    return IMG_OK;
+}
+/* ③ 落地目录项（已存在则原地改，否则新增） */
+static int put_finalize(img_fat32_fs *fs, uint32_t dir, const char *nm,
+                        uint32_t first, uint32_t size, bool existed, const dir_ent *old){
+    if(existed && old){
         uint8_t d[ENTRY_SIZE];
-        if(rd(fs, e.slot_off, d, ENTRY_SIZE)) return IMG_EIO;
+        if(rd(fs, old->slot_off, d, ENTRY_SIZE)) return IMG_EIO;
         put_u16(d+20,(uint16_t)(first>>16));
         put_u16(d+26,(uint16_t)(first&0xFFFF));
-        put_u32(d+28, (uint32_t)len);
-        return wr(fs, e.slot_off, d, ENTRY_SIZE);
+        put_u32(d+28, size);
+        return wr(fs, old->slot_off, d, ENTRY_SIZE);
     }
-    return dir_add_entry(fs, dir, nm, first, (uint32_t)len, false);
+    return dir_add_entry(fs, dir, nm, first, size, false);
+}
+
+/* 往 dst 写一段【内存里】的数据（供 put_data 用；大文件请走 put_file 流式路径） */
+static int write_data(img_fat32_fs *fs, const void *data, size_t len,
+                      const char *dst_abs_path){
+    uint32_t dir; char nm[256]; bool ex=false; dir_ent old;
+    int rc=put_prepare(fs,dst_abs_path,&dir,nm,sizeof nm,&ex,&old);
+    if(rc) return rc;
+    uint32_t csz=(uint32_t)fs->L.sectors_per_cluster*512;
+    uint32_t need = len? (uint32_t)((len + csz - 1)/csz) : 0;
+    uint32_t first=0;
+    if(need){ rc=put_alloc_chain(fs,need,&first); if(rc) return rc; }
+    if(need){
+        uint8_t *tmp=calloc(1,csz);
+        if(!tmp){ if(first) free_chain(fs,first); return IMG_ENOMEM; }
+        uint32_t c=first;
+        for(uint32_t i=0;i<need;i++){
+            size_t off=(size_t)i*csz;
+            size_t n=(len-off<csz)?(len-off):csz;
+            memcpy(tmp,(const uint8_t*)data+off,n);
+            if(i+1<need) memset(tmp+n,0,csz-n);          /* 非末簇要写满 */
+            int w=wr(fs, clus_off(fs,c), tmp, csz);
+            if(w){ free(tmp); if(first) free_chain(fs,first); return w; }
+            if(i+1<need){ uint32_t nx=0; if(fat_get(fs,c,&nx)){ free(tmp); return IMG_EIO; } c=nx; }
+        }
+        free(tmp);
+    }
+    return put_finalize(fs,dir,nm,first,(uint32_t)len,ex,&old);
 }
 
 int img_fat32_put_data(img_fat32_fs *fs, const void *data, size_t len, const char *dst_abs_path){
@@ -656,27 +685,64 @@ int img_fat32_put_file(img_fat32_fs *fs, const char *local_path,
     size_t len=(size_t)st.st_size;
     img_span_kv_u64(&sp,"size",len);
     img_span_begin(&sp);
-    void *buf = len? malloc(len) : malloc(1);
-    if(!buf){ close(fd); return IMG_ENOMEM; }
-    size_t got=0;
-    while(got<len){
-        ssize_t r=read(fd,(uint8_t*)buf+got,len-got);
-        if(r<=0) break;
-        got+=(size_t)r;
+
+    uint32_t dir; char nm[256]; bool ex=false; dir_ent old;
+    int rc=put_prepare(fs,dst_abs_path,&dir,nm,sizeof nm,&ex,&old);
+    if(rc){ close(fd); img_span_end(&sp,rc); return rc; }
+    uint32_t csz=(uint32_t)fs->L.sectors_per_cluster*512;
+    uint32_t need = len? (uint32_t)((len + csz - 1)/csz) : 0;
+    uint32_t first=0;
+    if(need){ rc=put_alloc_chain(fs,need,&first); if(rc){ close(fd); img_span_end(&sp,rc); return rc; } }
+
+    /* ★ 流式写入：内存峰值 = 1MiB（原先整个文件进内存 —— 415MB 的 winre.wim
+     *   在 Android 上直接把 App 顶到 OOM）。顺带也让进度变成流式的。*/
+    enum { CHUNK = 1u<<20 };
+    uint8_t *buf=malloc(CHUNK);
+    if(!buf){ close(fd); if(first) free_chain(fs,first); img_span_end(&sp,IMG_ENOMEM); return IMG_ENOMEM; }
+    uint32_t c=first; size_t coff=0, done=0;
+    while(done<len){
+        /* ★ 取消检查点：每个 1MiB 查一次。取消时【不写目录项】并释放已分配簇链，
+         *   所以不会留下"半成品文件"（见 DESIGN-OUTPUT.md 第四节）*/
+        if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
+        size_t want=len-done; if(want>CHUNK) want=CHUNK;
+        size_t got=0;
+        while(got<want){ ssize_t r=read(fd,buf+got,want-got); if(r<=0) break; got+=(size_t)r; }
+        if(!got){ rc=IMG_EIO; break; }                    /* 源文件被截短/读失败 */
+        size_t p=0;
+        while(p<got){
+            size_t room=csz-coff, n=(got-p<room)?(got-p):room;
+            int w=wr(fs, clus_off(fs,c)+coff, buf+p, n);
+            if(w){ rc=w; break; }
+            p+=n; coff+=n; done+=n;
+            if(coff==csz){ coff=0; uint32_t nx=0; if(fat_get(fs,c,&nx)){ rc=IMG_ECORRUPT; break; } c=nx; }
+        }
+        if(rc) break;
+        if(prog) img_prog_bytes(prog,done,len);
+        if(done<len && (c<2 || c>=FAT32_EOC)){ rc=IMG_ECORRUPT; break; }   /* 链比数据短 */
     }
-    close(fd);
-    int rc = write_data(fs, buf, got, dst_abs_path);
-    free(buf);
-    img_span_kv_u64(&sp,"written",(uint64_t)got);
+    free(buf); close(fd);
+    if(rc==IMG_OK && coff>0 && c>=2 && c<FAT32_EOC){       /* 尾簇补零：不把上一位住户的字节留在缝隙里 */
+        size_t rest=csz-coff;
+        uint8_t *z=calloc(1,rest);
+        if(z){ wr(fs, clus_off(fs,c)+coff, z, rest); free(z); }
+    }
+    if(rc){
+        if(first) free_chain(fs,first);                    /* 失败/取消：回收，不留半成品 */
+        img_span_end(&sp,rc);
+        return rc;
+    }
+    rc=put_finalize(fs,dir,nm,first,(uint32_t)len,ex,&old);
+    img_span_kv_u64(&sp,"written",(uint64_t)len);
     img_span_end(&sp,rc);
     if(rc==IMG_OK && prog){
         img_prog_phase(prog, IMG_PH_COPY, "写入 FAT32");
         img_prog_op(prog, IMG_OP_WRITE_FILE);
         img_prog_item(prog, dst_abs_path);
-        img_prog_bytes(prog, (uint64_t)got, (uint64_t)got);
+        img_prog_bytes(prog, (uint64_t)len, (uint64_t)len);
     }
     return rc;
 }
+
 
 int img_fat32_read_file(img_fat32_fs *fs, const char *abs_path, void **out, size_t *out_len){
     if(!fs||!abs_path||!out||!out_len) return IMG_EINVAL;
@@ -717,8 +783,7 @@ int img_fat32_list_dir(img_fat32_fs *fs, const char *abs_path, img_fat32_list_cb
     uint8_t *buf=malloc(csz);
     if(!buf) return IMG_ENOMEM;
     char lfn[260]; lfn[0]=0; bool have=false;
-    uint32_t c=dir;
-    uint64_t guard=0;
+    uint32_t c=dir; uint64_t guard=0;
     while(c>=2 && c<FAT32_EOC){
         if(FAT32_CHAIN_GUARD(fs,guard)){ free(buf); return IMG_ECORRUPT; }
         if(rd(fs, clus_off(fs,c), buf, csz)){ free(buf); return IMG_EIO; }
@@ -772,11 +837,8 @@ int img_fat32_rm(img_fat32_fs *fs, const char *abs_path){
     dir_ent e;
     if(dir_find(fs, dir, nm, &e)!=IMG_OK || !e.found) return IMG_ENOENT;
     if(e.is_dir){
-        /* 只允许删空目录：非空时保守返回 ENOTEMPTY
-         * ★ 原先这里写的是 img_fat32_list_dir(..., (img_fat32_list_cb){0}, ...) ——
-         *   传了个 NULL 回调（死代码）。目前靠 list_dir 内部 `!cb` 检查侥幸没崩，
-         *   但谁把那个检查一去掉就是空指针调用。改成明确判空。
-         *   （App 层要递归删除时自己先递归 rm）*/
+        /* 只允许删空目录：非空时保守返回错误。
+         * ★ 原先这里给 list_dir 传的是 NULL 回调（死代码），改成明确计数。*/
         uint32_t d2; char nm2[256]; int cnt=0;
         if(split_parent(fs, abs_path, &d2, nm2, sizeof nm2)==IMG_OK){
             dir_ent sub;
@@ -786,7 +848,7 @@ int img_fat32_rm(img_fat32_fs *fs, const char *abs_path){
         if(cnt>2) return IMG_ENOTSUP;      /* 只有 . 与 .. 才算空 */
     }
     if(e.cluster>=2){
-        /* ★ 必须检查返回值：链损坏时 free_chain 现在会返回 IMG_ECORRUPT，
+        /* ★ 必须检查返回值：链损坏时 free_chain 会返回 IMG_ECORRUPT，
          *   原先丢掉返回值 = 以为释放成功、把目录项标删，留下断链的半删除状态。*/
         int frc = free_chain(fs, e.cluster);
         if(frc!=IMG_OK) return frc;

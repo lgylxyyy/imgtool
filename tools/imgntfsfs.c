@@ -29,8 +29,8 @@ static void upstream_ls(img_qcow2 *q, uint64_t lba, uint64_t sz, const char *pat
     img_ntfs_ctx_activate(q,lba,sz);
     int d=open("imgtool-dev",O_RDWR|O_CREAT|O_TRUNC,0666); if(d>=0)close(d);
     optind=1;
-    char *a[]={(char*)"ntfsls",(char*)"-a",(char*)"-p",path,(char*)"imgtool-dev",NULL};
-    ntfsls_main(5,a);
+    const char *a[]={"ntfsls","-a","-p",path,"imgtool-dev"};
+    ntfsls_main(5,(char**)a);
     img_ntfs_ctx_deactivate();
 }
 int main(int argc,char**argv){

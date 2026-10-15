@@ -62,6 +62,18 @@ check_err "LBA 上不是 FAT32"   FAT-MOUNT-FAIL    $T/imgcmd fat.ls --img="$W/t
 check_err "镜像不存在"         IMG-OPEN-FAIL     $T/imgcmd img.info --img=/no/such.qcow2
 check_err "目录不存在"         FAT-DIR-NOTFOUND  $T/imgcmd fat.ls --img="$W/t.qcow2" --lba=$LBA --path=/nope
 
+echo "════ 4a. 宿主空间（默认开、不可关）════"
+$T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src="$W/blob.bin" --dst=/EFI/blk2.bin \
+    --host_free=1000000 > "$W/host.json" 2>/dev/null
+if [ "$(jq_ "d['err']['code']" < "$W/host.json")" = "HOST-ENOSPC" ]; then
+  ok "写前就拒绝（$(jq_ "d['err']['why']" < "$W/host.json")）"
+else ng "宿主空间没拦住（code=$(jq_ "d['err']['code']" < "$W/host.json")）"; fi
+got=$($T/imgcmd fat.ls --img="$W/t.qcow2" --lba=$LBA --path=/EFI 2>/dev/null | jq_ "[e['name'] for e in d['data']['entries']]" | grep -c "blk2.bin")
+[ "${got:-0}" = "0" ] && ok "拒绝后【没写入】任何字节（不留半成品）" || ng "拒绝后居然写进去了 $got 个"
+$T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src="$W/blob.bin" --dst=/EFI/blk3.bin \
+    --reserve=1 > "$W/res.json" 2>/dev/null
+[ "$(jq_ "d['ok']" < "$W/res.json")" = "True" ] && ok "reserve=1 正常执行（fallocate 失败也只警告不拦）" || ng "reserve=1 失败：$(head -c 160 "$W/res.json")"
+
 echo "════ 4b. wim.size 尺寸估算（工具给数字，App 定政策）════"
 ESD=$(ls /workspace/*.esd 2>/dev/null | head -1)
 if [ -n "$ESD" ]; then

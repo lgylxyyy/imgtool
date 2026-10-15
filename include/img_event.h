@@ -115,6 +115,14 @@ void img_error_report(int rc, const char *code, const char *mod, const char *op,
  *   App 侧可以直接把它塞进"复制到剪贴板"按钮。*/
 void img_fail_card(const char *cmd, const char *code, const char *at,
                    const char *why, const char *suggest);
+/* ---------- 取消（P0-2）----------
+ * 全局标志：任何线程可置位，正在跑的操作在"安全检查点"退出。
+ * 检查点 = 数据写入的每个 1MiB 块；取消后【不写目录项 + 释放已分配簇链】，
+ * 所以不会留下"半成品文件"。*/
+void img_cancel(void);        /* 请求取消 */
+void img_cancel_reset(void);  /* 下一个操作前清掉 */
+bool img_cancelled(void);     /* 当前是否已请求取消 */
+
 /* 卡片里"命令与参数"那一行（CLI/App 启动时给一次即可）*/
 void img_card_set_context(const char *kv_line);
 

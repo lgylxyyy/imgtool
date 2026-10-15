@@ -262,6 +262,7 @@ void img_ctx_close(img_ctx *c){
 }
 const char  *img_ctx_path(const img_ctx *c){ return c?c->path:""; }
 bool         img_ctx_check_size(const img_ctx *c){ return c?c->check_size:false; }
+img_io     *img_ctx_io(img_ctx *c){ return c?c->io:NULL; }
 img_qcow2   *img_ctx_qcow2(img_ctx *c){
     if(!c) return NULL;
     if(c->q) return c->q;
