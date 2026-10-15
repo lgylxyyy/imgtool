@@ -17,6 +17,7 @@
 | **ntfsprogs (mkntfs)** | **GPL-2.0-or-later** | NTFS 格式化器（作为**可选模块** `-DIMG_WITH_NTFS=ON/OFF`） | https://github.com/tuxera/ntfs-3g/tree/master/ntfsprogs |
 | **libregf**（规划中） | LGPL-3.0 | Windows BCD（registry hive）读写 | https://github.com/libyal/libregf |
 | **exfatprogs**（规划中） | GPL-2.0 | exFAT 格式化（若自研失败的备选） | https://github.com/exfatprogs/exfatprogs |
+| **libhivex** | **LGPL-2.1+** | BCD（注册表 hive）读写；已处理校验/cell分配/次序号自增 | https://github.com/libguestfs/hivex |
 
 > ⚠️ **许可证提示**：`mkntfs` 为 GPL-2.0+，启用该模块时 `imgtool` 整体须以 GPL-2.0-or-later 发布。
 > 已设计为**可选编译开关**，关闭后其余部分不带 GPL 代码。
@@ -93,10 +94,10 @@
 
 | 许可证 | 涉及组件 | 对本项目的影响 |
 |---|---|---|
-| **LGPL-2.1+** | libntfs-3g | 动态链接即可，需保留版权声明 |
 | **GPL-2.0+** | mkntfs / ntfsprogs | ⚠️ 启用 NTFS 格式化模块时，imgtool 须以 GPL-2.0+ 发布（**可选开关关闭则不受影响**） |
 | **LGPL-3.0** | libregf | 动态链接即可 |
 | **MIT** | zlib / PyYAML / jq / gh / Fluent UI 等 | 仅需保留版权声明 |
+| **LGPL-2.1+** | libntfs-3g / **libhivex** | 动态链接即可，需保留版权声明 |
 | **BSD-3-Clause** | CMake / libarchive | 同上 |
 
 > 详细许可证文本与版权声明见各仓库 `LICENSE` / `COPYING` 文件。
