@@ -271,6 +271,15 @@ int img_layout_build(img_parttable_t *t, uint64_t disk_sectors,
     if(disk_sectors <= win_start + reserve_tail + 2048) return IMG_EFULL;
     uint64_t win_sec = disk_sectors - win_start - reserve_tail;
 
+    /* ★ 修复：原先 GPT 路径【完全忽略 o->sys_bytes】，Windows 分区永远吃满剩余，
+     *   导致 imglayout --sys 无效、也没法留出独立数据盘。
+     *   现在：给了 sys_bytes 就按它建系统盘，剩下的留给数据盘。 */
+    uint64_t want_win = 0;
+    if(table==IMG_TABLE_GPT && o->sys_bytes > 0){
+        want_win = (o->sys_bytes + sec-1)/sec;
+        if(want_win < win_sec && want_win > 0) win_sec = want_win;
+    }
+
     img_part_request_t rq={0};
     rq.table=table; rq.disk_sectors=disk_sectors; rq.sector_size=sec;
     rq.role=IMG_ROLE_WINDOWS; rq.sectors=win_sec; rq.first_lba=win_start;
@@ -282,6 +291,25 @@ int img_layout_build(img_parttable_t *t, uint64_t disk_sectors,
         rc=img_partition_add(t,win_start,win_sec,IMG_MBR_NTFS_EXFAT,NULL,"Windows",false,&idx);
     if(rc) return rc;
     off = win_start + win_sec;
+
+    /* ★ 数据盘：紧接系统盘，吃满到恢复分区之前（只在给了 --sys 时启用）*/
+    if(table==IMG_TABLE_GPT && want_win > 0){
+        uint64_t d_start = (off + align-1)/align*align;
+        uint64_t d_end   = disk_sectors - reserve_tail && recovery_sec
+                           ? (disk_sectors - ((recovery_sec + align-1)/align*align + align))
+                           : disk_sectors - align;
+        if(d_end > d_start + align){
+            uint64_t d_sec = d_end - d_start;
+            img_part_request_t dq = (img_part_request_t){0};
+            dq.table=table; dq.disk_sectors=disk_sectors; dq.sector_size=sec;
+            dq.role=IMG_ROLE_WINDOWS; dq.sectors=d_sec; dq.first_lba=d_start;
+            dq.existing_count=3; dq.gpt_type_guid=IMG_GUID_BASIC; dq.mbr_type=IMG_MBR_NTFS_EXFAT;
+            if((rc=img_constraints_check_partition(&dq,err))!=IMG_OK) return rc;
+            if((rc=img_partition_add(t,d_start,d_sec,0x07,IMG_GUID_BASIC,
+                                     "Basic data partition",false,&idx))!=IMG_OK) return rc;
+            off = d_start + d_sec;
+        }
+    }
 
     if(recovery_sec){
         uint64_t r_start=(off+align-1)/align*align;
