@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 struct img_bcd { hive_h *h; };
 
@@ -178,4 +179,244 @@ char *img_bcd_get_string(img_bcd *b, const char *guid, const char *eid){
         return NULL;
     }
     char *s=u16_to_utf8(d,len); free(d); return s;
+}
+
+/* ============================================================
+ * 对象复制 / 恢复条目构建
+ *
+ * ★ 策略：不手写 device 对象的 176 字节二进制（含 subtype/偏移/长度，
+ *   错一个字段 Windows 就静默忽略），而是【从官方真值复制 + 改 WIM 路径】。
+ *   官方 LTSC ISO 的 {7619dcc8}=ramdiskoptions、{7619dcc9}=WinPE loader
+ *   本质就是"从 wim 启动"，把 WIM 路径换成 winre.wim 即为恢复条目。
+ * ============================================================ */
+
+/* 递归复制一个节点（名字+值+子节点）到目标 hive；返回新节点，0=失败 */
+static hive_node_h copy_node_recursive(img_bcd *dst, hive_h *sh, hive_node_h sn,
+                                       hive_node_h dparent){
+    char *nm = hivex_node_name(sh, sn);
+    if(!nm) return 0;
+    hive_node_h dn = hivex_node_add_child(dst->h, dparent, nm);
+    free(nm);
+    if(!dn) return 0;
+
+    /* 复制值 */
+    hive_value_h *vals = hivex_node_values(sh, sn);
+    if(vals){
+        for(size_t i=0; vals[i]; i++){
+            hive_type t; size_t len=0;
+            char *data = hivex_value_value(sh, vals[i], &t, &len);
+            char *key  = hivex_value_key(sh, vals[i]);
+            if(data && key){
+                hive_set_value sv = { .key=key, .t=t, .len=len, .value=data };
+                hivex_node_set_value(dst->h, dn, &sv, 0);
+            }
+            free(data); free(key);
+        }
+        free(vals);
+    }
+    /* 递归子节点 */
+    hive_node_h *kids = hivex_node_children(sh, sn);
+    if(kids){
+        for(size_t i=0; kids[i]; i++)
+            copy_node_recursive(dst, sh, kids[i], dn);
+        free(kids);
+    }
+    return dn;
+}
+
+/* 把 src 源里的一个对象（按 GUID 名）整体复制到 dst */
+int img_bcd_copy_object(img_bcd *dst, const char *src_path, const char *guid){
+    if(!dst||!src_path||!guid) return IMG_EINVAL;
+    hive_h *sh = hivex_open(src_path, HIVEX_OPEN_VERBOSE);
+    if(!sh) return IMG_ENOENT;
+    hive_node_h sobjs = hivex_node_get_child(sh, hivex_root(sh), "Objects");
+    char want[64]; snprintf(want,sizeof want,"{%s}",guid);
+    hive_node_h so = sobjs ? hivex_node_get_child(sh, sobjs, want) : 0;
+    if(!so){ hivex_close(sh); return IMG_ENOENT; }
+
+    hive_node_h dobj = hivex_node_get_child(dst->h, hivex_root(dst->h), "Objects");
+    if(!dobj) dobj = hivex_node_add_child(dst->h, hivex_root(dst->h), "Objects");
+    hive_node_h dn = copy_node_recursive(dst, sh, so, dobj);
+    hivex_close(sh);
+    return dn ? IMG_OK : IMG_EIO;
+}
+
+/* 在指定对象下新增/覆盖一个字符串元素（UTF-8 入参） */
+int img_bcd_set_string(img_bcd *b, const char *guid, const char *eid, const char *value){
+    if(!b||!guid||!eid||!value) return IMG_EINVAL;
+    hive_node_h o = find_object(b, guid);
+    if(!o) return IMG_ENOENT;
+    hive_node_h el = ensure_element(b, o, eid);
+    if(!el) return IMG_EIO;
+    return set_str_element(b, el, value);
+}
+
+/* 新建一个空对象（GUID 自由），返回 0 表示失败 */
+int img_bcd_create_object(img_bcd *b, const char *guid){
+    if(!b||!guid) return IMG_EINVAL;
+    hive_node_h objs = hivex_node_get_child(b->h, hivex_root(b->h), "Objects");
+    if(!objs) objs = hivex_node_add_child(b->h, hivex_root(b->h), "Objects");
+    if(!objs) return IMG_EIO;
+    char want[64]; snprintf(want,sizeof want,"{%s}",guid);
+    if(hivex_node_get_child(b->h, objs, want)) return IMG_OK;   /* 已存在 */
+    hive_node_h o = hivex_node_add_child(b->h, objs, want);
+    return o ? IMG_OK : IMG_EIO;
+}
+
+/* 把对象加入 DisplayOrder 列表（幂等） */
+int img_bcd_displayorder_add(img_bcd *b, const char *guid){
+    if(!b||!guid) return IMG_EINVAL;
+    hive_node_h bm = find_object(b, IMG_BCD_GUID_BOOTMGR);
+    if(!bm) return IMG_ENOENT;
+    hive_node_h el = ensure_element(b, bm, IMG_BCD_EL_DISPLAYORDER);
+    if(!el) return IMG_EIO;
+    /* 读现有列表 */
+    char cur[2048]; cur[0]=0;
+    hive_value_h *vals = hivex_node_values(b->h, el);
+    if(vals && vals[0]){
+        hive_type t; size_t len=0;
+        char *d = hivex_value_value(b->h, vals[0], &t, &len);
+        if(d){
+            char *s = u16_to_utf8(d, len);
+            free(d);
+            if(s){ snprintf(cur,sizeof cur,"%s",s); free(s); }
+        }
+    }
+    if(vals) free(vals);
+    char me[64]; snprintf(me,sizeof me,"{%s}",guid);
+    if(strstr(cur, me)) return IMG_OK;      /* 已在列表 */
+    /* 拼接（多串用 \0 分隔，末尾再加一个 \0）*/
+    size_t n=0; char *u=utf8_to_u16(cur[0]?cur:me, &n);
+    if(!u) return IMG_ENOMEM;
+    /* 若已有旧项，需要把新项接到后面 —— 这里简化：两段分别转码再拼 */
+    size_t n1=0,n2=0;
+    char *ua = utf8_to_u16(cur, &n1);         /* 旧（可能带尾 \0） */
+    char *ub = utf8_to_u16(me, &n2);          /* 新 */
+    free(u);
+    if(!ua||!ub){ free(ua); free(ub); return IMG_ENOMEM; }
+    size_t total = n1 + n2 + 2;
+    char *buf = calloc(1, total);
+    if(!buf){ free(ua); free(ub); return IMG_ENOMEM; }
+    memcpy(buf, ua, n1);
+    memcpy(buf+n1, ub, n2);
+    free(ua); free(ub);
+    hive_set_value sv = { .key=(char*)"element", .t=hive_t_multiple_strings,
+                          .len=total, .value=buf };
+    int rc = hivex_node_set_value(b->h, el, &sv, 0);
+    free(buf);
+    return rc==0 ? IMG_OK : IMG_EIO;
+}
+
+/* ============================================================
+ * device 对象里的 WIM 路径补丁
+ *
+ * 实测结构（176 字节的 ramdisk device 对象）：
+ *   [0..15]   被引用对象 GUID（RAMDisk options）
+ *   [20..23]  类型（1=ramdisk带路径, 6=本地设备）
+ *   [24..27]  ★ blob总长 - 16  （ISO 176→160；Xlite 88→72，两个真值均吻合）
+ *   [56..59]  ★ 字符串偏移（恒 120）
+ *   [120..]   UTF-16LE 路径 + NUL
+ *
+ * 改路径时必须同步 [24..27]，否则引导器会按旧长度截断/越界读。
+ * ============================================================ */
+static int u16len(const char *s){ int n=0; while(s[n]) n++; return n; }
+
+/* 在 blob 里扫描 UTF-16 ASCII 串（我们的路径都是 ASCII），返回起始偏移，0=没找到 */
+static size_t find_u16_ascii(const unsigned char *d, size_t len){
+    /* 从后往前找最长的连续可打印 UTF-16（低字节可打印、高字节0）段 */
+    size_t best=0, bestlen=0, i=0;
+    while(i+1 < len){
+        size_t start=i;
+        while(i+1 < len){
+            unsigned lo=d[i], hi=d[i+1];
+            bool ch = (lo>=0x20 && lo<0x7f && hi==0);
+            if(!ch) break;
+            i+=2;
+        }
+        size_t seg = i - start;
+        if(seg > bestlen && seg >= 4){ bestlen=seg; best=start; }
+        i += 2;   /* 跳过该段（含其后字节），继续找 */
+        if(bestlen>0 && i<=best) break;
+    }
+    return best;
+}
+
+int img_bcd_patch_device_wimpath(img_bcd *b, const char *guid, const char *eid,
+                                 const char *new_path){
+    if(!b||!guid||!eid||!new_path) return IMG_EINVAL;
+    hive_node_h o = find_object(b, guid);
+    if(!o) return IMG_ENOENT;
+    hive_node_h els = hivex_node_get_child(b->h, o, "Elements");
+    hive_node_h el  = els ? hivex_node_get_child(b->h, els, eid) : 0;
+    if(!el || hivex_node_nr_values(b->h, el)==0) return IMG_ENOENT;
+
+    hive_value_h *vals = hivex_node_values(b->h, el);
+    hive_type t; size_t len=0;
+    char *d = hivex_value_value(b->h, vals[0], &t, &len);
+    free(vals);
+    if(!d || t != hive_t_binary){ free(d); return IMG_EFORMAT; }
+    if(len < 64 || len > 4096){ free(d); return IMG_ECORRUPT; }
+
+    /* 结构守卫：[24] 必须等于 blob长-16 —— 两个真值（176/160、88/72）均吻合 */
+    uint32_t sz_field; memcpy(&sz_field, d+24, 4);
+    if((size_t)sz_field + 16 != len){ free(d); return IMG_ECORRUPT; }
+
+    /* ★ 定位原串：实测它在 blob【末尾】，前面有一段(120..139)是零填充，
+     *   偏移字段 [56]=1 并【不是】串偏移（我曾误判并因此破坏过结构）。 */
+    size_t soff = find_u16_ascii((const unsigned char*)d, len);
+    if(soff == 0){ free(d); return IMG_ECORRUPT; }   /* 结构不符就不动它 */
+
+    int chars = u16len(new_path);
+    size_t newstr = (size_t)chars*2 + 2;             /* +NUL */
+    size_t newlen = soff + newstr;
+    if(newlen < len) newlen = len;                   /* 只增不减，保尾部未知字段 */
+    size_t pad = (4 - (newlen % 4)) % 4; newlen += pad;
+
+    char *nd = calloc(1, newlen);
+    if(!nd){ free(d); return IMG_ENOMEM; }
+    memcpy(nd, d, len < newlen ? len : newlen);
+    free(d);
+
+    /* 只覆盖字符串区，其余字节保持原样 */
+    memset(nd + soff, 0, newlen - soff);
+    for(int i=0;i<chars;i++){
+        nd[soff + i*2]   = (char)(new_path[i] & 0xFF);
+        nd[soff + i*2+1] = 0;
+    }
+    /* 同步 [24] = 总长-16（唯一必须改的结构字段）*/
+    uint32_t nsz = (uint32_t)(newlen - 16);
+    memcpy(nd+24, &nsz, 4);
+
+    hive_set_value sv = { .key=(char*)"element", .t=hive_t_binary,
+                          .len=newlen, .value=nd };
+    int rc = hivex_node_set_value(b->h, el, &sv, 0);
+    free(nd);
+    return rc==0 ? IMG_OK : IMG_EIO;
+}
+
+/* 读出 device 对象里的路径（校验结构用） */
+int img_bcd_get_device_wimpath(img_bcd *b, const char *guid, const char *eid,
+                               char *out, size_t outlen){
+    if(!b||!guid||!eid||!out) return IMG_EINVAL;
+    out[0]=0;
+    hive_node_h o=find_object(b,guid); if(!o) return IMG_ENOENT;
+    hive_node_h els=hivex_node_get_child(b->h,o,"Elements");
+    hive_node_h el =els?hivex_node_get_child(b->h,els,eid):0;
+    if(!el||hivex_node_nr_values(b->h,el)==0) return IMG_ENOENT;
+    hive_value_h *vals=hivex_node_values(b->h,el);
+    hive_type t; size_t len=0;
+    char *d=hivex_value_value(b->h,vals[0],&t,&len);
+    free(vals);
+    if(!d||t!=hive_t_binary||len<124){ free(d); return IMG_EFORMAT; }
+    size_t off = find_u16_ascii((const unsigned char*)d, len);
+    if(off==0){ free(d); return IMG_ECORRUPT; }
+    char tmp[512]; int j=0;
+    for(size_t i=off; i+1<len && j<(int)sizeof tmp-1; i+=2){
+        unsigned c = (unsigned char)d[i] | ((unsigned char)d[i+1]<<8);
+        if(c==0) break;
+        tmp[j++] = c<128 ? (char)c : '?';
+    }
+    tmp[j]=0; free(d);
+    snprintf(out,outlen,"%s",tmp);
+    return IMG_OK;
 }

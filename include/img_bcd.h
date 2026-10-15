@@ -93,3 +93,30 @@ char *img_bcd_get_string(img_bcd *b, const char *object_guid, const char *elemen
 }
 #endif
 #endif
+
+/* ---------- 对象复制 / 恢复条目构建 ----------
+ * 策略：不手写 device 对象二进制（错一个字段 Windows 就静默忽略），
+ *       而是从【官方真值】复制对象再改 WIM 路径。 */
+
+/* 把 src_path（参考 BCD）里的对象 guid 整体复制到 dst */
+int img_bcd_copy_object(img_bcd *dst, const char *src_path, const char *guid);
+/* 新建空对象 */
+int img_bcd_create_object(img_bcd *b, const char *guid);
+/* 设字符串元素（UTF-8 入参） */
+int img_bcd_set_string(img_bcd *b, const char *guid, const char *eid, const char *value);
+/* 把对象加入 bootmgr 的 DisplayOrder（幂等） */
+int img_bcd_displayorder_add(img_bcd *b, const char *guid);
+
+/* 官方 LTSC ISO 里两个可复用的对象（已实测存在） */
+#define IMG_BCD_GUID_ISO_RAMDISK  "7619dcc8-fafe-11d9-b411-000476eba25f"
+#define IMG_BCD_GUID_ISO_WINPE    "7619dcc9-fafe-11d9-b411-000476eba25f"
+/* WinPE loader 上与 ramdisk 相关的元素 */
+#define IMG_BCD_EL_WIM_DEVICE     "21000001"   /* device 对象，内嵌 WIM 路径 */
+#define IMG_BCD_EL_BOOTSDI_PATH   "32000004"   /* ramdiskoptions: \boot\boot.sdi */
+
+/* device 对象(21000001/11000001) 内嵌 WIM 路径的读/写
+ * 结构见 src/img_bcd.c 里 patch 函数上方注释；结构不符时返回 IMG_ECORRUPT（不硬写）*/
+int img_bcd_patch_device_wimpath(img_bcd *b, const char *guid, const char *eid,
+                                 const char *new_path);
+int img_bcd_get_device_wimpath(img_bcd *b, const char *guid, const char *eid,
+                               char *out, size_t outlen);

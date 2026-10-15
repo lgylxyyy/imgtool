@@ -21,3 +21,10 @@ if(HIVEX_INC AND HIVEX_LIB)
 else()
   message(STATUS "imgtool: 未找到 hivex，跳过 BCD 测试")
 endif()
+
+# 恢复条目构建测试（依赖 libhivex + 官方 ISO BCD 参考文件）
+if(HIVEX_INC AND HIVEX_LIB)
+  add_executable(recovery_bcd_test recovery_bcd_test.c ../src/img_bcd.c)
+  target_include_directories(recovery_bcd_test PRIVATE ${HIVEX_INC})
+  target_link_libraries(recovery_bcd_test PRIVATE imgtool ${HIVEX_LIB})
+endif()
