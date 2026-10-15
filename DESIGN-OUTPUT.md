@@ -25,19 +25,37 @@ App 屏幕上那块 = 调同一个渲染函数塞进自己的控件，不重写�
 **用户决策：日志只记【开始做】和【完成做】，过程只给 App 显示，不落盘。**
 
 ```
-t=0 l=I m=app ev=session tool=imgmkfs argv=/workspace/images/BUILD-初心11-128G.qcow2 size=0
-t=2 l=I m=fat32 ev=begin rc=0 msg="格式化 FAT32 分区" op=format lba=2048 bytes=134217728
-t=80 l=I m=fat32 ev=done rc=0 op=format ms=78
-t=6 l=I m=ntfs ev=begin rc=0 msg="写入 NTFS" op=put path=/Recovery/WindowsRE/Winre.wim size=435363851
-t=828 l=I m=ntfs ev=done rc=0 op=put ms=820
-t=1170 l=E m=ntfs ev=fail rc=-10 errno=28 code=FAT-ENOSPC at=/Recovery/WindowsRE/Winre.wim msg="目标分区空间不足"
+time="2026-10-15 18:39:01.448" level=INFO tool=imgmkfs event=session args=/workspace/images/x.qcow2
+time="2026-10-15 18:39:01.450" level=INFO logger=fat32 event=begin message="格式化 FAT32 分区" action=format lba=2048 size_bytes=134217728
+time="2026-10-15 18:39:01.526" level=INFO logger=fat32 event=done rc=0 action=format duration_ms=76
+time="2026-10-15 18:39:30.900" level=ERROR logger=cmd event=fail rc=-10 error_code=FAT-ENOSPC at=/EFI/x message="宿主剩余 196 MB，本次预计需要 286 MB"
 ```
 
-> **格式：logfmt（`key=value`，空格分隔）**——用户明确要求"少用引号"：
-> *键 / 数字 / 布尔 → **永不加引号**；字符串 → **只在含空格、`=`、引号或为空时**才加引号并转义。*
-> 同一行 JSON 要 111 字节、logfmt 只要 **83 字节（省 25%）**，且人读明显更清爽。
-> 为什么不用 JSON：JSON 规定键和字符串**都必须**带引号，减不掉（我此前试过键不加引号
+### 字段名对照表（★ 键名照抄业界惯例，不是我发明的）
+
+| 键 | 含义 | 名字来源 |
+|---|---|---|
+| `time` | 事件时刻（本地时间，毫秒）—— **值里有空格，logfmt 规范强制加引号** | slog `time=` / zap `ts=` |
+| `level` | `ERROR`/`WARN`/`INFO`/`DEBUG`/`TRACE` | slog / zap / logfmt 通吃 |
+| `logger` | 模块（`fat32`/`ntfs`/`bcd`/`part`/`app`…） | logfmt 常用 `logger=` 或 `component=` |
+| `tool` | 哪个程序（`imgmkfs`…，只在会话行出现一次） | — |
+| `event` | 生命周期：`session`/`begin`/`done`/`fail`/`alive` | 结构化日志惯例："event = 发生了什么" |
+| `action` | 具体操作：`format`/`put`/`save`/`check`… | 审计日志惯用 `action` |
+| `message` | 人话一句话 | Python/R logfmt 用 `message`（Go 用 `msg`）|
+| `rc` | 返回码（0=成功，负值=`img_err_t`） | C/Unix 通用缩写（用户选定保留）|
+| `error_code` | 稳定的错误桶名（`FAT-ENOSPC`…） | 惯例 `error`/`error_code` |
+| `duration_ms` | 该操作耗时（毫秒） | 单位写进键名（惯例），值不换算 |
+| `size_bytes`/`written_bytes`/`need_bytes` | 字节数 | 同上；**值一律原始字节，永不换算成 MB/KB**（用户要求：换算会丢精度、害排查）|
+| `path`/`at`/`lba`/`part_lba`/`cluster`… | 上下文字段，按需出现 | `lba` 是存储领域通用术语（起始扇区号）|
+
+> **格式：logfmt（`key=value`，空格分隔）**
+> *键 / 数字 → 永不加引号；字符串 → 只在含空格、`=`、引号或为空时才加引号并转义。*
+> 同一行 JSON 111 字节、logfmt 83 字节（省 25%）。
+> 为什么不用 JSON：JSON 规定键和字符串**都必须**带引号，减不掉（此前试过键不加引号
 > → `{ok:true}` 被 Python 直接判非法）。
+> ⚠ 时间带空格所以必须加引号，这是**唯一必须**带引号的字段（`message` 含空格时也会加）。
+> **stdout 上的结果信封仍是 JSON**（`{"ok":true,"version":1,"data":{...}}`）——
+> 那是给 App 程序解析的接口，标准格式不能动。
 > ⚠ **stdout 上的"结果信封"仍是 JSON**（`{"ok":true,"data":{...}}`）——那是给 App 的
 > 程序接口，标准格式不能动；日志文件（人查/我查）用 logfmt。
 ```
