@@ -117,15 +117,40 @@ int img_bcd_set_bootmgr_name(img_bcd *b, const char *name){
     return set_str_element(b, el, name);
 }
 
+/* 写「GUID 列表」元素（REG_MULTI_SZ, hive_t=7）
+ *
+ * ★ 血泪教训：recoverysequence 的 format 段是 4 = GUID list，必须存成
+ *   REG_MULTI_SZ（双 NUL 结尾），与 DisplayOrder/ToolsDisplayOrder 一样。
+ *   我最初用 set_str_element 写成了 REG_SZ(t=1) 单串 —— bootmgr 按列表格式
+ *   去读，发现类型不符 → 判定"BCD 不含有效操作系统信息" → 0xc0000098。
+ *   实测对比：
+ *     DisplayOrder     24000001  t=7  len=80（尾部 00 00）
+ *     RecoverySequence 14000008  t=1  len=78（尾部单 00）← 错
+ */
+static int set_guid_list_element(img_bcd *b, hive_node_h el, const char *guid){
+    char txt[64]; snprintf(txt,sizeof txt,"{%s}",guid);
+    /* UTF-16LE + 双 NUL 终止符 */
+    size_t n = (strlen(txt)+1)*2 + 2;
+    char *buf = calloc(1,n);
+    if(!buf) return IMG_ENOMEM;
+    for(size_t i=0;i<strlen(txt);i++){
+        buf[i*2]=(char)(unsigned char)txt[i];
+        buf[i*2+1]=0;
+    }
+    hive_set_value sv = { .key=(char*)"element", .t=hive_t_multiple_strings,
+                          .len=n, .value=buf };
+    int rc = hivex_node_set_value(b->h, el, &sv, 0);
+    free(buf);
+    return rc==0 ? IMG_OK : IMG_EIO;
+}
+
 int img_bcd_set_recovery_sequence(img_bcd *b, const char *guid){
     if(!b||!guid) return IMG_EINVAL;
-
     hive_node_h bm = find_object(b, IMG_BCD_GUID_BOOTMGR);
     if(!bm) return IMG_EFORMAT;
     hive_node_h el = ensure_element(b, bm, IMG_BCD_EL_RECOVERYSEQ);
     if(!el) return IMG_EIO;
-    char buf[64]; snprintf(buf,sizeof buf,"{%s}",guid);
-    return set_str_element(b, el, buf);
+    return set_guid_list_element(b, el, guid);
 }
 
 int img_bcd_get_display_order_first(img_bcd *b, char *out, size_t out_len){
