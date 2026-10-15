@@ -31,6 +31,7 @@ set(IMG_SOURCES
   src/img_fixboot.c
   src/ntfs_bridge.c
   src/img_ntfs_fs.c
+  src/img_fat32_fs.c
   src/img_wim_apply.c
 )
 

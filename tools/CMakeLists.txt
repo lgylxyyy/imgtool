@@ -35,3 +35,7 @@ target_sources(imgntfsfs PRIVATE /workspace/build/mkntfs_obj/ntfsls.o /workspace
 add_executable(imggenbcd imggenbcd.c ../src/img_bcd.c)
 target_include_directories(imggenbcd PRIVATE ${HIVEX_INC})
 target_link_libraries(imggenbcd PRIVATE imgtool ${HIVEX_LIB})
+
+add_executable(imgfatfs imgfatfs.c)
+target_link_libraries(imgfatfs PRIVATE imgtool)
+target_sources(imgfatfs PRIVATE src/img_fat32_fs.c)
