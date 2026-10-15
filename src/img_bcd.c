@@ -420,3 +420,105 @@ int img_bcd_get_device_wimpath(img_bcd *b, const char *guid, const char *eid,
     snprintf(out,outlen,"%s",tmp);
     return IMG_OK;
 }
+
+/* ============================================================
+ * 构造「分区设备」对象（88 字节）
+ *
+ * 格式（实测：与 diskA 的 GPT 磁盘 GUID 逐字节吻合）：
+ *   [0..15]  16B  GUID = 0                （partition 设备没有顶层对象 GUID）
+ *   [16..19] 4B   type  = 6
+ *   [20..23] 4B   0
+ *   [24..27] 4B   size  = 72
+ *   [28..31] 4B   0
+ *   [32..47] 16B  分区唯一 GUID（LE 混合端序：前3段小端，后2段按字节）
+ *   [48..55] 8B   0
+ *   [56..71] 16B  磁盘 GUID    （同上编码）
+ *   [72..87] 16B  0
+ *
+ * ★ 为什么需要它：ramdiskoptions 的 ramdisksdidevice(31000003) 在官方 ISO 里是
+ *   type=5「本地设备」(GUID 全零)，含义是"跟着 BCD 所在分区"。ISO 的 BCD/boot.sdi/
+ *   boot.wim 全在同一分区所以能用；而我们 winre.wim 在【独立的恢复分区】上，
+ *   用「本地设备」会让 bootmgr 去 ESP 找 → 找不到 → 0xc0000098。
+ * ============================================================ */
+static bool guid_text_to_bytes(const char *txt, uint8_t out[16]){
+    /* 去掉横线取 32 个十六进制字符，再按 GUID 内存布局重排：
+     *   文本 AABBCCDD-EEFF-GGHH-IIJJ-KKLLMMNNOOPP
+     *   内存 DD CC BB AA FF EE HH GG II JJ KK LL MM NN OO PP
+     *   （前 3 段小端，后 2 段按原字节序）*/
+    if(!txt) return false;
+    char hex[64]; int n=0;
+    for(const char *p=txt; *p; p++){
+        if(*p=='-') continue;
+        if(n>=(int)sizeof hex-1) return false;
+        hex[n++]=*p;
+    }
+    hex[n]=0;
+    if(n!=32) return false;
+    uint8_t b[16];
+    for(int i=0;i<16;i++){
+        char t[3]={hex[i*2],hex[i*2+1],0};
+        char *end=NULL;
+        long v=strtol(t,&end,16);
+        if(!end || *end) return false;
+        b[i]=(uint8_t)v;
+    }
+    out[0]=b[3]; out[1]=b[2]; out[2]=b[1]; out[3]=b[0];
+    out[4]=b[5]; out[5]=b[4];
+    out[6]=b[7]; out[7]=b[6];
+    for(int i=8;i<16;i++) out[i]=b[i];
+    return true;
+}
+
+int img_bcd_make_partition_device(const char *part_guid, const char *disk_guid,
+                                  uint8_t out[88]){
+    if(!part_guid||!disk_guid||!out) return IMG_EINVAL;
+    memset(out,0,88);
+    uint8_t pg[16], dg[16];
+    if(!guid_text_to_bytes(part_guid,pg)) return IMG_EINVAL;
+    if(!guid_text_to_bytes(disk_guid,dg)) return IMG_EINVAL;
+    uint32_t type=6, size=72;
+    memcpy(out+16,&type,4);
+    memcpy(out+24,&size,4);
+    memcpy(out+32,pg,16);
+    memcpy(out+56,dg,16);
+    return IMG_OK;
+}
+
+int img_bcd_set_element_binary(img_bcd *b, const char *guid, const char *eid,
+                               const void *data, size_t len){
+    if(!b||!guid||!eid||!data) return IMG_EINVAL;
+    hive_node_h o=find_object(b,guid); if(!o) return IMG_ENOENT;
+    hive_node_h el=ensure_element(b,o,eid); if(!el) return IMG_EIO;
+    hive_set_value sv={ .key=(char*)"element", .t=hive_t_binary, .len=len, .value=(void*)data };
+    return hivex_node_set_value(b->h, el, &sv, 0)==0 ? IMG_OK : IMG_EIO;
+}
+
+/* 把 ramdiskoptions 的 ramdisksdidevice 指到指定分区（而不是"本地设备"）*/
+int img_bcd_set_ramdisksdi_partition(img_bcd *b, const char *ramdisk_guid,
+                                     const char *part_guid, const char *disk_guid){
+    uint8_t dev[88];
+    int rc=img_bcd_make_partition_device(part_guid,disk_guid,dev);
+    if(rc) return rc;
+    return img_bcd_set_element_binary(b, ramdisk_guid, "31000003", dev, sizeof dev);
+}
+
+/* 读二进制元素（调用方提供的缓冲；*out_len 返回实际长度）*/
+int img_bcd_get_element_binary(img_bcd *b, const char *guid, const char *eid,
+                               void *out, size_t cap, size_t *out_len){
+    if(!b||!guid||!eid||!out||!out_len) return IMG_EINVAL;
+    *out_len=0;
+    hive_node_h o=find_object(b,guid); if(!o) return IMG_ENOENT;
+    hive_node_h els=hivex_node_get_child(b->h,o,"Elements");
+    hive_node_h el =els?hivex_node_get_child(b->h,els,eid):0;
+    if(!el||hivex_node_nr_values(b->h,el)==0) return IMG_ENOENT;
+    hive_value_h *vs=hivex_node_values(b->h,el);
+    hive_type t; size_t ln=0;
+    char *d=hivex_value_value(b->h, vs[0], &t, &ln);
+    free(vs);
+    if(!d) return IMG_EIO;
+    if(t!=hive_t_binary){ free(d); return IMG_EFORMAT; }
+    if(ln>cap){ free(d); return IMG_EFULL; }
+    memcpy(out,d,ln); *out_len=ln;
+    free(d);
+    return IMG_OK;
+}

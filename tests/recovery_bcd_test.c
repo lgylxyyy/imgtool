@@ -60,6 +60,20 @@ int main(int argc, char **argv){
     ENSURE(img_bcd_set_string(b, IMG_BCD_GUID_ISO_WINPE, IMG_BCD_EL_OSDEVICE,
                               "Windows Recovery Environment")==IMG_OK, "显示名已改");
 
+    /* ★ 关键：ramdisksdidevice(31000003) 必须显式指向【恢复分区】。
+     *   官方 ISO 里它是 type=5「本地设备」(GUID 全零)，含义是"跟着 BCD 所在分区"
+     *   —— ISO 的 BCD/boot.sdi/boot.wim 同分区所以能用；
+     *   而我们 winre.wim 在独立恢复分区上，用"本地设备"会去 ESP 找 → 0xc0000098。*/
+    if(argc>5 && argc>6){
+        printf("⑤·b 把 ramdisksdidevice 指向恢复分区\n");
+        printf("     分区 GUID = %s\n     磁盘 GUID = %s\n", argv[5], argv[6]);
+        ENSURE(img_bcd_set_ramdisksdi_partition(b, IMG_BCD_GUID_ISO_RAMDISK,
+                                                argv[5], argv[6])==IMG_OK,
+               "ramdisksdidevice 已指向恢复分区");
+    } else {
+        printf("⑤·b ⚠ 未传恢复分区/磁盘 GUID —— ramdisksdidevice 保持'本地设备'\n");
+    }
+
     printf("⑥ 挂到 bootmgr 的 RecoverySequence(14000008)\n");
     ENSURE(img_bcd_set_recovery_sequence(b, IMG_BCD_GUID_ISO_WINPE)==IMG_OK, "写入 OK");
 
@@ -86,6 +100,21 @@ int main(int argc, char **argv){
     ENSURE(sd && strstr(sd,"boot.sdi")!=NULL, "boot.sdi 路径可读");
     free(sd);
 
+    {   /* 校验 ramdisksdidevice 是 type=6（分区设备）而非本地设备 */
+        unsigned char dd[128]; size_t ln=0;
+        if(img_bcd_get_element_binary(c, IMG_BCD_GUID_ISO_RAMDISK, "31000003",
+                                      dd, sizeof dd, &ln)==IMG_OK && ln>=88){
+            unsigned ty; memcpy(&ty, dd+16, 4);
+            printf("     ramdisksdidevice: type=%u len=%zu\n", ty, ln);
+            ENSURE(ty==6, "是【分区设备】(type=6) 而非本地设备(type=5)");
+            if(argc>5){
+                uint8_t exp[88];
+                if(img_bcd_make_partition_device(argv[5], argv[6], exp)==IMG_OK){
+                    ENSURE(memcmp(dd,exp,88)==0, "设备对象与期望逐字节一致");
+                }
+            }
+        } else printf("     ⚠ 读不到 ramdisksdidevice\n");
+    }
     char *rs = img_bcd_get_string(c, IMG_BCD_GUID_BOOTMGR, IMG_BCD_EL_RECOVERYSEQ);
     printf("     RecoverySequence → %s\n", rs?rs:"(null)");
     if(rs) printf("     (len=%zu) 期望=%s\n", strlen(rs), IMG_BCD_GUID_ISO_WINPE);

@@ -107,6 +107,17 @@ int img_bcd_set_string(img_bcd *b, const char *guid, const char *eid, const char
 /* 把对象加入 bootmgr 的 DisplayOrder（幂等） */
 int img_bcd_displayorder_add(img_bcd *b, const char *guid);
 
+/* ---- 「分区设备」对象构造（88 字节，格式已实测破译）----
+ * 用于把 ramdisksdidevice(31000003) 从"本地设备"改为显式指向某分区。 */
+int img_bcd_make_partition_device(const char *part_guid, const char *disk_guid,
+                                  uint8_t out[88]);
+int img_bcd_set_element_binary(img_bcd *b, const char *guid, const char *eid,
+                               const void *data, size_t len);
+int img_bcd_get_element_binary(img_bcd *b, const char *guid, const char *eid,
+                               void *out, size_t cap, size_t *out_len);
+int img_bcd_set_ramdisksdi_partition(img_bcd *b, const char *ramdisk_guid,
+                                     const char *part_guid, const char *disk_guid);
+
 /* 官方 LTSC ISO 里两个可复用的对象（已实测存在） */
 #define IMG_BCD_GUID_ISO_RAMDISK  "7619dcc8-fafe-11d9-b411-000476eba25f"
 #define IMG_BCD_GUID_ISO_WINPE    "7619dcc9-fafe-11d9-b411-000476eba25f"

@@ -553,9 +553,9 @@ int img_parttable_json(const img_parttable_t *t, char *buf, int cap){
     if(!t||!buf||cap<16) return 0;
     int k=0;
     k+=snprintf(buf+k,(size_t)(cap-k),
-        "{\"table\":\"%s\",\"diskSectors\":%llu,\"parts\":[",
+        "{\"table\":\"%s\",\"diskSectors\":%llu,\"diskGuid\":\"%s\",\"parts\":[",
         t->table==IMG_TABLE_GPT?"GPT":(t->table==IMG_TABLE_MBR?"MBR":"NONE"),
-        (unsigned long long)t->disk_sectors);
+        (unsigned long long)t->disk_sectors, t->disk_guid);
     bool first=true;
     for(int i=0;i<IMG_MAX_PARTITIONS && k<cap-64;i++){
         const img_partition_t *p=&t->parts[i];
