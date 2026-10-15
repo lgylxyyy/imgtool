@@ -24,14 +24,22 @@ App 屏幕上那块 = 调同一个渲染函数塞进自己的控件，不重写�
 
 **用户决策：日志只记【开始做】和【完成做】，过程只给 App 显示，不落盘。**
 
-```json
-{"t":2,   "l":"I","m":"app", "ev":"begin","op":"open","img":"x.qcow2","size":7152467968}
-{"t":9,   "l":"I","m":"app", "ev":"done", "op":"open","ms":7,"rc":0}
-{"t":13,  "l":"I","m":"ntfs","ev":"begin","op":"put","path":"/Recovery/…/Winre.wim","size":435363851,"part":"266336256"}
-{"t":1163,"l":"I","m":"ntfs","ev":"done", "op":"put","ms":1150,"rc":0}
-{"t":1170,"l":"E","m":"ntfs","ev":"fail", "op":"put","code":"NTFS-ENOSPC","rc":"IMG_EFULL","errno":28,
-          "at":"/Recovery/…/Winre.wim","need":435363851,"free":398458880,"step":"5/7"}
-{"t":1171,"l":"E","m":"app", "ev":"end",  "rc":"IMG_EFULL","steps_done":4,"steps_total":7,"ms":1171}
+```
+t=0 l=I m=app ev=session tool=imgmkfs argv=/workspace/images/BUILD-初心11-128G.qcow2 size=0
+t=2 l=I m=fat32 ev=begin rc=0 msg="格式化 FAT32 分区" op=format lba=2048 bytes=134217728
+t=80 l=I m=fat32 ev=done rc=0 op=format ms=78
+t=6 l=I m=ntfs ev=begin rc=0 msg="写入 NTFS" op=put path=/Recovery/WindowsRE/Winre.wim size=435363851
+t=828 l=I m=ntfs ev=done rc=0 op=put ms=820
+t=1170 l=E m=ntfs ev=fail rc=-10 errno=28 code=FAT-ENOSPC at=/Recovery/WindowsRE/Winre.wim msg="目标分区空间不足"
+```
+
+> **格式：logfmt（`key=value`，空格分隔）**——用户明确要求"少用引号"：
+> *键 / 数字 / 布尔 → **永不加引号**；字符串 → **只在含空格、`=`、引号或为空时**才加引号并转义。*
+> 同一行 JSON 要 111 字节、logfmt 只要 **83 字节（省 25%）**，且人读明显更清爽。
+> 为什么不用 JSON：JSON 规定键和字符串**都必须**带引号，减不掉（我此前试过键不加引号
+> → `{ok:true}` 被 Python 直接判非法）。
+> ⚠ **stdout 上的"结果信封"仍是 JSON**（`{"ok":true,"data":{...}}`）——那是给 App 的
+> 程序接口，标准格式不能动；日志文件（人查/我查）用 logfmt。
 ```
 
 ### 硬性要求

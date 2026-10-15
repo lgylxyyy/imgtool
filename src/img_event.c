@@ -108,9 +108,8 @@ static void rotate_if_needed(void){
     G.written = 0;
     if(G.fd<0) return;
     char note[LINE_CAP];
-    int n=snprintf(note,sizeof note,
-        "{\"t\":%lld,\"l\":\"I\",\"m\":\"log\",\"ev\":\"rotate\",\"kept\":\"%s\"}\n",
-        now_ms()-G.t0_ms, bak[0]?bak:"(discarded)");
+    int n=snprintf(note,sizeof note, "t=%lld l=I m=log ev=rotate kept=%s\n",
+                          now_ms()-G.t0_ms, bak[0]?bak:"(discarded)");
     if(n>0){ write_all(G.fd,note,(size_t)n); G.written+=(size_t)n; }
     if(G.session[0]){                                  /* ★ 半截日志也能单独看懂 */
         write_all(G.fd,G.session,strlen(G.session));
@@ -145,19 +144,6 @@ void img_out_open_fd(int fd, bool human){ G.out_fd=fd; G.out_human=human; }
 
 void img_card_set_context(const char *kv_line){
     if(kv_line) snprintf(G.ctx,sizeof G.ctx,"%s",kv_line);
-}
-void img_log_session(const char *tool,const char *argv,const char *img,uint64_t img_size){
-    if(img) snprintf(G.img,sizeof G.img,"%s",img);
-    snprintf(G.ctx,sizeof G.ctx,"%s %s",tool?tool:"?",argv?argv:"");
-    int n=snprintf(G.session,sizeof G.session,
-        "{\"t\":0,\"l\":\"I\",\"m\":\"app\",\"ev\":\"session\",\"tool\":\"%s\",\"argv\":\"%s\","
-        "\"img\":\"%s\",\"size\":%llu}\n",
-        tool?tool:"?",argv?argv:"",img?img:"",(unsigned long long)img_size);
-    /* ★ 会话行【不立即写】：标成待写，等这个进程第一次真正打点时再补。
-     *   原因：流水线里每个工具是独立进程，开日志就写一行会让
-     *   "imgpart show ×7" 刷出 7 行一模一样的会话。纯只读的工具（没打点）→ 零输出。
-     *   这样日志里只有"真正做过事的工具"，行数最小。*/
-    if(n>0) s_session_pending = (G.fd>=0);
 }
 /* 第一次打点前把会话行补上（进程内只补一次）*/
 static void session_flush(void){
@@ -303,7 +289,9 @@ int img_ring_dump(void *ud,int (*cb)(void*,const char*),int max){
 }
 
 /* ---------- JSON 行构造（栈上，无 malloc） ---------- */
+
 typedef struct { char *p,*start,*end; } W;
+
 static void jesc(W *w,const char *s){
     for(; s&&*s; s++){
         unsigned char c=(unsigned char)*s;
@@ -320,27 +308,39 @@ static void jesc(W *w,const char *s){
         else if(w->p+1<w->end) *w->p++=(char)c;
     }
 }
-static void w_key(W *w,const char *k){
-    if(w->p>w->start) *w->p++=',';      /* ★ 首字段不能加逗号 */
-    if(w->p<w->end) *w->p++='"';        /* ★ key 必须带引号，否则整个 JSON 非法 */
-    jesc(w,k);
-    if(w->p<w->end) *w->p++='"';
-    if(w->p<w->end) *w->p++=':';
+
+
+/* ---------- logfmt 写出（键不加引号、数字裸写、字符串仅"必要时"加引号）----------
+ * 为什么不用 JSON：JSON 规定【键与字符串都必须带引号】→ 每行多 20~30 字节，
+ *   而且人读着费劲（用户原话"那么多引号"）。改用 key=value：
+ *     键/数字/布尔  → 永不加引号
+ *     字符串        → 只有含 空格/制表/引号/= 反斜杠 或为空 时才加引号并转义
+ *   例：t=1 l=I m=fat32 ev=begin rc=0 msg="格式化 FAT32 分区" op=format lba=2048
+ * 仍可机器解析（logfmt 是常见格式，规则与 TOML/12-factor 日志一致）。
+ * 注意：stdout 上的【结果信封】仍是 JSON（App 侧契约，标准格式不能动）。 */
+static bool lf_need_quote(const char *v){
+    if(!v||!*v) return true;                    /* 空串必须引，否则看不出"有没有值" */
+    for(const char *p=v;*p;p++){
+        unsigned char c=(unsigned char)*p;
+        if(c==' '||c=='\t'||c=='"'||c=='='||c=='\\'||c<0x20) return true;
+    }
+    return false;
 }
-static void w_str(W *w,const char *k,const char *v){
-    w_key(w,k);
-    if(w->p<w->end) *w->p++='"';
-    jesc(w,v?v:"");
-    if(w->p<w->end) *w->p++='"';
+static void lf_sep(W *w){ if(w->p<w->end && w->p>w->start) *w->p++=' '; }
+static void lf_key(W *w,const char *k){ lf_sep(w); jesc(w,k); if(w->p<w->end) *w->p++='='; }
+static void lf_val_str(W *w,const char *v){
+    if(lf_need_quote(v)){ if(w->p<w->end)*w->p++='"'; jesc(w,v?v:""); if(w->p<w->end)*w->p++='"'; }
+    else { while(v && *v && w->p<w->end) *w->p++=*v++; }
 }
-static void w_num(W *w,const char *k,long long v){
-    w_key(w,k);
+static void lf_kv_str(W *w,const char *k,const char *v){ lf_key(w,k); lf_val_str(w,v?v:""); }
+static void lf_kv_num(W *w,const char *k,long long v){
+    lf_key(w,k);
     char t[32]; int n=snprintf(t,sizeof t,"%lld",v);
     if(w->p+n<w->end){ memcpy(w->p,t,(size_t)n); w->p+=n; }
 }
-static void w_hex(W *w,const char *k,long long v){
-    w_key(w,k);
-    char t[32]; int n=snprintf(t,sizeof t,"\"0x%llx\"",(unsigned long long)v);
+static void lf_kv_hex(W *w,const char *k,long long v){
+    lf_key(w,k);
+    char t[32]; int n=snprintf(t,sizeof t,"0x%llx",(unsigned long long)v);
     if(w->p+n<w->end){ memcpy(w->p,t,(size_t)n); w->p+=n; }
 }
 
@@ -371,6 +371,28 @@ void img_ev_hex(img_ev *e,const char *k,uint64_t v){
 }
 void img_ev_errno(img_ev *e,int err){ if(e) e->err=err; }
 
+
+void img_log_session(const char *tool,const char *argv,const char *img,uint64_t img_size){
+    if(img) snprintf(G.img,sizeof G.img,"%s",img);
+    snprintf(G.ctx,sizeof G.ctx,"%s %s",tool?tool:"?",argv?argv:"");
+        {
+        W w={ G.session, G.session, G.session+sizeof G.session-3 };
+        w.p = G.session;
+        w.start = G.session;
+        lf_kv_num(&w,"t",0);
+        lf_kv_str(&w,"l","I");
+        lf_kv_str(&w,"m","app");
+        lf_kv_str(&w,"ev","session");
+        lf_kv_str(&w,"tool",tool?tool:"?");
+        lf_kv_str(&w,"argv",argv?argv:"");
+        lf_kv_str(&w,"img",img?img:"");
+        lf_kv_num(&w,"size",(long long)img_size);
+        if(w.p<w.end) *w.p++='\n';
+        int n=(int)(w.p-G.session);
+        if(n>0) s_session_pending = (G.fd>=0);
+    }
+}
+
 void img_ev_emit(img_ev *e){
     if(!e||!e->enabled) return;
     if(e->magic != IMG_EV_MAGIC) return;   /* ★ 未 init 的垃圾结构 → 直接拒（实测会段错误）*/
@@ -378,21 +400,19 @@ void img_ev_emit(img_ev *e){
                                              *   t=now-0 会显示成"开机以来毫秒"（实测 2.5 亿）。
                                              *   从首个事件起算，时间戳才有意义 */
     char buf[LINE_CAP];
-    W w={ buf+1, buf+1, buf+sizeof buf-2 };
-    buf[0]='{';
-    w_num(&w,"t",now_ms()-G.t0_ms);
-    w_key(&w,"l"); if(w.p+3<w.end){ *w.p++='"'; *w.p++=lv_ch(e->lv); *w.p++='"'; }
-    w_str(&w,"m",e->mod);
-    w_str(&w,"ev",e->ev);
-    w_num(&w,"rc",e->rc);                  /* rc 统一带（0=OK）；不再由调用方重复加 */
-    if(e->err) w_num(&w,"errno",e->err);
-    if(e->msg&&e->msg[0]) w_str(&w,"msg",e->msg);
+    W w={ buf, buf, buf+sizeof buf-3 };
+    lf_kv_num(&w,"t",now_ms()-G.t0_ms);        /* 键与数字都不加引号 */
+    { char lvt[2]={lv_ch(e->lv),0}; lf_kv_str(&w,"l",lvt); }
+    lf_kv_str(&w,"m",e->mod);
+    lf_kv_str(&w,"ev",e->ev);
+    lf_kv_num(&w,"rc",e->rc);                  /* rc 统一带（0=OK）；不重复 */
+    if(e->err) lf_kv_num(&w,"errno",e->err);
+    if(e->msg&&e->msg[0]) lf_kv_str(&w,"msg",e->msg);
     for(int i=0;i<e->nf;i++){
-        if(e->f[i].kind==1)      w_str(&w,e->f[i].k,e->f[i].s);
-        else if(e->f[i].kind==2) w_num(&w,e->f[i].k,e->f[i].n);
-        else                     w_hex(&w,e->f[i].k,e->f[i].n);
+        if(e->f[i].kind==1)      lf_kv_str(&w,e->f[i].k,e->f[i].s);
+        else if(e->f[i].kind==2) lf_kv_num(&w,e->f[i].k,e->f[i].n);
+        else                     lf_kv_hex(&w,e->f[i].k,e->f[i].n);
     }
-    if(w.p<w.end) *w.p++='}';
     if(w.p<w.end) *w.p++='\n';
     size_t n=(size_t)(w.p-buf);
     if(G.fd>=0) session_flush();       /* 先补会话行，再写事件（顺序：头 → 事）*/

@@ -93,21 +93,24 @@ echo "════ 5. 日志（--log）：里程碑 + 错误都落盘，且逐�
 $T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src="$W/blob.bin" --dst=/EFI/blob2.bin \
     --log="$W/run.log" --log-level=info >/dev/null 2>&1
 [ -s "$W/run.log" ] && ok "日志已生成 $(wc -l < "$W/run.log") 行" || ng "日志没生成"
-grep -q '"ev":"session"' "$W/run.log" && ok "有会话头（版本/命令/镜像）" || ng "缺会话头"
-grep -q '"ev":"begin"'  "$W/run.log" && ok "有里程碑 begin" || ng "缺 begin"
-grep -q '"ev":"done"'   "$W/run.log" && ok "有里程碑 done（带 ms/rc）" || ng "缺 done"
+grep -q "ev=session" "$W/run.log" && ok "有会话头（版本/命令/镜像）" || ng "缺会话头"
+grep -q "ev=begin"  "$W/run.log" && ok "有里程碑 begin" || ng "缺 begin"
+grep -q "ev=done"   "$W/run.log" && ok "有里程碑 done（带 ms/rc）" || ng "缺 done"
 $T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src="$W/huge.bin" --dst=/EFI/h2 --check_size=1 \
     --log="$W/err.log" >/dev/null 2>&1
-grep -q '"l":"E"' "$W/err.log" && ok "错误进日志（E 级任何级别都不漏）" || ng "错误没进日志"
+grep -q "l=E" "$W/err.log" && ok "错误进日志（E 级任何级别都不漏）" || ng "错误没进日志"
 python3 -c "
-import json,sys
-bad=0
+import sys,re
+bad=0; n=0
 for l in open('$W/run.log'):
-    l=l.strip()
+    l=l.rstrip(chr(10))
     if not l: continue
-    try: json.loads(l)
-    except Exception: bad+=1
-sys.exit(1 if bad else 0)" && ok "日志每行都是合法 JSON" || ng "日志里有非 JSON 行"
+    n+=1
+    # logfmt 规则：每行 t=<数字> ... ev=<值>；引号必须成对（含引号字符串才算转义合法）
+    if not re.match(r'^t=-?\\d+( .+)+$', l): bad+=1; continue
+    if l.count(chr(34))%2: bad+=1; continue
+    if not re.search(r'(^| )ev=', l): bad+=1
+sys.exit(1 if (bad or n==0) else 0)" && ok "日志每行都是合法 logfmt（t=/ev= 齐全、引号成对）" || ng "日志格式有坏行"
 
 echo
 echo "════ 结果：通过 $pass · 失败 $fail ════"
