@@ -7,12 +7,14 @@
 #include <string.h>
 
 #define ENSURE(c,m) do{ if(!(c)){ printf("❌ %s\n", m); return 1; } printf("  ✅ %s\n", m); }while(0)
-static const char *ISO_BCD = "/tmp/iso/bcd";
+static const char *ISO_BCD_DEFAULT = "/tmp/iso/bcd";
 
 int main(int argc, char **argv){
     const char *src = argc>1?argv[1]:"reference/bcd-reference-uefi.bin";
     const char *dst = argc>2?argv[2]:"/tmp/bcd_recovery.bin";
     const char *WIM = argc>3?argv[3]:"/Recovery/WindowsRE/winre.wim";
+    /* 官方 ISO 的 BCD 作模板来源（第4参），缺省回退到 /tmp/iso/bcd */
+    const char *ISO_BCD = argc>4 ? argv[4] : ISO_BCD_DEFAULT;
 
     FILE *fp=fopen(ISO_BCD,"rb");
     if(!fp){ printf("❌ 缺少官方 ISO BCD 参考 %s（先解 ISO）\n", ISO_BCD); return 2; }
@@ -56,8 +58,7 @@ int main(int argc, char **argv){
     printf("⑧ 重开校验\n");
     img_bcd *c = img_bcd_open_file(dst);
     ENSURE(c!=NULL,"重开成功");
-
-    char p1[256], p2[256];
+    char p1[256];
     ENSURE(img_bcd_get_device_wimpath(c, IMG_BCD_GUID_ISO_WINPE, IMG_BCD_EL_WIM_DEVICE,
                                       p1,sizeof p1)==IMG_OK, "WIM 路径可读");
     printf("     新路径: %s\n", p1);
