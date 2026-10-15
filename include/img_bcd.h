@@ -22,8 +22,12 @@ extern "C" {
 #define IMG_BCD_GUID_BOOTMGR     "9dea862c-5cdd-4e70-acc1-f32b344d4795"
 /* RAMDisk 选项对象 GUID（固定） */
 #define IMG_BCD_GUID_RAMDISK     "ae5534e0-a924-466e-b634-5386399ec2bc"
-/* 恢复（WinRE）加载器常用 GUID */
+/* 恢复（WinRE）加载器常用 GUID —— 仅作占位，真实 GUID 需在创建对象时生成 */
 #define IMG_BCD_GUID_RECOVERY    "b0b53260-3b27-4f0a-8d0f-6b3e0c1a2b3c"
+/* 官方安装介质的 RAMDisk 选项对象（含 32000004 = \boot\boot.sdi） */
+#define IMG_BCD_GUID_RAMDISK_OPT "7619dcc8-fafe-11d9-b411-000476eba25f"
+/* 官方安装介质的 WinPE 加载器对象 */
+#define IMG_BCD_GUID_WINPE       "7619dcc9-fafe-11d9-b411-000476eba25f"
 
 /* 元素 ID（十六进制字符串形式，与 reg 键名一致） */
 #define IMG_BCD_EL_DESC          "11000001"
@@ -33,7 +37,16 @@ extern "C" {
 #define IMG_BCD_EL_INHERITS      "14000006"
 #define IMG_BCD_EL_SYSROOT       "22000002"
 #define IMG_BCD_EL_DISPLAYORDER  "24000001"
-#define IMG_BCD_EL_RECOVERYSEQ   "25000004"
+/* ★ 元素 ID 实测修正（来自 4 份真实 BCD 对照）：
+ *   25000004 实测值恒为小数字 3/30/30/3 —— 这是【Timeout(秒)】，不是 RecoverySequence。
+ *   24000001 = DisplayOrder (GUID 列表, t=7)
+ *   24000010 = ToolsDisplayOrder (GUID 列表, t=7)
+ *   23000003 = 指向默认加载器的 GUID 字符串
+ *   32000004 = RAMDisk SDI 路径（\boot\boot.sdi，存在于官方 ISO BCD）
+ *   26000010 / 26000022 / 260000b0 = WinPE 加载器开关
+ * ⚠ RecoverySequence 的真实元素 ID 尚未从真值反推到（4 份参考 BCD 均未配置该项）
+ *   —— 在拿到权威 ID 之前，img_bcd_set_recovery_sequence 返回 IMG_ENOTSUP，避免写出坏 BCD。*/
+#define IMG_BCD_EL_RECOVERYSEQ   "25000004"   /* ⚠ 已证实是 Timeout，勿用 */
 
 typedef struct img_bcd img_bcd;   /* 不透明句柄 */
 

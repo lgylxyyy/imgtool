@@ -118,6 +118,10 @@ int img_bcd_set_bootmgr_name(img_bcd *b, const char *name){
 
 int img_bcd_set_recovery_sequence(img_bcd *b, const char *guid){
     if(!b||!guid) return IMG_EINVAL;
+    /* ★ 未拿到权威元素 ID 前拒绝写入 —— 写错元素会污染 BCD（Timeout 被当字符串覆盖）
+     *   4 份真实 BCD（Xlite/UEFI/Recovery/官方LTSC ISO）都没配 RecoverySequence，
+     *   只能从权威文档或配好的机器上取。见 include/img_bcd.h 的元素 ID 实测注记。 */
+    return IMG_ENOTSUP;
     hive_node_h bm = find_object(b, IMG_BCD_GUID_BOOTMGR);
     if(!bm) return IMG_EFORMAT;
     hive_node_h el = ensure_element(b, bm, IMG_BCD_EL_RECOVERYSEQ);
