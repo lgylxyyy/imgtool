@@ -26,7 +26,11 @@ int main(int argc,char**argv){
     if(img_qcow2_write_init(q)!=IMG_OK){ fprintf(stderr,"❌ init\n"); return 1; }
 
     img_bootcheck_result_t r;
+    img_span sp;
+    img_span_prep(&sp,"bc","check","引导链自检（17 项）");
+    img_span_begin(&sp);
     int rc = img_bootcheck(q, mode, &r, NULL);
+    img_span_end(&sp, rc);
     if(rc && r.count==0){
         fprintf(stderr,"❌ 检查失败: %s\n", img_strerror(rc));
         return 1;

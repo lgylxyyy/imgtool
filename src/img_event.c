@@ -66,6 +66,7 @@ static struct {
 } G = { .fd=-1, .out_fd=-1, .max_bytes=4u*1024*1024, .keep=1,
         .lv=IMG_LV_INFO, .hb_interval_ms=HB_STEP_MS };
 
+static bool s_session_pending = false;   /* 会话行待写（首个事件时补）*/
 static char *ring[RING_CAP];
 static int   ring_n, ring_head;
 static img_lv_t ring_lv = IMG_LV_DEBUG;      /* 环形缓冲独立级别（默认抓 debug 过程）*/
@@ -152,7 +153,19 @@ void img_log_session(const char *tool,const char *argv,const char *img,uint64_t 
         "{\"t\":0,\"l\":\"I\",\"m\":\"app\",\"ev\":\"session\",\"tool\":\"%s\",\"argv\":\"%s\","
         "\"img\":\"%s\",\"size\":%llu}\n",
         tool?tool:"?",argv?argv:"",img?img:"",(unsigned long long)img_size);
-    if(n>0){ write_all(G.fd,G.session,(size_t)n); if(G.fd>=0) G.written+=(size_t)n; }
+    /* ★ 会话行【不立即写】：标成待写，等这个进程第一次真正打点时再补。
+     *   原因：流水线里每个工具是独立进程，开日志就写一行会让
+     *   "imgpart show ×7" 刷出 7 行一模一样的会话。纯只读的工具（没打点）→ 零输出。
+     *   这样日志里只有"真正做过事的工具"，行数最小。*/
+    if(n>0) s_session_pending = (G.fd>=0);
+}
+/* 第一次打点前把会话行补上（进程内只补一次）*/
+static void session_flush(void){
+    if(!s_session_pending) return;
+    s_session_pending = false;
+    if(G.fd<0 || !G.session[0]) return;
+    write_all(G.fd,G.session,strlen(G.session));
+    G.written += strlen(G.session);
 }
 
 /* ---------- 输出（日志 + 屏幕各一份） ---------- */
@@ -382,6 +395,7 @@ void img_ev_emit(img_ev *e){
     if(w.p<w.end) *w.p++='}';
     if(w.p<w.end) *w.p++='\n';
     size_t n=(size_t)(w.p-buf);
+    if(G.fd>=0) session_flush();       /* 先补会话行，再写事件（顺序：头 → 事）*/
     pump(buf,n,e->lv);
     human_emit(e);                     /* 屏幕人话行（Linux 风格）*/
     if(e->lv<=ring_lv) img_ring_add(buf);   /* 过程事件进内存（供失败卡片） */
@@ -478,7 +492,13 @@ int img_log_cli(int argc, char **argv, const char *tool){
         else if(!strncmp(a,"--log-level=",12)) lvl=a+12;
         else if(!strncmp(a,"--log-max=",10))   maxb=a+10;
     }
-    if(!path && !plain) return 0;                                 /* 没要日志：什么都不做 */
+    if(!path && !plain){
+        /* 环境变量：shell 流水线只要 export IMGTOOL_LOG=... 就能让【每个工具】
+         *   写进同一份日志（追加模式），不用挨个工具加参数。*/
+        const char *ev=getenv("IMGTOOL_LOG");
+        if(ev && *ev) path=ev;
+        else return 0;                                          /* 没要日志：什么都不做 */
+    }
     if(!path && plain){
         /* 默认放镜像旁边：<argv[1]>.imgtool.log（拿不到参数就用 cwd 下的名字）*/
         const char *seed = (argc>1 && argv[1] && argv[1][0]!='-') ? argv[1] : "imgtool";
@@ -486,6 +506,7 @@ int img_log_cli(int argc, char **argv, const char *tool){
         snprintf(def,sizeof def,"%s.imgtool.log",seed);
         path=def;
     }
+    if(!lvl) lvl=getenv("IMGTOOL_LOG_LEVEL");   /* 环境变量同样适用 */
     img_lv_t lv=IMG_LV_INFO;
     if(lvl){
         if(!strcmp(lvl,"error")) lv=IMG_LV_ERROR; else if(!strcmp(lvl,"warn")) lv=IMG_LV_WARN;

@@ -343,6 +343,11 @@ int img_ntfs_put_file(img_ntfs_fs *fs, const char *local_path,
     if(!buf){ ntfs_attr_close(na); ntfs_inode_close(file); close(fd); return IMG_ENOMEM; }
     if(prog){ img_prog_phase(prog,IMG_PH_EXTRACT,"写入 NTFS"); img_prog_op(prog,IMG_OP_WRITE);
               img_prog_bytes(prog,0,fsz); }
+    img_span sp;                          /* 里程碑：NTFS 写文件（流式，1MiB 一块）*/
+    img_span_prep(&sp,"ntfs","put","写入 NTFS");
+    img_span_kv_str(&sp,"path",dst_abs_path);
+    img_span_kv_u64(&sp,"size",(uint64_t)fsz);
+    img_span_begin(&sp);
     s64 done=0; int rc=IMG_OK;
     for(;;){
         if(img_cancelled()){ rc=IMG_ECANCELLED; break; }   /* ★ 取消检查点（每 1MiB 一次）*/
@@ -358,6 +363,7 @@ int img_ntfs_put_file(img_ntfs_fs *fs, const char *local_path,
     ntfs_attr_close(na);
     if(ntfs_inode_close(file)<0 && rc==IMG_OK) rc=IMG_EIO;
     if(rc==IMG_OK && prog) img_prog_done(prog,"文件写入完成");
+    img_span_end(&sp, rc);
     return rc;
 }
 

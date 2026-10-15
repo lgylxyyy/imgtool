@@ -4,6 +4,7 @@
 /* img_bcd.c — BCD 语义层（hive 底层全部交给 libhivex）
  * 容器格式与元素 ID 规律见 reference/BCD-FORMAT.md */
 #include "img_bcd.h"
+#include "img_event.h"
 #include <hivex.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,7 +68,13 @@ img_bcd *img_bcd_open_mem(const void *data, size_t len){
 }
 int img_bcd_save(img_bcd *b, const char *path){
     if(!b||!path) return IMG_EINVAL;
-    return hivex_commit(b->h, path, 0)==0 ? IMG_OK : IMG_EIO;
+    img_span sp;                        /* 里程碑：BCD 写入（含 hivex 的 bin 重建/重平衡）*/
+    img_span_prep(&sp,"bcd","save","写入 BCD");
+    img_span_kv_str(&sp,"path",path);
+    img_span_begin(&sp);
+    int rc = hivex_commit(b->h, path, 0)==0 ? IMG_OK : IMG_EIO;
+    img_span_end(&sp, rc);
+    return rc;
 }
 int img_bcd_save_mem(img_bcd *b, void **out, size_t *out_len){
     if(!b||!out||!out_len) return IMG_EINVAL;

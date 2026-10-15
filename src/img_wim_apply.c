@@ -7,6 +7,7 @@
  * 其 ntfs_mount() 经宏 ntfs_device_default_io_ops → ntfs_device_unix_io_ops
  * → 我们在 img_ntfs_fmt.c 定义的同名符号 → 10 个回调 → qcow2 分区。 */
 #include "img_wim_apply.h"
+#include "img_event.h"
 #include "img_partition.h"
 #include "img_ntfs_fmt.h"
 #include "img_ntfs_dev.h"
@@ -145,6 +146,14 @@ int img_wim_apply(const char *wim_path, int image_idx,
     int r = wimlib_open_wim(wim_path, 0, &w);
     if(r){ img_ntfs_ctx_deactivate(); return IMG_ENOENT; }
 
+    /* 里程碑：灌 WIM 是全流程最慢的一步，日志里必须能看到"开始/完成"和耗时，
+     *   否则"卡在灌系统这步"和"灌到一半死了"在日志上分不出来。 */
+    img_span wsp;
+    img_span_prep(&wsp,"wim","apply","灌入 WIM 到分区");
+    img_span_kv_str(&wsp,"wim",wim_path);
+    img_span_kv_u64(&wsp,"index",(uint64_t)image_idx);
+    img_span_kv_u64(&wsp,"part_lba",part_lba);
+    img_span_begin(&wsp);
     if(prog){
         struct wimlib_wim_info wi; wimlib_get_wim_info(w,&wi);
         img_prog_phase(prog, IMG_PH_EXTRACT, "灌入 WIM 到分区");
@@ -163,6 +172,7 @@ int img_wim_apply(const char *wim_path, int image_idx,
     r = wimlib_extract_image(w, image_idx, dummy, ef);
     wimlib_free(w);
     img_ntfs_ctx_deactivate();
+    img_span_end(&wsp, r? IMG_EIO : IMG_OK);
     if(r){
         if(prog) img_prog_done(prog, wim_rc_str(r));
         return IMG_EIO;

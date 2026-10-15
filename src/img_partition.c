@@ -1,5 +1,6 @@
 /* img_partition.c — MBR / GPT 分区表读写 */
 #include "img_partition.h"
+#include "img_event.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -454,9 +455,19 @@ static int write_gpt(img_qcow2 *q, img_parttable_t *t){
 
 int img_parttable_write(img_qcow2 *q, img_parttable_t *t){
     if(!q||!t) return IMG_EINVAL;
-    if(t->table==IMG_TABLE_GPT) return write_gpt(q,t);
-    if(t->table==IMG_TABLE_MBR) return write_mbr(q,t);
-    return IMG_ESTATE;
+    /* 里程碑：GPT 主/备份表落盘（换盘重建时最关键的一次写） */
+    img_span sp;
+    img_span_prep(&sp,"part","write","写入分区表");
+    img_span_kv_str(&sp,"table", t->table==IMG_TABLE_GPT?"GPT":(t->table==IMG_TABLE_MBR?"MBR":"NONE"));
+    img_span_kv_u64(&sp,"disk_sectors",t->disk_sectors);
+    img_span_kv_u64(&sp,"parts",(uint64_t)t->count);
+    img_span_begin(&sp);
+    int rc;
+    if(t->table==IMG_TABLE_GPT) rc=write_gpt(q,t);
+    else if(t->table==IMG_TABLE_MBR) rc=write_mbr(q,t);
+    else rc=IMG_ESTATE;
+    img_span_end(&sp, rc);
+    return rc;
 }
 
 /* ------------------------------------------------------------------ */

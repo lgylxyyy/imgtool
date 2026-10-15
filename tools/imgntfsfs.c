@@ -52,7 +52,13 @@ int main(int argc,char**argv){
     int rc=0;
     if(!strcmp(cmd,"format")){
         img_ntfs_fmt_opts_t o; img_ntfs_fmt_defaults(&o,lba,pb); o.label="WINRE";
+        img_span sp;
+        img_span_prep(&sp,"ntfs","format","格式化 NTFS 分区");
+        img_span_kv_u64(&sp,"lba",lba);
+        img_span_kv_u64(&sp,"bytes",pb);
+        img_span_begin(&sp);
         rc=img_ntfs_format(q,&o,NULL);
+        img_span_end(&sp, rc);
         printf("  格式化: %s\n", img_strerror(rc));
     } else {
         img_ntfs_fs *fs = img_ntfs_mount_rw(q,lba,pb);
