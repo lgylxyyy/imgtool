@@ -564,13 +564,15 @@ int img_parttable_json(const img_parttable_t *t, char *buf, int cap){
         first=false;
         k+=snprintf(buf+k,(size_t)(cap-k),
             "{\"i\":%d,\"first\":%llu,\"last\":%llu,\"sectors\":%llu,"
-            "\"mbri\":%u,\"active\":%s,\"typeGuid\":\"%s\",\"partGuid\":\"%s\",\"name\":\"%s\"}",
+            "\"mbri\":%u,\"active\":%s,\"typeGuid\":\"%s\",\"partGuid\":\"%s\","
+            "\"name\":\"%s\",\"attributes\":\"0x%016llx\"}",
             i,
             (unsigned long long)p->first_lba,
             (unsigned long long)p->last_lba,
             (unsigned long long)(p->last_lba-p->first_lba+1),
             p->type, p->status==0x80?"true":"false",
-            p->type_guid, p->part_guid, p->name);
+            p->type_guid, p->part_guid, p->name,
+            (unsigned long long)p->attributes);
         if(k>=cap-2) break;
     }
     k+=snprintf(buf+k,(size_t)(cap-k),"]}");
@@ -733,5 +735,14 @@ int img_partition_fill_remaining(img_parttable_t *t, int index, img_check_result
     if(p->first_lba > usable_last){ resf(err,0,IMG_EINVAL,"分区起始超出可用范围",NULL); return IMG_EINVAL; }
     p->last_lba = usable_last;
     resf(err,1,IMG_OK,"已顶到可用末尾",NULL);
+    return IMG_OK;
+}
+
+/* ---------- GPT 属性位 ---------- */
+int img_partition_set_attributes(img_parttable_t *t, int index, uint64_t attrs){
+    if(!t || index<0 || index>=IMG_MAX_PARTITIONS) return IMG_EINVAL;
+    if(t->table != IMG_TABLE_GPT) return IMG_ENOTSUP;   /* MBR 没有属性位 */
+    if(!t->parts[index].used) return IMG_EINVAL;
+    t->parts[index].attributes = attrs;
     return IMG_OK;
 }

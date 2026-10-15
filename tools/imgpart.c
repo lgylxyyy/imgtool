@@ -27,8 +27,10 @@ static void show(img_qcow2 *q){
 
 int main(int argc,char**argv){
     if(argc<3){ fprintf(stderr,
-      "用法:\n  %s show <image.qcow2>\n  %s mk <out.qcow2> <bytes> mbr|gpt\n  %s add <image.qcow2> <sectors> <mbrTypeHex|gptGuid> [name]\n",
-      argv[0],argv[0],argv[0]); return 2; }
+      "用法:\n  %s show <image.qcow2>\n  %s mk <out.qcow2> <bytes> mbr|gpt\n"
+      "  %s add <image.qcow2> <sectors> <mbrTypeHex|gptGuid> [name]\n"
+      "  %s attr <image.qcow2> <index> <hex64>\n",
+      argv[0],argv[0],argv[0],argv[0]); return 2; }
 
     if(!strcmp(argv[1],"show")){
         img_qcow2 *q=open_rw(argv[2]);
@@ -103,6 +105,23 @@ int main(int argc,char**argv){
         show(q);
         img_qcow2_close(q);
         return 0;
+    }
+    if(!strcmp(argv[1],"attr")){
+        if(argc<5){ fprintf(stderr,"用法: %s attr <img> <index> <hex64>\n",argv[0]); return 2; }
+        img_qcow2 *q=open_rw(argv[2]);
+        if(!q){ fprintf(stderr,"❌ 打不开\n"); return 1; }
+        img_parttable_t t;
+        int rc=img_parttable_read(q,&t,0);
+        if(rc){ fprintf(stderr,"❌ 读分区表: %s\n",img_strerror(rc)); return 1; }
+        int idx=atoi(argv[3]);
+        uint64_t a=strtoull(argv[4],NULL,0);
+        rc=img_partition_set_attributes(&t,idx,a);
+        if(rc){ fprintf(stderr,"❌ %s\n",img_strerror(rc)); img_qcow2_close(q); return 1; }
+        rc=img_parttable_write(q,&t);
+        printf("%s 分区[%d].attributes = 0x%016llx\n",
+               rc==IMG_OK?"✅":"❌", idx, (unsigned long long)a);
+        img_qcow2_close(q);
+        return rc==IMG_OK?0:1;
     }
     fprintf(stderr,"未知命令\n"); return 2;
 }

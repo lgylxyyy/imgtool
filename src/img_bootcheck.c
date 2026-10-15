@@ -420,6 +420,19 @@ int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *ou
         uint64_t sz=(t.parts[P.rec].last_lba-t.parts[P.rec].first_lba+1)*512;
         add(out,"rec.type","恢复分区类型 GUID de94bba4",IMG_CK_INFO,true,
             "LBA %llu",(unsigned long long)lba);
+        /* 官方要求 gpt attributes=0x8000000000000001（bit0=必需，bit63=不分配盘符/隐藏）
+         * 微软 diskpart 实操见 MS Q&A 与 learn.microsoft.com；缺 bit0 时 reagentc 可能拒认 */
+        int ridx=-1;
+        for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+            if(t.parts[i].used && t.parts[i].first_lba==lba){ ridx=i; break; }
+        uint64_t attr = ridx>=0 ? t.parts[ridx].attributes : 0;
+        bool attr_ok = (attr & IMG_GPT_ATTR_PLATFORM_REQUIRED) &&
+                       (attr & IMG_GPT_ATTR_NO_DRIVE_LETTER);
+        add(out,"rec.attr","GPT 属性 0x8000000000000001",IMG_CK_WARN, attr_ok,
+            attr_ok ? "已设 必需+不分配盘符 (0x%016llx)"
+                    : "当前 0x%016llx — 官方要求 0x8000000000000001（缺 %s）",
+            (unsigned long long)attr,
+            attr_ok ? "" : ((attr & IMG_GPT_ATTR_PLATFORM_REQUIRED) ? "bit63" : "bit0 必需位"));
         /* 兼容两种布局：标准路径 /Recovery/WindowsRE/ 与 根目录（本工具链当前用根目录，
          * 因为 ntfscp 只能建文件不能建目录 —— 建目录属 NTFS 写入能力，见 Stage B）*/
         bool w_std  = ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/winre.wim");

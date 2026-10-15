@@ -126,6 +126,12 @@ int img_partition_set_type(img_parttable_t *t, int index, img_mbr_type_t mbr_typ
                            const char *gpt_type_guid);
 /* 改活动标记（仅 MBR） */
 int img_partition_set_active(img_parttable_t *t, int index, bool active);
+/* 设置 GPT 分区属性位（MBR 下返回 IMG_ENOTSUP）。
+ * ★ 恢复分区应设的官方值（微软 diskpart 实操：gpt attributes=0x8000000000000001）
+ *   = IMG_GPT_ATTR_PLATFORM_REQUIRED(bit0) | IMG_GPT_ATTR_NO_DRIVE_LETTER(bit63)
+ *   下面已有的 IMG_GPT_ATTR_RECOVERY_DEFAULT 只含 bit63，缺 bit0。*/
+#define IMG_GPT_ATTR_RECOVERY_OFFICIAL         (IMG_GPT_ATTR_PLATFORM_REQUIRED | IMG_GPT_ATTR_NO_DRIVE_LETTER)
+int img_partition_set_attributes(img_parttable_t *t, int index, uint64_t attrs);
 
 /* ---------- 分区调整（DiskGenius / 傲梅分区助手 同款逻辑） ----------
  *
