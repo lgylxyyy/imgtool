@@ -23,6 +23,25 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+#ifndef _WIN32
+#include <sys/utsname.h>
+#endif
+
+static const char *img_platform(void){
+#ifdef _WIN32
+    return "windows";
+#else
+    static char b[128];
+    if(!b[0]){ struct utsname u; if(uname(&u)==0) snprintf(b,sizeof b,"%s",u.sysname); else snprintf(b,sizeof b,"posix"); }
+    return b;
+#endif
+}
+static const char *img_abi(void){
+    static char b[32];
+    if(!b[0]) snprintf(b,sizeof b,"%zu-bit",sizeof(void*)*8);
+    return b;
+}
+
 #define HB_STEP_MS    2000
 #define HB_MAX_MS    60000
 #define RING_CAP      1000      /* 过程事件条数（≈200KB 内存，0 磁盘）*/
@@ -39,6 +58,7 @@ static struct {
     bool     out_human;
     char     session[LINE_CAP];
     char     img[512];
+    char     ctx[512];          /* 命令与参数一行（卡片头部）*/
     long long t0_ms;
     const char *hb_mod, *hb_op, *hb_where;
     long long hb_last_ms, hb_interval_ms;
@@ -122,8 +142,12 @@ void img_log_close(void){
 }
 void img_out_open_fd(int fd, bool human){ G.out_fd=fd; G.out_human=human; }
 
+void img_card_set_context(const char *kv_line){
+    if(kv_line) snprintf(G.ctx,sizeof G.ctx,"%s",kv_line);
+}
 void img_log_session(const char *tool,const char *argv,const char *img,uint64_t img_size){
     if(img) snprintf(G.img,sizeof G.img,"%s",img);
+    snprintf(G.ctx,sizeof G.ctx,"%s %s",tool?tool:"?",argv?argv:"");
     int n=snprintf(G.session,sizeof G.session,
         "{\"t\":0,\"l\":\"I\",\"m\":\"app\",\"ev\":\"session\",\"tool\":\"%s\",\"argv\":\"%s\","
         "\"img\":\"%s\",\"size\":%llu}\n",
@@ -132,23 +156,100 @@ void img_log_session(const char *tool,const char *argv,const char *img,uint64_t 
 }
 
 /* ---------- 输出（日志 + 屏幕各一份） ---------- */
-static const char *LVPRE[5]={ "✖","⚠"," ","·"," " };
 static void pump(const char *line,size_t n,img_lv_t lv){
     if(log_on(lv)){
         img_lock_t *lk=img_global_lock();   /* ★ 并发写日志会交错成半行/坏 JSON */
         img_lock_acquire(lk);
         write_all(G.fd,line,n);
         if(G.fd>=0){ G.written+=n; rotate_if_needed(); }
-        if(G.out_fd>=0){
-            if(!G.out_human) write_all(G.out_fd,line,n);
-            else if(lv<=IMG_LV_INFO){
-                size_t ln = (n&&line[n-1]=='\n') ? n-1 : n;
-                char b[LINE_CAP];
-                int m=snprintf(b,sizeof b,"%s %.*s\n",LVPRE[lv],(int)ln,line);
-                if(m>0) write_all(G.out_fd,b,(size_t)m);
-            }
-        }
+        /* 屏幕：json 模式原样吐 JSON；human 模式由 human_emit() 渲染人话行
+         * （这里只负责日志文件，避免两边重复渲染）*/
+        if(G.out_fd>=0 && !G.out_human) write_all(G.out_fd,line,n);
         img_lock_release(lk);
+    }
+}
+
+/* ---------- 屏幕人话渲染（Linux 风格；只在 human 模式用） ---------- */
+static const char *ev_str(const img_ev *e, const char *k){
+    for(int i=0;i<e->nf;i++) if(!strcmp(e->f[i].k,k) && e->f[i].kind==1) return e->f[i].s;
+    return NULL;
+}
+static long long ev_num(const img_ev *e, const char *k, long long def){
+    for(int i=0;i<e->nf;i++) if(!strcmp(e->f[i].k,k)) return e->f[i].n;
+    return def;
+}
+static void human_emit(const img_ev *e){
+    if(G.out_fd<0 || !G.out_human) return;
+    if(e->lv>IMG_LV_INFO) return;                 /* 屏幕只显示 info 及以上 */
+    char b[LINE_CAP]; int n=0;
+    bool is_begin=!strcmp(e->ev,"begin"), is_done=!strcmp(e->ev,"done"),
+         is_fail =!strcmp(e->ev,"fail"),  is_alive=!strcmp(e->ev,"alive");
+    if(is_begin){
+        n=snprintf(b,sizeof b,"▶ %s", e->msg&&e->msg[0]?e->msg:"开始");
+        const char *p=ev_str(e,"path"); if(p) n+=snprintf(b+n,sizeof b-(size_t)n,"  %s",p);
+        long long sz=ev_num(e,"size",-1); if(sz>=0) n+=snprintf(b+n,sizeof b-(size_t)n,"  %lld 字节",sz);
+        long long pt=ev_num(e,"part",-1); if(pt>=0) n+=snprintf(b+n,sizeof b-(size_t)n,"  分区 LBA %lld",pt);
+    } else if(is_done){
+        long long ms=ev_num(e,"ms",-1);
+        if(e->rc!=0) n=snprintf(b,sizeof b,"✖ %s 失败（%s）",ev_str(e,"op")?ev_str(e,"op"):"操作",img_strerror(e->rc));
+        else         n=snprintf(b,sizeof b,"✔ %s 完成", ev_str(e,"op")?ev_str(e,"op"):"操作");
+        if(ms>=0) n+=snprintf(b+n,sizeof b-(size_t)n,"（%lld ms）",ms);
+    } else if(is_alive){
+        if(G.hb_interval_ms<=HB_STEP_MS){          /* 只在"正常推进"时刷，卡住时别刷屏 */
+            n=snprintf(b,sizeof b,"… 仍在进行：%s %s（iter=%llu）",
+                       ev_str(e,"op")?ev_str(e,"op"):"", ev_str(e,"where")?ev_str(e,"where"):"",
+                       (unsigned long long)ev_num(e,"iter",0));
+        } else return;
+    } else if(is_fail){
+        return;                                    /* 失败由 img_fail_card 统一出卡片 */
+    } else return;
+    if(n>0){ b[n++]='\n'; write_all(G.out_fd,b,(size_t)n); }
+}
+
+typedef struct { char *p; int cap; int n; } dumpbuf;
+static int dump_cb(void *ud,const char *line){
+    dumpbuf *d=(dumpbuf*)ud;
+    int l=(int)strlen(line);
+    if(d->n+l+1 >= d->cap) return 1;
+    memcpy(d->p+d->n,line,(size_t)l); d->n+=l;
+    return 0;
+}
+static int ring_dump_into(char *buf,int cap){
+    if(!buf||cap<32) return 0;
+    dumpbuf d={buf,cap-1,0};
+    img_ring_dump(&d,dump_cb,0);        /* max=0 → 全部 */
+    buf[d.n]=0;
+    return d.n;
+}
+
+/* ---------- 失败卡片（人话 + 可复制 + 落 .error.txt） ---------- */
+void img_fail_card(const char *cmd,const char *code,const char *at,
+                   const char *why,const char *suggest){
+    char card[8192]; int n=0;
+    n+=snprintf(card+n,sizeof card-(size_t)n,
+        "\n════════ Icdqcow2 错误报告（整段复制即可）════════\n"
+        "工具     %s · %s · %s\n"
+        "命令     %s\n"
+        "镜像     %s\n",
+        IMGTOOL_VERSION, img_platform(), img_abi(),
+        G.ctx[0]?G.ctx:(cmd?cmd:"(未设置)"), G.img[0]?G.img:"(未设置)");
+    n+=snprintf(card+n,sizeof card-(size_t)n,
+        "失败位置 %s\n错误码   %s\n原因     %s\n建议     %s\n",
+        (at&&at[0])?at:"-", code?code:"?", (why&&why[0])?why:"-",
+        (suggest&&suggest[0])?suggest:"重试；若复现请把本段与日志文件一起反馈");
+    if(G.img[0]) n+=snprintf(card+n,sizeof card-(size_t)n,"日志     %s.imgtool.log\n",G.img);
+    n+=snprintf(card+n,sizeof card-(size_t)n,
+        "──────── 事件尾部（内存最近 %d 条，机器格式）────────\n", img_ring_count());
+    /* 事件尾部：直接给 ring 里的 JSON 行（同源，便于我这边解析）*/
+    int used=ring_dump_into(card+n,(int)(sizeof card-(size_t)n-64));
+    if(used>0) n+=used;
+    n+=snprintf(card+n,sizeof card-(size_t)n,"════════ 错误报告结束 ════════\n");
+
+    if(G.out_fd>=0 && G.out_human) write_all(G.out_fd,card,(size_t)n);
+    if(G.img[0]){                                   /* ★ 落一份文件：用户直接发这个 */
+        char path[600]; snprintf(path,sizeof path,"%s.error.txt",G.img);
+        int fd=open(path,O_WRONLY|O_CREAT|O_TRUNC,0644);
+        if(fd>=0){ write_all(fd,card,(size_t)n); close(fd); }
     }
 }
 
@@ -273,6 +374,7 @@ void img_ev_emit(img_ev *e){
     if(w.p<w.end) *w.p++='\n';
     size_t n=(size_t)(w.p-buf);
     pump(buf,n,e->lv);
+    human_emit(e);                     /* 屏幕人话行（Linux 风格）*/
     if(e->lv<=ring_lv) img_ring_add(buf);   /* 过程事件进内存（供失败卡片） */
 }
 

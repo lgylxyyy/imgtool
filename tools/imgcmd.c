@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static void print_help(const img_cmd *c){
     if(!c){ printf("没有这个命令\n"); return; }
@@ -34,7 +35,7 @@ static void print_help(const img_cmd *c){
 }
 
 int main(int argc, char **argv){
-    const char *cmd=NULL, *log=NULL, *lvl=NULL, *helpcmd=NULL, *logmax=NULL;
+    const char *cmd=NULL, *log=NULL, *lvl=NULL, *helpcmd=NULL, *logmax=NULL, *progress=NULL;
     bool list=false, ro=false;
     img_args *args=img_args_new();
     if(!args) return 1;
@@ -57,6 +58,7 @@ int main(int argc, char **argv){
         if(!strcmp(key,"log")){ log=val; continue; }
         if(!strcmp(key,"log-level")){ lvl=val; continue; }
         if(!strcmp(key,"log-max")){ logmax=val; continue; }
+        if(!strcmp(key,"progress")){ progress=val; continue; }
         if(!eq){ fprintf(stderr,"参数 %s 缺少 =值（例如 --lba=2048）\n",a); img_args_free(args); return 2; }
         img_args_set(args,key,val);
     }
@@ -69,6 +71,14 @@ int main(int argc, char **argv){
     if(helpcmd){ print_help(img_cmd_find(helpcmd)); img_args_free(args); return 0; }
     if(!cmd){ fprintf(stderr,"用法: imgcmd <命令> [--参数=值 ...] | --list | --help=<命令>\n"); img_args_free(args); return 2; }
 
+    /* 屏幕输出形态：默认 tty → bar（人话行），非 tty → json；可用 --progress 强制 */
+    {
+        bool human;
+        if(progress) human = !strcmp(progress,"bar");
+        else         human = isatty(2);
+        img_out_open_fd(2, human);
+        img_log_set_level(progress && !strcmp(progress,"none") ? IMG_LV_ERROR : IMG_LV_INFO);
+    }
     if(lvl){
         img_lv_t l=IMG_LV_INFO;
         if(!strcmp(lvl,"error")) l=IMG_LV_ERROR;
@@ -83,7 +93,14 @@ int main(int argc, char **argv){
         int rc = !strcmp(log,"-") ? img_log_open_fd(2,img_log_level(),maxb,1)
                                  : img_log_open(log,img_log_level(),maxb,1);
         if(rc!=IMG_OK) fprintf(stderr,"警告：日志打不开（%s），继续执行\n",log);
-        else img_log_session("imgcmd",cmd,img_args_get(args,"img"),0);
+        else {
+            char line[512]; int k=0;
+            k+=snprintf(line+k,sizeof line-(size_t)k,"imgcmd %s",cmd);
+            for(int i=0;i<img_args_count(args);i++){ }   /* 参数在 ctx 里统一打印 */
+            img_log_session("imgcmd",cmd,img_args_get(args,"img"),0);
+            char ctxline[512]; snprintf(ctxline,sizeof ctxline,"imgcmd %s",cmd);
+            img_card_set_context(ctxline);
+        }
     }
 
     const char *img=img_args_get(args,"img");

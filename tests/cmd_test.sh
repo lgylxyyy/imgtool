@@ -41,6 +41,7 @@ head -c 400000000 /dev/zero > "$W/huge.bin"
 $T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src="$W/huge.bin" --dst=/EFI/huge.bin --check_size=1 > "$W/e1.json" 2>/dev/null
 code=$(jq_ "d['err']['code']" < "$W/e1.json")
 [ "$code" = "FAT-ENOSPC" ] && ok "check_size=1 → 提前拦下（$(jq_ "d['err']['why']" < "$W/e1.json")）" || ng "check_size 未拦截（code=$code）"
+rm -f "$W/huge.bin"      # 400MB 临时文件立刻删（/tmp 是内存盘，别占着）
 
 echo "════ 4. 失败与参数校验（每条都要 信封+错误码+建议+非零退出）════"
 check_err(){
@@ -83,5 +84,5 @@ sys.exit(1 if bad else 0)" && ok "日志每行都是合法 JSON" || ng "日志�
 
 echo
 echo "════ 结果：通过 $pass · 失败 $fail ════"
-echo "  （调试目录 $W 未删除，便于查看 JSON/日志）"
+if [ $fail -eq 0 ]; then rm -rf "$W"; else echo "  （有失败，调试目录保留：$W）"; fi
 [ $fail -eq 0 ]

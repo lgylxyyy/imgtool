@@ -164,6 +164,8 @@ void img_result_fail(img_result *r,int rc,const char *code,const char *at,
         if(r->at[0]) img_ev_str(&e,"at",r->at);
         img_ev_emit(&e);
     }
+    /* ★ 人话失败卡片（屏幕 + <镜像>.error.txt）：用户能整段复制发给我们 */
+    img_fail_card(r->cmd, r->code, r->at, r->why, r->suggest);
 }
 
 /* ---------- JSON 渲染（栈上，无 malloc） ---------- */

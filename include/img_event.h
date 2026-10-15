@@ -18,6 +18,8 @@
  */
 #ifndef IMG_EVENT_H
 #define IMG_EVENT_H
+
+#define IMGTOOL_VERSION "imgtool 2026.10.15"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -108,6 +110,13 @@ int  img_ring_count(void);
 /* ---------- 失败卡片（0c 完整版；这里先落地最小可用） ---------- */
 void img_error_report(int rc, const char *code, const char *mod, const char *op,
                       const char *where, const char *why, const char *suggest);
+/* ★ 失败卡片：人话 + 可整段复制。写屏幕（human 模式）并落 <镜像>.error.txt，
+ *   内容含：工具/版本/命令/镜像指纹 / 失败位置 / 错误码 / 原因 / 建议 / 事件尾部。
+ *   App 侧可以直接把它塞进"复制到剪贴板"按钮。*/
+void img_fail_card(const char *cmd, const char *code, const char *at,
+                   const char *why, const char *suggest);
+/* 卡片里"命令与参数"那一行（CLI/App 启动时给一次即可）*/
+void img_card_set_context(const char *kv_line);
 
 #ifdef __cplusplus
 }
