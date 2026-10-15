@@ -111,7 +111,10 @@ int img_bcd_displayorder_add(img_bcd *b, const char *guid);
 #define IMG_BCD_GUID_ISO_RAMDISK  "7619dcc8-fafe-11d9-b411-000476eba25f"
 #define IMG_BCD_GUID_ISO_WINPE    "7619dcc9-fafe-11d9-b411-000476eba25f"
 /* WinPE loader 上与 ramdisk 相关的元素 */
-#define IMG_BCD_EL_WIM_DEVICE     "21000001"   /* device 对象，内嵌 WIM 路径 */
+#define IMG_BCD_EL_WIM_DEVICE     "21000001"   /* OSLoader 的 OSDevice（内嵌 WIM 路径）*/
+#define IMG_BCD_EL_APP_DEVICE     "11000001"   /* library 的 ApplicationDevice —— ★
+                                                * 官方 WinPE loader 上它与 21000001 内容
+                                                * 相同；bootmgr 主要读这一个，两个都得改 */
 #define IMG_BCD_EL_BOOTSDI_PATH   "32000004"   /* ramdiskoptions: \boot\boot.sdi */
 
 /* device 对象(21000001/11000001) 内嵌 WIM 路径的读/写
