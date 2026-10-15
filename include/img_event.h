@@ -70,6 +70,12 @@ typedef struct img_ev {
     int enabled;
 } img_ev;
 
+/* ★ 文案渲染回调：库只发【语义码 + 数值】，文案（中文/英文/图标）由消费端决定。
+ *   CLI 传一个渲染中文/英文的回调；App 传自己的（或不传 = 不要人话行）。
+ *   （这就是"库不带语言，语言在视图层"的落点）*/
+typedef void (*img_text_cb)(const img_ev *e, void *ud);
+void img_out_set_text(img_text_cb cb, void *ud);
+
 /* 返回 1=已启用（继续填空并 emit） 0=级别不够（可立即 return，零开销）*/
 int  img_ev_init(img_ev *e, img_lv_t lv, const char *mod, const char *ev, int rc, const char *msg);
 void img_ev_str (img_ev *e, const char *k, const char *v);
@@ -128,8 +134,8 @@ typedef struct {
     char img[512];       /* 镜像路径 */
     char ctx[256];       /* 命令与参数 */
     char log[560];       /* 日志文件路径（App 可提示用户一并发）*/
-    char events[2048];   /* 事件尾部（内存环形缓冲，机器格式）*/
-    int  n_events;
+    char events[2048];   /* 事件尾部（内存环形缓冲里的机器格式行）*/
+    int  events_len;     /* 尾部字节数（注意：不是条数）*/
 } img_error_info_t;
 void img_error_info(img_error_info_t *out);      /* 取"上一次失败"的上下文（无失败则 code 为空）*/
 /* 内部：失败时记录快照（img_result_fail / img_error_report 都会调）*/
@@ -138,12 +144,9 @@ void img_error_record(const char *cmd, const char *code, int rc, const char *at,
 
 /* 文案查表：App 可以直接用，也可以用自己的 i18n 覆盖（key = error_code / action）
  * lang: "zh"（默认）| "en"；查不到返回通用文案（不会返回 NULL）*/
-const char *img_error_cause  (const char *code, int rc, const char *lang);
-const char *img_error_suggest(const char *code, int rc, const char *lang);
-const char *img_action_text  (const char *action, const char *lang);
-void img_set_lang(const char *lang);              /* 库兜底文案的默认语言（env: IMGTOOL_LANG）*/
-void img_set_image(const char *path);             /* 记录当前镜像（卡片/.error.txt 会用）*/
-const char *img_get_lang(void);
+void img_set_image(const char *path);             /* 记录当前镜像（CLI 卡片/.error.txt 会用）*/
+const char *img_platform(void);                   /* "Linux"/"Android"/"windows"（CLI 卡片用）*/
+const char *img_abi(void);                        /* "64-bit" */
 
 /* ---------- 失败卡片（0c 完整版；这里先落地最小可用） ---------- */
 void img_error_report(int rc, const char *code, const char *mod, const char *op,
@@ -151,8 +154,6 @@ void img_error_report(int rc, const char *code, const char *mod, const char *op,
 /* ★ 失败卡片：人话 + 可整段复制。写屏幕（human 模式）并落 <镜像>.error.txt，
  *   内容含：工具/版本/命令/镜像指纹 / 失败位置 / 错误码 / 原因 / 建议 / 事件尾部。
  *   App 侧可以直接把它塞进"复制到剪贴板"按钮。*/
-void img_fail_card(const char *cmd, const char *code, const char *at,
-                   const char *why, const char *suggest);
 /* ---------- 取消（P0-2）----------
  * 全局标志：任何线程可置位，正在跑的操作在"安全检查点"退出。
  * 检查点 = 数据写入的每个 1MiB 块；取消后【不写目录项 + 释放已分配簇链】，

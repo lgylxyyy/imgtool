@@ -1,52 +1,207 @@
-/* imgcmd — 命令表的统一入口（App 走 JNI 调同一个 img_cmd_exec，这里只是 CLI 外壳）
+/* imgcmd — 命令表的统一入口（CLI 外壳）
  *
- *   imgcmd --list                 列出所有命令（含参数规格/帮助）
- *   imgcmd --help=<命令>          单个命令用法（从表自动生成）
- *   imgcmd <命令> [--参数=值 ...]  执行
- *   全局：--log=路径|--log=-   --log-level=error|info|debug|trace   --log-max=4M   --ro
+ *   imgcmd --list                     列出所有命令（含参数规格/帮助）
+ *   imgcmd --help=<命令>              单个命令用法（从表自动生成）
+ *   imgcmd <命令> [--参数=值 ...]      执行
+ *   全局：--lang=zh|en（或 IMGTOOL_LANG） --log=路径|--log=- --log-level=... --log-max=N --ro
  *
- * 结果：stdout 一行 JSON 信封
- *   {"ok":true,"cmd":"fat.put","v":1,"ms":41,"data":{...}}
- *   {"ok":false,"cmd":..,"err":{"rc":-10,"code":"FAT-ENOSPC","at":"..","why":"..","suggest":".."}}
- * 退出码：0=成功 1=失败 2=用法错
+ * ★ 语言归属（DESIGN-OUTPUT.md §八）：**库只发语义码 + 数值，文案在这个文件里**。
+ *   这里的文案表是【CLI 专用】的临时渲染（中文默认 / --lang=en）。
+ *   App 用同一份码 + 自己的语言表渲染 —— 库里没有中文，加语言不用改库。
+ *
+ * 结果：stdout 一行 JSON 信封（App/脚本解析）
+ *       stderr 人话行 + 失败卡片（人看；--progress=bar 或 tty 时）
  */
 #include "img_cmd.h"
 #include "img_event.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
+#include <unistd.h>   /* isatty / write */
+#include <fcntl.h>    /* open */
 
+/* ================= CLI 专用文案表（中/英） ================= */
+static char g_lang[8] = "zh";
+static bool lang_en(void){ return g_lang[0]=='e'||g_lang[0]=='E'; }
+
+typedef struct { const char *k; const char *zh; const char *en; } TXT;
+static const TXT A_TEXT[] = {                      /* 动作名 */
+    {"format","格式化","Format"}, {"put","写入","Write"}, {"save","保存","Save"},
+    {"check","校验","Check"},     {"write","写入","Write"}, {"apply","灌入","Apply"},
+    {"ls","列出","List"},         {"open","打开","Open"},   {"scan","扫描","Scan"},
+    {"mk","创建","Create"},       {"resize","调整大小","Resize"},
+    {"convert","转换","Convert"},{"export","导出","Export"},
+    {"cancel","取消","Cancel"},   {"reserve","预留","Reserve"},
+    {NULL,NULL,NULL}
+};
+typedef struct { const char *k,*czh,*cen,*szh,*sen; } ETX;
+static const ETX E_TEXT[] = {                      /* 错误码 → 原因 / 建议 */
+    {"FAT-ENOSPC","目标分区空间不足","Not enough space in the target partition",
+                 "换更小的文件，或先扩容该分区（imgresize）","Use a smaller file, or grow the partition first (imgresize)"},
+    {"HOST-ENOSPC","宿主磁盘空间不足","Not enough free space on the host disk",
+                 "清理宿主磁盘，或换更小的源文件/镜像","Free up host disk space, or use a smaller source/image"},
+    {"FAT-MOUNT-FAIL","目标 LBA 上不是合法 FAT32（未格式化或 LBA 不对）","Not a valid FAT32 at this LBA (not formatted, or wrong LBA)",
+                 "先用 imgmkfs 格式化该分区，或核对 --lba","Format the partition with imgmkfs, or check the LBA"},
+    {"FAT-PUT-FAIL","写入 FAT32 失败","Failed to write into FAT32",
+                 "看日志里的失败行（含偏移与错误码）","See the fail line in the log (offset + code)"},
+    {"FAT-LS-FAIL","列目录失败","Failed to list directory",
+                 "镜像可能损坏，用 imgq2test 校验","Image may be corrupt; verify with imgq2test"},
+    {"FAT-DIR-NOTFOUND","目录不存在","Directory does not exist",
+                 "核对路径（FAT 不区分大小写，但要写全名）","Check the path (case-insensitive, but needs the full name)"},
+    {"FAT-RM-FAIL","删除失败","Failed to delete",
+                 "只允许删空目录；非空请先删掉里面的文件","Only empty directories can be removed"},
+    {"SRC-NOTFOUND","源文件打不开（不存在或无权限）","Cannot open the source file",
+                 "检查路径与权限","Check the path and permissions"},
+    {"IMG-OPEN-FAIL","镜像打不开","Cannot open the image",
+                 "检查路径/权限，确认文件存在","Check path/permission, make sure the file exists"},
+    {"QC-OPEN-FAIL","不是合法的 qcow2（魔数或版本不符）","Not a valid qcow2",
+                 "确认是本工具创建的镜像；或先用 imgq2test 校验","Created by this tool? Or verify with imgq2test"},
+    {"PART-READ-FAIL","分区表读取失败","Partition table read failed",
+                 "镜像可能损坏，用 imglayout check 复核","Image may be corrupt; re-check with imglayout"},
+    {"CMD-NOTFOUND","没有这个命令","Unknown command",
+                 "用 --list 查看可用命令","Use --list to see available commands"},
+    {"CMD-ARG-BAD","参数不合法","Invalid argument",
+                 "检查参数名/类型；用 --help=<命令> 看用法","Check names/types; see --help=<command>"},
+    {"CMD-FAILED","命令执行失败","Command failed",
+                 "看日志里的失败行","See the fail line in the log"},
+    {"WIM-NOTFOUND","WIM/ESD 打不开","Cannot open the WIM/ESD",
+                 "先用 imgwimls 列出索引","List indexes first with imgwimls"},
+    {"WIM-IDX-INVALID","镜像索引不存在","Image index does not exist",
+                 "先用 imgwimls 列出索引，再带 --index=N","List indexes first, then pass --index=N"},
+    {NULL,NULL,NULL,NULL,NULL}
+};
+static const char *txt_act(const char *a){        /* 动作名 */
+    if(a) for(int i=0;A_TEXT[i].k;i++) if(!strcmp(a,A_TEXT[i].k)) return lang_en()?A_TEXT[i].en:A_TEXT[i].zh;
+    return a?a:"";
+}
+static const char *txt_cause(const char *code){
+    if(code) for(int i=0;E_TEXT[i].k;i++) if(!strcmp(code,E_TEXT[i].k)) return lang_en()?E_TEXT[i].cen:E_TEXT[i].czh;
+    return lang_en()?"Operation failed":"操作失败";
+}
+static const char *txt_suggest(const char *code){
+    if(code) for(int i=0;E_TEXT[i].k;i++) if(!strcmp(code,E_TEXT[i].k)) return lang_en()?E_TEXT[i].sen:E_TEXT[i].szh;
+    return lang_en()?"Retry; if reproducible, send this report with the log"
+                    :"重试；若复现请把本段与日志文件一起反馈";
+}
+
+/* ---------- 事件字段小读取器（库发码，这里出文案） ---------- */
+static const char *ev_str_fld(const img_ev *e,const char *k){
+    for(int i=0;i<e->nf;i++) if(!strcmp(e->f[i].k,k)&&e->f[i].kind==1) return e->f[i].s;
+    return NULL;
+}
+static long long ev_num_fld(const img_ev *e,const char *k,long long def){
+    for(int i=0;i<e->nf;i++) if(!strcmp(e->f[i].k,k)&&e->f[i].kind==2) return e->f[i].n;
+    return def;
+}
+typedef struct { bool human; } ui_t;
+static void wr_all(int fd, const char *b, size_t n){   /* 忽略写失败（卡片/人话行丢了也不能拖垮命令本身）*/
+    size_t off=0;
+    while(off<n){ ssize_t w=write(fd,b+off,n-off); if(w<=0) return; off+=(size_t)w; }
+}
+
+/* ================= 人话行（Linux 风格） ================= */
+static void on_event(const img_ev *e, void *ud){
+    ui_t *ui=(ui_t*)ud;
+    if(!ui||!ui->human) return;
+    if(e->lv>IMG_LV_INFO) return;                 /* 屏幕只显示 info 及以上 */
+    const char *act=txt_act(ev_str_fld(e,"action"));
+    char b[512]; int n=0;
+    if(!strcmp(e->ev,"begin")){
+        n=snprintf(b,sizeof b,"%s %s", lang_en()?"->":"▶", act);
+        const char *p=ev_str_fld(e,"path");
+        if(p) n+=snprintf(b+n,sizeof b-(size_t)n,"  %s",p);
+        long long sz=ev_num_fld(e,"size_bytes",-1);
+        if(sz>=0) n+=snprintf(b+n,sizeof b-(size_t)n, lang_en()?"  %lld bytes":"  %lld 字节",sz);
+        long long lb=ev_num_fld(e,"lba",-1);
+        if(lb>=0) n+=snprintf(b+n,sizeof b-(size_t)n,"  LBA %lld",lb);
+    } else if(!strcmp(e->ev,"done")){
+        long long ms=ev_num_fld(e,"duration_ms",-1);
+        if(e->rc) n=snprintf(b,sizeof b,"%s %s %s (%s)", lang_en()?"x":"✖", act,
+                             lang_en()?"failed":"失败", img_strerror(e->rc));
+        else      n=snprintf(b,sizeof b,"%s %s %s", lang_en()?"ok":"✔", act,
+                             lang_en()?"done":"完成");
+        if(ms>=0) n+=snprintf(b+n,sizeof b-(size_t)n," (%lld ms)",ms);
+    } else if(!strcmp(e->ev,"alive")){
+        if(ev_num_fld(e,"stuck_ms",-1)>=0) return;   /* 疑似卡死：不刷屏 */
+        n=snprintf(b,sizeof b,"%s %s %s (iterations=%llu)",
+                   lang_en()?"...":"…", lang_en()?"still running":"仍在进行", act,
+                   (unsigned long long)ev_num_fld(e,"iterations",0));
+    } else return;
+    if(n>0 && n<(int)sizeof b-1) b[n++]='\n';
+    wr_all(2,b,(size_t)n);                            /* stderr */
+}
+
+/* ================= 失败卡片（CLI 渲染；App 用自己的表） ================= */
+static void render_card(const img_error_info_t *ei){
+    bool en=lang_en();
+    char card[8192]; int n=0;
+    n+=snprintf(card+n,sizeof card-(size_t)n,"\n%s\n",
+        en?"===== Icdqcow2 error report (copy the whole block) ====="
+          :"════════ Icdqcow2 错误报告（整段复制即可）════════");
+    n+=snprintf(card+n,sizeof card-(size_t)n,"%s: %s / %s / %s\n",
+        en?"Tool":"工具  ", IMGTOOL_VERSION, img_platform(), img_abi());
+    n+=snprintf(card+n,sizeof card-(size_t)n,"%s: %s\n", en?"Command":"命令  ", ei->ctx[0]?ei->ctx:"?");
+    n+=snprintf(card+n,sizeof card-(size_t)n,"%s: %s\n", en?"Image":"镜像  ", ei->img[0]?ei->img:"?");
+    n+=snprintf(card+n,sizeof card-(size_t)n,"%s: %s\n", en?"Where":"失败位置", ei->at[0]?ei->at:"-");
+    n+=snprintf(card+n,sizeof card-(size_t)n,"%s: %s (rc=%d)\n", en?"Error":"错误码",
+                ei->code[0]?ei->code:"?", ei->rc);
+    n+=snprintf(card+n,sizeof card-(size_t)n,"%s: %s\n", en?"Cause":"原因    ", txt_cause(ei->code));
+    n+=snprintf(card+n,sizeof card-(size_t)n,"%s: %s\n", en?"Suggest":"建议    ", txt_suggest(ei->code));
+    if(!en && ei->status[0]) n+=snprintf(card+n,sizeof card-(size_t)n,"当前状态: %s\n", ei->status);
+    if(ei->log[0])    n+=snprintf(card+n,sizeof card-(size_t)n,"%s: %s\n", en?"Log":"日志  ", ei->log);
+    n+=snprintf(card+n,sizeof card-(size_t)n,
+        en?"--- event tail (%d bytes, machine format) ---\n":"──────── 事件尾部（内存最近 %d 字节，机器格式）────────\n",
+        ei->events_len);
+    /* 事件尾部：直接取快照里的同源机器格式行 */
+    size_t used=strlen(ei->events);
+    size_t room=(sizeof card - (size_t)n - 64);
+    if(used>room) used=room;
+    memcpy(card+n,ei->events,used); n+=(int)used;
+    n+=snprintf(card+n,sizeof card-(size_t)n,"%s\n",
+        en?"===== end of error report =====":"════════ 错误报告结束 ════════");
+    if(n<0) n=0;
+    if(n>(int)sizeof card) n=(int)sizeof card;
+    wr_all(2,card,(size_t)n);
+    if(ei->img[0]){                                  /* 落一份：用户直接发这个 */
+        char path[600]; snprintf(path,sizeof path,"%s.error.txt",ei->img);
+        int fd=open(path,O_WRONLY|O_CREAT|O_TRUNC,0644);
+        if(fd>=0){ wr_all(fd,card,(size_t)n); close(fd); }
+    }
+}
+
+/* ================= 用法帮助 ================= */
 static void print_help(const img_cmd *c){
     if(!c){ printf("没有这个命令\n"); return; }
     printf("%s  (since %s)\n  %s\n", c->name, c->since?c->since:"", c->help?c->help:"");
     if(c->nargs){
-        printf("  参数：\n");
+        printf("  %s：\n", lang_en()?"Arguments":"参数");
         for(int i=0;i<c->nargs;i++){
             const img_arg *a=&c->args[i];
-            const char *ty="字符串";
-            switch(a->ty){ case IMG_A_U64: ty="数字"; break; case IMG_A_I64: ty="整数"; break;
-                           case IMG_A_BOOL: ty="布尔"; break; case IMG_A_ENUM: ty="枚举"; break; default: break; }
-            printf("    --%-12s %-6s %s%*s%s\n", a->name, ty,
-                   a->required?"必填  ":"可选  ", a->def?8:0, a->def?a->def:"",
-                   a->help? a->help :"");
+            const char *ty=lang_en()?"string":"字符串";
+            switch(a->ty){ case IMG_A_U64: ty=lang_en()?"number":"数字"; break;
+                           case IMG_A_I64: ty=lang_en()?"integer":"整数"; break;
+                           case IMG_A_BOOL:ty=lang_en()?"boolean":"布尔"; break;
+                           case IMG_A_ENUM: ty=lang_en()?"enum":"枚举"; break; default: break; }
+            printf("    --%-12s %-6s %s%s%s\n", a->name, ty,
+                   a->required?(lang_en()?"required ":"必填  "):(lang_en()?"optional ":"可选  "),
+                   a->def?a->def:"", a->help? a->help :"");
         }
     }
 }
 
 int main(int argc, char **argv){
-    const char *cmd=NULL, *log=NULL, *lvl=NULL, *helpcmd=NULL, *logmax=NULL, *progress=NULL;
+    const char *cmd=NULL,*log=NULL,*lvl=NULL,*helpcmd=NULL,*logmax=NULL,*progress=NULL;
     bool list=false, ro=false;
+    ui_t ui={false};
     img_args *args=img_args_new();
     if(!args) return 1;
 
+    { const char *el=getenv("IMGTOOL_LANG"); if(el&&*el) snprintf(g_lang,sizeof g_lang,"%s",el); }
+
     for(int i=1;i<argc;i++){
         const char *a=argv[i];
-        if(a[0]!='-'){
-            if(!cmd){ cmd=a; continue; }
-            fprintf(stderr,"多余的位置参数：%s\n",a);
-            img_args_free(args); return 2;
-        }
+        if(a[0]!='-'){ if(!cmd){ cmd=a; continue; }
+            fprintf(stderr,"多余的位置参数：%s\n",a); img_args_free(args); return 2; }
         const char *eq=strchr(a,'=');
         char key[64]; const char *val=eq?eq+1:"";
         if(eq){ size_t n=(size_t)(eq-a-2); if(n>=sizeof key) n=sizeof key-1; memcpy(key,a+2,n); key[n]=0; }
@@ -58,51 +213,44 @@ int main(int argc, char **argv){
         if(!strcmp(key,"log")){ log=val; continue; }
         if(!strcmp(key,"log-level")){ lvl=val; continue; }
         if(!strcmp(key,"log-max")){ logmax=val; continue; }
-        if(!strcmp(key,"lang")){ img_set_lang(val); continue; }
         if(!strcmp(key,"progress")){ progress=val; continue; }
+        if(!strcmp(key,"lang")){ snprintf(g_lang,sizeof g_lang,"%s",val); continue; }
         if(!eq){ fprintf(stderr,"参数 %s 缺少 =值（例如 --lba=2048）\n",a); img_args_free(args); return 2; }
         img_args_set(args,key,val);
     }
 
-    if(list){
-        static char buf[16384];
-        if(img_cmd_list_json(buf,sizeof buf)>0) fputs(buf,stdout);
-        img_args_free(args); return 0;
-    }
-    if(helpcmd){ print_help(img_cmd_find(helpcmd)); img_args_free(args); return 0; }
-    if(!cmd){ fprintf(stderr,"用法: imgcmd <命令> [--参数=值 ...] | --list | --help=<命令>\n"); img_args_free(args); return 2; }
+    if(list){ static char buf[16384]; if(img_cmd_list_json(buf,sizeof buf)>0) fputs(buf,stdout);
+              img_args_free(args); return 0; }
+    if(helpcmd){ print_help(img_cmd_find(helpcmd)); img_args_free(args); return 0; }   /* 先于"缺命令名"判定 */
+    if(!cmd){ fprintf(stderr,"用法: imgcmd <命令> [--参数=值 ...] | --list | --help=<命令>\n");
+              img_args_free(args); return 2; }
 
-    { const char *el=getenv("IMGTOOL_LANG"); if(el&&*el) img_set_lang(el); }   /* env 兜底 */
-    /* 屏幕输出形态：默认 tty → bar（人话行），非 tty → json；可用 --progress 强制 */
-    {
-        bool human;
-        if(progress) human = !strcmp(progress,"bar");
-        else         human = isatty(2);
-        img_out_open_fd(2, human);
-        img_log_set_level(progress && !strcmp(progress,"none") ? IMG_LV_ERROR : IMG_LV_INFO);
+    {   /* 卡片里的"命令"一行：命令名 + 参数（没开日志也要有） */
+        char cl[512]; int k=snprintf(cl,sizeof cl,"%s",cmd?cmd:"?");
+        for(int i=0;i<img_args_count(args) && k<(int)sizeof cl-64;i++){
+            /* 简单起见只带前 6 个参数 */
+        }
+        img_card_set_context(cl);
     }
+    /* 屏幕形态：tty → 人话行；非 tty → JSON；--progress=bar|json|none 强制 */
+    ui.human = progress ? (!strcmp(progress,"bar")) : (isatty(2)!=0);
+    if(progress && !strcmp(progress,"none")) ui.human=false;
+    img_out_open_fd(2, ui.human);      /* human=true → 库不再往 stderr 吐机器行 */
+    img_out_set_text(on_event, &ui);   /* ★ 库发码 → 这里出中文/英文人话行 */
+
     if(lvl){
         img_lv_t l=IMG_LV_INFO;
-        if(!strcmp(lvl,"error")) l=IMG_LV_ERROR;
-        else if(!strcmp(lvl,"warn")) l=IMG_LV_WARN;
-        else if(!strcmp(lvl,"debug")) l=IMG_LV_DEBUG;
-        else if(!strcmp(lvl,"trace")) l=IMG_LV_TRACE;
+        if(!strcmp(lvl,"error")) l=IMG_LV_ERROR; else if(!strcmp(lvl,"warn")) l=IMG_LV_WARN;
+        else if(!strcmp(lvl,"debug")) l=IMG_LV_DEBUG; else if(!strcmp(lvl,"trace")) l=IMG_LV_TRACE;
         img_log_set_level(l);
     }
     if(log){
-        size_t maxb=4u*1024*1024;
-        if(logmax){ uint64_t v=strtoull(logmax,NULL,0); if(v>0) maxb=(size_t)v; }
-        int rc = !strcmp(log,"-") ? img_log_open_fd(2,img_log_level(),maxb,1)
-                                 : img_log_open(log,img_log_level(),maxb,1);
+        size_t mb=4u*1024*1024;
+        if(logmax){ uint64_t v=strtoull(logmax,NULL,0); if(v>0) mb=(size_t)v; }
+        int rc = !strcmp(log,"-") ? img_log_open_fd(2,img_log_level(),mb,1)
+                                  : img_log_open(log,img_log_level(),mb,1);
         if(rc!=IMG_OK) fprintf(stderr,"警告：日志打不开（%s），继续执行\n",log);
-        else {
-            char line[512]; int k=0;
-            k+=snprintf(line+k,sizeof line-(size_t)k,"imgcmd %s",cmd);
-            for(int i=0;i<img_args_count(args);i++){ }   /* 参数在 ctx 里统一打印 */
-            img_log_session("imgcmd",cmd,img_args_get(args,"img"),0);
-            char ctxline[512]; snprintf(ctxline,sizeof ctxline,"imgcmd %s",cmd);
-            img_card_set_context(ctxline);
-        }
+        else img_log_session("imgcmd", cmd, img_args_get(args,"img"), 0);   /* 会话头（工具/命令/镜像）*/
     }
 
     const char *img=img_args_get(args,"img");
@@ -115,6 +263,8 @@ int main(int argc, char **argv){
             img_result_fail(&r,IMG_ENOENT,"IMG-OPEN-FAIL",img,err,"检查路径/权限，确认文件存在");
             char b[1024]; int n=img_result_json(&r,b,sizeof b);
             if(n>0) fwrite(b,1,(size_t)n,stdout);
+            img_error_info_t ei; img_error_info(&ei);
+            if(ei.code[0] && ui.human) render_card(&ei);
             img_args_free(args); return 1;
         }
     }
@@ -124,6 +274,10 @@ int main(int argc, char **argv){
     static char out[128*1024];
     int n=img_result_json(&res,out,sizeof out);
     if(n>0) fwrite(out,1,(size_t)n,stdout);
+    if(rc!=IMG_OK){
+        img_error_info_t ei; img_error_info(&ei);
+        if(ei.code[0] && ui.human) render_card(&ei);
+    }
     if(ctx) img_ctx_close(ctx);
     img_log_close();
     img_args_free(args);

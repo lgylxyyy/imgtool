@@ -46,12 +46,15 @@ rm -f "$W/huge.bin"      # 400MB 临时文件立刻删（/tmp 是内存盘，别
 echo "════ 4. 失败与参数校验（每条都要 信封+错误码+建议+非零退出）════"
 check_err(){
   local d="$1" want="$2"; shift 2
+  set -- "$@" --progress=bar     # 失败卡片只在 human 模式渲染（stderr 不是 tty 时要显式开）
   local f="$W/err.json"
-  "$@" > "$f" 2>/dev/null; local rc=$?
+  local card="$W/err.txt"
+  "$@" > "$f" 2> "$card"; local rc=$?      # stdout=JSON 信封，stderr=失败卡片（CLI 渲染）
   local got; got=$(jq_ "d['err']['error_code']" < "$f")
-  local sug; sug=$(jq_ "len(d['err']['suggest'])>0" < "$f")
-  if [ "$got" = "$want" ] && [ "$sug" = "True" ] && [ $rc -ne 0 ]; then ok "$d → $got（含建议）"
-  else ng "$d → 期望 $want 实得 $got（rc=$rc 建议=$sug）"; fi
+  local sug=0
+  grep -qE "建议    |Suggest " "$card" && sug=1
+  if [ "$got" = "$want" ] && [ "$sug" = "1" ] && [ $rc -ne 0 ]; then ok "$d → $got（卡片含建议）"
+  else ng "$d → 期望 $want 实得 $got（rc=$rc 卡片建议=$sug）"; fi
 }
 check_err "未知命令"          CMD-NOTFOUND      $T/imgcmd nosuch.cmd
 check_err "缺必填参数 --img"   CMD-ARG-BAD       $T/imgcmd img.info

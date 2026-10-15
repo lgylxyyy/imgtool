@@ -203,44 +203,33 @@ img_io_open_fd(fd, take_ownership, opts)
 ---
 
 
-## 八、多语言（i18n）契约：库发码，App 发话
+## 八、多语言（i18n）契约：库发码，视图层出文案
 
-**用户需求**：人话行与失败卡片要能跟 App 的语言走；库要给 App"想表达什么"的**数值/码**，
-而不是把中文硬编码进契约。
+**用户结论**：分开写 —— **库（imgtool 核心）不带任何文案**，"中文还是英文"由调用端决定：
+CLI 是我们自己用的临时渲染（中文默认 / `--lang=en`）；App 用同一份码 + 自己的语言表。
 
-### App 拿到什么（语义码 + 数值）
-| 用途 | 字段（事件里已带）|
+### 库给出什么（语义码 + 数值，语言中立）
+| 用途 | 字段 |
 |---|---|
-| 显示"正在做什么" | `event=begin/done`、`action=format|put|save|check`、`path`/`lba`/`size_bytes` |
-| 显示"出了什么错" | `error_code=FAT-ENOSPC`、`rc`、`at`、`duration_ms`、`size_bytes`… |
-| 渲染本地化人话行 | 以上码 + 数值，用 App 自己的语言表 |
-| 渲染本地化失败卡片 | 失败后调 `img_error_info()` 取结构化快照 |
+| "正在做什么" | `event=begin/done`、`action=format\|put\|save\|check`、`path`/`lba`/`size_bytes` |
+| "出了什么错" | `error_code=FAT-ENOSPC`、`rc`、`at`、`duration_ms`、`size_bytes` |
+| 失败快照 | `img_error_info()` → `{code, rc, at, what, status, img, ctx, log, events(机器格式尾部)}` |
+| 库的文本 | **没有**。`message` 字段只是【开发期备注】（可能中文）写进日志，**不是 App 契约** |
+| stdout 结果信封 | `{"ok":true,"version":1,"data":{...}}` / `{"ok":false,"err":{"rc","error_code","at"}}` —— **不再含中文文案** |
 
-### 新增 API（App 直接用，也可用自己的 i18n 覆盖）
+### 视图层出什么
 ```c
-typedef struct { char cmd[64]; char code[48]; int rc; char at[256];
-                 char what[256]; char status[256]; char img[512]; char ctx[256];
-                 char log[560]; char events[2048]; int n_events; } img_error_info_t;
-void        img_error_info(img_error_info_t *out);          /* 上一次失败的完整快照 */
-const char *img_error_cause  (const char *code, int rc, const char *lang);  /* "zh"|"en" */
-const char *img_error_suggest(const char *code, int rc, const char *lang);
-const char *img_action_text  (const char *action, const char *lang);        /* 动作名翻译 */
-void        img_set_lang(const char *lang);   /* 库兜底文案语言（env: IMGTOOL_LANG，CLI: --lang=）*/
-void        img_set_image(const char *path);  /* 记录镜像：卡片/.error.txt 要用 */
+void img_out_set_text(img_text_cb cb, void *ud);   /* 库发事件 → 回调由消费端渲染文案 */
 ```
-- `code` 是**查表键**（稳定不变）：`FAT-ENOSPC` / `HOST-ENOSPC` / `FAT-MOUNT-FAIL` / `IMG-OPEN-FAIL` / `WIM-IDX-INVALID` …
-  新增错误码就在 `E_TEXT[]` 表里加一行（中英两列）。
-- `events[]` 是内存环形缓冲里的**机器格式过程尾部**（同源日志行），App 想展示就展示，不想展示就不展示。
+- **CLI**（`tools/imgcmd.c`）：内置一张 zh/en 文案表（`A_TEXT` 动作名 / `E_TEXT` 错误码→原因+建议），
+  渲染人话行与失败卡片，并落 `<镜像>.error.txt`。**这张表是 CLI 专用**，不参与库。
+- **App**：拿 `event/action/error_code + 数值` 用自己的表渲染；失败后调 `img_error_info()`
+  取结构化快照（含事件尾部），渲染本地化卡片 + "复制到剪贴板"。
 
-### CLI 侧
-- `--lang=en|zh`（或环境变量 `IMGTOOL_LANG`）：失败卡片与人话行跟着切；默认 `zh`。
-- 屏幕人话行**只有码与数值**（`▶ 写入 /EFI/x 90000000 字节`），动作名可翻译（`写入`/`Write`）。
-
-### 已知边界（诚实）
-- **原因行里的"实例描述"目前仍是中文**（形如"目标分区剩余 196 MB，要写入 286 MB"，是 C 里拼的带数字串）。
-  中文模式优先用实例串（精确带数字），英文模式用文案表（通用但地道）。
-  要做到"英文也带精确数字"，需把 need/free 等数字**结构化**传进失败快照（`size_bytes`/`need_bytes` 已有部分）——后续逐步补齐。
-- 文案表目前只内置 **zh/en** 两列；加语言 = 表里加两列（不需要动逻辑）。
+### 加语言的代价
+- CLI：文案表加两列（`zh/en` → 再加 `ja` 等）
+- App：App 自己的语言资源文件（与库无关）
+- **库一行都不用改**
 
 
 ## 九、落地进度

@@ -165,8 +165,8 @@ void img_result_fail(img_result *r,int rc,const char *code,const char *at,
         img_ev_emit(&e);
     }
     /* ★ 人话失败卡片（屏幕 + <镜像>.error.txt）：用户能整段复制发给我们 */
-    img_error_record(r->cmd, r->code, rc, r->at, NULL, r->why);   /* 结构化快照：App 渲染本地化卡片 */
-    img_fail_card(r->cmd, r->code, r->at, r->why, r->suggest);
+    img_error_record(r->cmd, r->code, rc, r->at, NULL, r->why);   /* 结构化快照；
+                                                                   * 卡片/人话行由消费端（CLI/App）用各自的文案表渲染 */
 }
 
 /* ---------- JSON 渲染（栈上，无 malloc） ---------- */
@@ -220,8 +220,7 @@ int img_result_json(const img_result *r, char *buf, int cap){
         wnum(&ew,"rc",r->rc);
         wstr(&ew,"error_code",r->code);
         if(r->at[0]) wstr(&ew,"at",r->at);
-        wstr(&ew,"why",r->why);
-        wstr(&ew,"suggest",r->suggest);
+        /* why/suggest 是【文案】，不进信封（库零文案；App 用 error_code 查自己的表）*/
         w.p=ew.p;
         if(w.p<w.end)*w.p++='}';
     }
