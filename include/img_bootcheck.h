@@ -1,0 +1,58 @@
+/* img_bootcheck.h — 引导链自检（替代"挂虚拟机看能不能起"）
+ *
+ * 分层检查，每项给出 id / 名称 / 级别 / 结果 / 详情。
+ * 通过条件按模式不同：
+ *   · UEFI/GPT：ESP 完整性 + bootmgfw.efi 存在 + BCD 可解析 + 跨引用闭合
+ *   · BIOS/MBR：活动标记 + 分区类型0x07 + $Boot 0..9 + bootmgr 存在
+ *   · 共同：   NTFS 结构、BCD 元素齐全、Windows 系统文件存在
+ *
+ * 用法：bccheck 把结果打成 JSON 数组，每项一行 → App 直接渲染。
+ */
+#ifndef IMG_BOOTCHECK_H
+#define IMG_BOOTCHECK_H
+#include "img_qcow2.h"
+#include "img_partition.h"
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum {
+    IMG_CK_INFO = 0,   /* 仅提示，不影响判定 */
+    IMG_CK_REQUIRED,   /* 不过 = 镜像大概率起不来 */
+    IMG_CK_WARN,       /* 不过 = 能起但功能缺失 */
+} img_ck_level_t;
+
+typedef struct {
+    const char    *id;        /* 稳定 ID，如 "esp.fat32" */
+    const char    *name;      /* 中文名 */
+    img_ck_level_t level;
+    bool           pass;
+    char           detail[256];
+} img_check_t;
+
+typedef struct {
+    img_check_t items[64];
+    int         count;
+    int         n_required_fail;   /* REQUIRED 未通过数 */
+    int         n_warn_fail;
+    bool        is_uefi;
+} img_bootcheck_result_t;
+
+/* 模式：自动探测 / 强制某一种 */
+typedef enum { IMG_BOOT_AUTO = 0, IMG_BOOT_UEFI, IMG_BOOT_BIOS } img_boot_mode_t;
+
+/* 跑完整检查。prog 可为 NULL。 */
+int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *out, img_prog *prog);
+
+/* 把结果打成 JSON 数组（每项一行，方便流式输出）；返回写入字节数 */
+int img_bootcheck_json(const img_bootcheck_result_t *r, char *buf, int cap);
+
+/* 一行汇总："6/8 必需项通过 · 2 项警告" */
+int img_bootcheck_summary(const img_bootcheck_result_t *r, char *buf, int cap);
+
+#ifdef __cplusplus
+}
+#endif
+#endif

@@ -3,7 +3,7 @@
 #define IMG_NTFS_FMT_H
 #include "img_qcow2.h"
 #include "img_progress.h"
-typedef struct img_ntfs_ctx img_ntfs_ctx_t;
+#include "img_ntfs_dev.h"   /* 取 img_ntfs_ctx 的真实类型 */
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,7 +33,10 @@ int img_ntfs_format(img_qcow2 *q, const img_ntfs_fmt_opts_t *o, img_prog *prog);
  * 在调用它们的 main() 之前激活、之后停用。 */
 void img_ntfs_ctx_activate(img_qcow2 *q, uint64_t partition_lba, uint64_t partition_bytes);
 void img_ntfs_ctx_deactivate(void);
-img_ntfs_ctx_t *img_ntfs_ctx_current(void);
+img_ntfs_ctx *img_ntfs_ctx_current(void);
+
+/* 取当前激活的设备上下文（内部设备后端与 bootcheck 桥接共用） */
+img_ntfs_ctx *img_ntfs_get_active_ctx(void);
 
 /* 校验分区是否为合法 NTFS（结构自洽）；out 可为 NULL */
 typedef struct {

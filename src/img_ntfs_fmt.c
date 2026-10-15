@@ -36,7 +36,7 @@ void img_ntfs_ctx_deactivate(void){
     g_fmt_ctx  = NULL;
     if(g_ext_ctx){ img_ntfs_ctx_free(g_ext_ctx); g_ext_ctx = NULL; }
 }
-img_ntfs_ctx_t *img_ntfs_ctx_current(void){ return (img_ntfs_ctx_t*)g_fmt_ctx; }
+img_ntfs_ctx *img_ntfs_ctx_current(void){ return g_fmt_ctx; }
 
 /* ---------- 10 个回调（dev->d_private 就是我们的 ctx）---------- */
 
