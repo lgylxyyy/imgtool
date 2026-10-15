@@ -73,7 +73,7 @@ FAT    真正的问题所在：多处 `while(c>=2 && c<FAT32_EOC)` 沿链走，
 | P0-2 取消接线 | ⬜ 未做 | — |
 | P1-3 CLI 进度可见 | 🟡 部分：事件流 + 人话行 + 失败卡片 + `.error.txt` 已通（`6261aef` `a2a35cc` `5914928` 及本次 0c 提交） | 成功路径 `▶/✔` 人话行、失败卡片（原因/位置/建议/事件尾部）实测见下 |
 | P1-4 FAT 写分块 | ⬜ 未做 | — |
-| 0e 尺寸估算 + check_size | 🟡 部分：`fat.put --check_size=1` 已能提前拦下（`FAT-ENOSPC`，卡片给"剩余 X MB / 需要 Y MB"）；WIM/ESD 展开尺寸估算未做 | — |
+| 0e 尺寸估算 + check_size | ✅ 估算 + 开关都通 | `wim.size` 命令：真实 ESD → `data_bytes=6861906464`（与上一轮实测 6.86GB 一致）、`file_count=32707`（一致）、`est_ntfs_bytes=7483201632`（含元数据+8% 余量）；`fat.put --check_size=1` 提前拦下并给"剩余 196MB / 需要 286MB"；非法索引 → `WIM-IDX-INVALID` |
 | C 命令表骨架 | ✅ `a2a35cc` | `--list`（App 生成界面用）/`--help` 自动生成/统一信封/22 条验收全绿 |
 | B 并发 + fd 契约 | ✅ `5914928` | `fd_test` 15 条 · `thread_test` 4 组全绿；契约见 DESIGN-OUTPUT.md 第七节 |
 

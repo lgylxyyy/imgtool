@@ -9,6 +9,7 @@
 #include "img_fat32.h"
 #include "img_fat32_fs.h"
 #include "img_event.h"
+#include "img_wim_apply.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -179,7 +180,36 @@ static int cmd_fat_ls(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
-/* ================= 命令 5：cmd.list（自描述：App 可据此自动生成界面） ================= */
+/* ================= 命令 5：wim.size（尺寸估算，政策留给 App） ================= */
+static const img_arg A_WIMSIZE[] = {
+    {"wim",   IMG_A_STR, true,  NULL, "WIM/ESD 路径",        NULL},
+    {"index", IMG_A_U64, false, "1",  "镜像索引（见 --list 用 imgwimls 查）", NULL},
+};
+static int cmd_wim_size(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx;
+    const char *wim=img_args_get(in,"wim");
+    int idx=(int)img_args_u64(in,"index",1);
+    img_wim_size_t sz;
+    int rc=img_wim_estimate(wim,idx,&sz);
+    if(rc!=IMG_OK){
+        img_result_fail(out,rc, rc==IMG_ENOENT?"WIM-NOTFOUND":"WIM-IDX-INVALID", wim,
+                        rc==IMG_ENOENT?"WIM/ESD 打不开（不存在或不是 WIM 格式）"
+                                      :"镜像索引不存在",
+                        "先用 imgwimls <wim> 列出索引，再带 --index=N");
+        return rc;
+    }
+    img_result_str(out,"name",sz.name);
+    img_result_str(out,"compression",sz.compression);
+    img_result_u64(out,"data_bytes",sz.data_bytes);
+    img_result_u64(out,"file_count",sz.file_count);
+    img_result_u64(out,"dir_count",sz.dir_count);
+    img_result_u64(out,"est_ntfs_bytes",sz.est_ntfs_bytes);
+    img_result_u64(out,"est_ntfs_mb",sz.est_ntfs_bytes/1048576);
+    /* ★ 工具只给数字；"够不够 / 分区开多大"由 App 决定（政策不在工具里）*/
+    return IMG_OK;
+}
+
+/* ================= 命令 6：cmd.list（自描述：App 可据此自动生成界面） ================= */
 static int cmd_cmd_list(img_ctx *ctx, const img_args *in, img_result *out){
     (void)ctx; (void)in;
     static char buf[16384];
@@ -199,6 +229,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_FATPUT, (int)(sizeof A_FATPUT/sizeof A_FATPUT[0]), cmd_fat_put},
     {"fat.ls",    "1.0", "列某个 FAT32 分区里的目录",
         A_FATLS,  (int)(sizeof A_FATLS /sizeof A_FATLS[0]),  cmd_fat_ls},
+    {"wim.size",  "1.0", "估算某个 WIM/ESD 镜像展开后需要多少空间（工具给数字，App 定政策）",
+        A_WIMSIZE,(int)(sizeof A_WIMSIZE/sizeof A_WIMSIZE[0]), cmd_wim_size},
     {"cmd.list",  "1.0", "导出命令表（名字/参数规格/帮助）——App 可据此自动生成界面",
         NULL, 0, cmd_cmd_list},
 };

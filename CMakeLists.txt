@@ -52,14 +52,20 @@ if(IMG_WITH_ZLIB)
 endif()
 
 # ---- 核心静态库 ----
+# ---- wimlib（WIM/ESD 解压；img_wim_apply.c 依赖它，所以要作为库的真实依赖声明）----
+find_library(WIM_LIB wim)
+if(NOT WIM_LIB)
+  message(WARNING "libwim 未找到 → WIM/ESD 相关功能（img_wim_apply / wim.size 命令）不可用")
+endif()
+
 find_package(Threads REQUIRED)
 add_library(imgtool STATIC ${IMG_SOURCES})
-target_link_libraries(imgtool PUBLIC ${IMG_ZLIB_LIBS} Threads::Threads)
+target_link_libraries(imgtool PUBLIC ${IMG_ZLIB_LIBS} Threads::Threads ${WIM_LIB})
 
 # ---- 共享库（Android .so）----
 add_library(imgtool_shared SHARED ${IMG_SOURCES})
 set_target_properties(imgtool_shared PROPERTIES OUTPUT_NAME "imgtool")
-target_link_libraries(imgtool_shared PUBLIC ${IMG_ZLIB_LIBS} Threads::Threads)
+target_link_libraries(imgtool_shared PUBLIC ${IMG_ZLIB_LIBS} Threads::Threads ${WIM_LIB})
 
 # ---- 工具 / 测试 ----
 if(IMG_BUILD_TOOLS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/CMakeLists.txt)

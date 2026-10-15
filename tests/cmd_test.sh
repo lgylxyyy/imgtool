@@ -62,6 +62,21 @@ check_err "LBA 上不是 FAT32"   FAT-MOUNT-FAIL    $T/imgcmd fat.ls --img="$W/t
 check_err "镜像不存在"         IMG-OPEN-FAIL     $T/imgcmd img.info --img=/no/such.qcow2
 check_err "目录不存在"         FAT-DIR-NOTFOUND  $T/imgcmd fat.ls --img="$W/t.qcow2" --lba=$LBA --path=/nope
 
+echo "════ 4b. wim.size 尺寸估算（工具给数字，App 定政策）════"
+ESD=$(ls /workspace/*.esd 2>/dev/null | head -1)
+if [ -n "$ESD" ]; then
+  $T/imgcmd wim.size --wim="$ESD" --index=1 > "$W/w.json" 2>/dev/null
+  d=$(jq_ "d['data']['data_bytes']" < "$W/w.json"); e=$(jq_ "d['data']['est_ntfs_bytes']" < "$W/w.json")
+  f=$(jq_ "d['data']['file_count']" < "$W/w.json")
+  if [ "${e:-0}" -gt "${d:-0}" ] && [ "${d:-0}" -gt 0 ]; then
+    ok "wim.size → 数据 ${d} 字节 / 文件 $f / 估算 ${e} 字节（含元数据+余量）"
+  else ng "wim.size 异常：$(head -c 200 "$W/w.json")"; fi
+  $T/imgcmd wim.size --wim="$ESD" --index=999 > "$W/w2.json" 2>/dev/null
+  [ "$(jq_ "d['err']['code']" < "$W/w2.json")" = "WIM-IDX-INVALID" ] && ok "非法索引 → WIM-IDX-INVALID（含建议）" || ng "非法索引没拦住"
+else
+  echo "  ⏭ 跳过（没找到 .esd 样本）"
+fi
+
 echo "════ 5. 日志（--log）：里程碑 + 错误都落盘，且逐行可解析 ════"
 $T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src="$W/blob.bin" --dst=/EFI/blob2.bin \
     --log="$W/run.log" --log-level=info >/dev/null 2>&1

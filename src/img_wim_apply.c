@@ -75,6 +75,46 @@ int img_wim_list_images(const char *wim_path, char *buf, int cap){
     return IMG_OK;
 }
 
+/* ★ wimlib 1.14 的头文件声明了 wimlib_get_error_string()，但发行版的 libwim.so
+ *   并没有导出这个符号（链接期 undefined reference）。我们只需要一句人话 + 错误码，
+ *   自己给一条，避免依赖一个"声明存在但符号缺失"的 API。*/
+static const char *wim_rc_str(int r){
+    static char b[64];
+    snprintf(b,sizeof b,"wimlib 错误码 %d",r);
+    return b;
+}
+
+/* 估算：数据量 + 元数据开销 + 余量 → 建议的目标分区最小可用量 */
+#define IMG_NTFS_META_PER_FILE  2048u     /* 每文件 MFT 记录 + 目录项 + 索引，经验值 */
+#define IMG_NTFS_SLACK_PCT      8         /* 安全余量（宁可高估，别写到一半不够）*/
+int img_wim_estimate(const char *wim_path, int image_idx, img_wim_size_t *out){
+    if(!wim_path||!out||image_idx<1) return IMG_EINVAL;
+    memset(out,0,sizeof *out);
+    if(wimlib_global_init(0)!=0) return IMG_EIO;
+    WIMStruct *w=NULL;
+    if(wimlib_open_wim(wim_path,0,&w)!=0) return IMG_ENOENT;
+    struct wimlib_wim_info wi; wimlib_get_wim_info(w,&wi);
+    if((unsigned)image_idx > wi.image_count){ wimlib_free(w); return IMG_ERANGE; }
+    out->index=image_idx;
+    const char *nm=wimlib_get_image_name(w,image_idx);
+    snprintf(out->name,sizeof out->name,"%s",nm?nm:"");
+    snprintf(out->compression,sizeof out->compression,"%s",
+             wimlib_get_compression_type_string(wi.compression_type));
+    /* 属性名与值都是字符串（WIM XML 原样）*/
+    const char *p;
+    p=wimlib_get_image_property(w,image_idx,"TOTALBYTES");
+    if(p) out->data_bytes=strtoull(p,NULL,10);
+    p=wimlib_get_image_property(w,image_idx,"FILECOUNT");
+    if(p) out->file_count=strtoull(p,NULL,10);
+    p=wimlib_get_image_property(w,image_idx,"DIRCOUNT");
+    if(p) out->dir_count=strtoull(p,NULL,10);
+    wimlib_free(w);
+    uint64_t meta = out->file_count * IMG_NTFS_META_PER_FILE;
+    uint64_t sum  = out->data_bytes + meta;
+    out->est_ntfs_bytes = sum + sum*IMG_NTFS_SLACK_PCT/100;
+    return IMG_OK;
+}
+
 int img_wim_apply(const char *wim_path, int image_idx,
                   img_qcow2 *q, uint64_t part_lba,
                   const img_wim_apply_opts_t *opts, img_prog *prog){
@@ -124,7 +164,7 @@ int img_wim_apply(const char *wim_path, int image_idx,
     wimlib_free(w);
     img_ntfs_ctx_deactivate();
     if(r){
-        if(prog) img_prog_done(prog, wimlib_get_error_string(r));
+        if(prog) img_prog_done(prog, wim_rc_str(r));
         return IMG_EIO;
     }
     if(prog) img_prog_done(prog, "WIM 灌入完成");

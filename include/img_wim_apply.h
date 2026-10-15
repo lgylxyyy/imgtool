@@ -34,6 +34,22 @@ extern "C" {
  * buf 输出类似 JSON 的一行一个镜像 */
 int img_wim_list_images(const char *wim_path, char *buf, int cap);
 
+/* ---------- 尺寸估算（App 拿数字自己决定分区大小；政策不在工具里） ----------
+ * 依据：WIM/ESD 的 XML 里就记着该镜像的实际数据量与文件/目录数，
+ *      再按经验加"落到 NTFS 后的元数据开销"和安全余量。
+ * ★ 这是【估算】：真正写入时若空间不够，写中错误照样会报清楚
+ *   （见 DESIGN-OUTPUT.md 第五节：默认不校验，App 显式请求才校验）。*/
+typedef struct {
+    int      index;
+    char     name[128];
+    char     compression[24];
+    uint64_t data_bytes;        /* 镜像里文件数据的总字节（未压缩） */
+    uint64_t file_count;
+    uint64_t dir_count;
+    uint64_t est_ntfs_bytes;    /* 估算：落到 NTFS 后的占用（含元数据 + 余量） */
+} img_wim_size_t;
+int img_wim_estimate(const char *wim_path, int image_idx, img_wim_size_t *out);
+
 /* 把 WIM 的第 image_idx 个镜像（1 起）灌进 qcow2 的 part_lba 分区
  *   opts 可为 NULL：
  *     keep_acls  默认 true（NTFS 模式下才有意义）
