@@ -199,8 +199,8 @@ int img_result_json(const img_result *r, char *buf, int cap){
     buf[0]='{';
     wraw(&w,"ok", r->ok?"true":"false");
     wstr(&w,"cmd", r->cmd?r->cmd:"");
-    wnum(&w,"v",1);
-    wnum(&w,"ms", now_ms()-r->t0_ms);
+    wnum(&w,"version",1);
+    wnum(&w,"duration_ms", now_ms()-r->t0_ms);
     if(r->ok){
         wkey(&w,"data"); if(w.p<w.end)*w.p++='{';
         char *ds=w.p;
@@ -217,7 +217,7 @@ int img_result_json(const img_result *r, char *buf, int cap){
         wkey(&w,"err"); if(w.p<w.end)*w.p++='{';
         char *es=w.p; W ew={w.p,es,w.end};
         wnum(&ew,"rc",r->rc);
-        wstr(&ew,"code",r->code);
+        wstr(&ew,"error_code",r->code);
         if(r->at[0]) wstr(&ew,"at",r->at);
         wstr(&ew,"why",r->why);
         wstr(&ew,"suggest",r->suggest);
@@ -336,7 +336,7 @@ int img_cmd_exec(const char *name, img_ctx *ctx, const img_args *in, img_result 
 int img_cmd_list_json(char *buf,int cap){
     if(!buf||cap<32) return IMG_EINVAL;
     W w={buf+1,buf+1,buf+cap-1};
-    buf[0]='{'; wraw(&w,"v","1");
+    buf[0]='{'; wraw(&w,"version","1");
     wkey(&w,"cmds"); if(w.p<w.end)*w.p++='[';
     for(int i=0;i<IMG_CMD_COUNT;i++){
         const img_cmd *c=&IMG_CMD_TABLE[i];

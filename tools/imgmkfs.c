@@ -87,7 +87,7 @@ int main(int argc,char**argv){
     img_span sp;                      /* 里程碑：格式化（日志要能说清"卡在哪一步"）*/
     img_span_prep(&sp,"fat32","format","格式化 FAT32 分区");
     img_span_kv_u64(&sp,"lba",lba);
-    img_span_kv_u64(&sp,"bytes",o.partition_bytes);
+    img_span_kv_u64(&sp,"size_bytes",o.partition_bytes);
     img_span_begin(&sp);
     int rc=img_fat32_format(q,&o,&L,pr);
     img_span_end(&sp, rc);

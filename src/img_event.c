@@ -71,14 +71,30 @@ static char *ring[RING_CAP];
 static int   ring_n, ring_head;
 static img_lv_t ring_lv = IMG_LV_DEBUG;      /* 环形缓冲独立级别（默认抓 debug 过程）*/
 
-static long long now_ms(void){
+static long long now_ms(void){   /* 单调钟：只用于算"耗时/间隔"，不用于时间戳 */
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
     return (long long)ts.tv_sec*1000 + ts.tv_nsec/1000000;
 }
-static char lv_ch(img_lv_t l){
-    switch(l){ case IMG_LV_ERROR: return 'E'; case IMG_LV_WARN: return 'W';
-               case IMG_LV_INFO:  return 'I'; case IMG_LV_DEBUG: return 'D';
-               default: return 'T'; }
+
+/* level 全词（业界惯例：slog/zap/logfmt 都用 level=INFO 这种大写全词） */
+static const char *lv_name(img_lv_t l){
+    switch(l){ case IMG_LV_ERROR: return "ERROR"; case IMG_LV_WARN: return "WARN";
+               case IMG_LV_INFO:  return "INFO";  case IMG_LV_DEBUG: return "DEBUG";
+               default: return "TRACE"; }
+}
+/* 时间戳：用户定的格式 —— "2026-10-15 18:20:31.452"（本地时间、无 T、无 Z、空格分隔、带毫秒）。
+ * ★ 值里含空格 → logfmt 规范要求必须加引号（这一行是整行唯一"必须"带引号的字段）。*/
+static void fmt_time(char buf[32]){   /* 缓冲区定长：编译器能证明不会截断 */
+    struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts);
+    struct tm tmv; localtime_r(&ts.tv_sec,&tmv);
+    /* 先在大缓冲里格式化，再定长拷贝 —— 避免"年份可能超位数"的截断告警 */
+    char tmp[64];
+    int n=snprintf(tmp,sizeof tmp,"%04d-%02d-%02d %02d:%02d:%02d.%03d",
+                   tmv.tm_year+1900, tmv.tm_mon+1, tmv.tm_mday,
+                   tmv.tm_hour, tmv.tm_min, tmv.tm_sec, (int)(ts.tv_nsec/1000000));
+    if(n<0) n=0;
+    if(n>31) n=31;
+    memcpy(buf,tmp,(size_t)n); buf[n]=0;
 }
 static bool log_on(img_lv_t lv){ return (G.fd>=0||G.out_fd>=0) && lv<=G.lv; }
 bool img_log_enabled(img_lv_t lv){ return log_on(lv) || lv<=ring_lv; }
@@ -192,18 +208,18 @@ static void human_emit(const img_ev *e){
     if(is_begin){
         n=snprintf(b,sizeof b,"▶ %s", e->msg&&e->msg[0]?e->msg:"开始");
         const char *p=ev_str(e,"path"); if(p) n+=snprintf(b+n,sizeof b-(size_t)n,"  %s",p);
-        long long sz=ev_num(e,"size",-1); if(sz>=0) n+=snprintf(b+n,sizeof b-(size_t)n,"  %lld 字节",sz);
-        long long pt=ev_num(e,"part",-1); if(pt>=0) n+=snprintf(b+n,sizeof b-(size_t)n,"  分区 LBA %lld",pt);
+        long long sz=ev_num(e,"size_bytes",-1); if(sz>=0) n+=snprintf(b+n,sizeof b-(size_t)n,"  %lld 字节",sz);
+        long long pt=ev_num(e,"part_lba",-1); if(pt>=0) n+=snprintf(b+n,sizeof b-(size_t)n,"  分区 LBA %lld",pt);
     } else if(is_done){
-        long long ms=ev_num(e,"ms",-1);
-        if(e->rc!=0) n=snprintf(b,sizeof b,"✖ %s 失败（%s）",ev_str(e,"op")?ev_str(e,"op"):"操作",img_strerror(e->rc));
-        else         n=snprintf(b,sizeof b,"✔ %s 完成", ev_str(e,"op")?ev_str(e,"op"):"操作");
+        long long ms=ev_num(e,"duration_ms",-1);
+        if(e->rc!=0) n=snprintf(b,sizeof b,"✖ %s 失败（%s）",ev_str(e,"action")?ev_str(e,"action"):"操作",img_strerror(e->rc));
+        else         n=snprintf(b,sizeof b,"✔ %s 完成", ev_str(e,"action")?ev_str(e,"action"):"操作");
         if(ms>=0) n+=snprintf(b+n,sizeof b-(size_t)n,"（%lld ms）",ms);
     } else if(is_alive){
         if(G.hb_interval_ms<=HB_STEP_MS){          /* 只在"正常推进"时刷，卡住时别刷屏 */
             n=snprintf(b,sizeof b,"… 仍在进行：%s %s（iter=%llu）",
-                       ev_str(e,"op")?ev_str(e,"op"):"", ev_str(e,"where")?ev_str(e,"where"):"",
-                       (unsigned long long)ev_num(e,"iter",0));
+                       ev_str(e,"action")?ev_str(e,"action"):"", ev_str(e,"where")?ev_str(e,"where"):"",
+                       (unsigned long long)ev_num(e,"iterations",0));
         } else return;
     } else if(is_fail){
         return;                                    /* 失败由 img_fail_card 统一出卡片 */
@@ -333,6 +349,12 @@ static void lf_val_str(W *w,const char *v){
     else { while(v && *v && w->p<w->end) *w->p++=*v++; }
 }
 static void lf_kv_str(W *w,const char *k,const char *v){ lf_key(w,k); lf_val_str(w,v?v:""); }
+static void lf_kv_time(W *w,const char *k,const char *v){
+    lf_key(w,k);
+    if(w->p<w->end) *w->p++='"';        /* 值含空格 → 规范强制加引号 */
+    jesc(w,v);
+    if(w->p<w->end) *w->p++='"';
+}
 static void lf_kv_num(W *w,const char *k,long long v){
     lf_key(w,k);
     char t[32]; int n=snprintf(t,sizeof t,"%lld",v);
@@ -379,14 +401,14 @@ void img_log_session(const char *tool,const char *argv,const char *img,uint64_t 
         W w={ G.session, G.session, G.session+sizeof G.session-3 };
         w.p = G.session;
         w.start = G.session;
-        lf_kv_num(&w,"t",0);
-        lf_kv_str(&w,"l","I");
-        lf_kv_str(&w,"m","app");
-        lf_kv_str(&w,"ev","session");
+        char tv[32]; fmt_time(tv);
+        lf_kv_time(&w,"time",tv);
+        lf_kv_str(&w,"level","INFO");
         lf_kv_str(&w,"tool",tool?tool:"?");
-        lf_kv_str(&w,"argv",argv?argv:"");
-        lf_kv_str(&w,"img",img?img:"");
-        lf_kv_num(&w,"size",(long long)img_size);
+        lf_kv_str(&w,"event","session");
+        if(argv&&argv[0]) lf_kv_str(&w,"args",argv);
+        if(img&&img[0])   lf_kv_str(&w,"image",img);
+        if(img_size) lf_kv_num(&w,"size_bytes",(long long)img_size);
         if(w.p<w.end) *w.p++='\n';
         int n=(int)(w.p-G.session);
         if(n>0) s_session_pending = (G.fd>=0);
@@ -396,18 +418,19 @@ void img_log_session(const char *tool,const char *argv,const char *img,uint64_t 
 void img_ev_emit(img_ev *e){
     if(!e||!e->enabled) return;
     if(e->magic != IMG_EV_MAGIC) return;   /* ★ 未 init 的垃圾结构 → 直接拒（实测会段错误）*/
-    if(G.t0_ms==0) G.t0_ms = now_ms();     /* ★ 没开日志时 G.t0_ms 未初始化，
-                                             *   t=now-0 会显示成"开机以来毫秒"（实测 2.5 亿）。
-                                             *   从首个事件起算，时间戳才有意义 */
     char buf[LINE_CAP];
-    W w={ buf, buf, buf+sizeof buf-3 };
-    lf_kv_num(&w,"t",now_ms()-G.t0_ms);        /* 键与数字都不加引号 */
-    { char lvt[2]={lv_ch(e->lv),0}; lf_kv_str(&w,"l",lvt); }
-    lf_kv_str(&w,"m",e->mod);
-    lf_kv_str(&w,"ev",e->ev);
-    lf_kv_num(&w,"rc",e->rc);                  /* rc 统一带（0=OK）；不重复 */
+    W w={ buf, buf, buf+sizeof buf-4 };
+    /* ① 时间（引号是 logfmt 规范强制：值里有空格）*/
+    { char t[32]; fmt_time(t); lf_kv_time(&w,"time",t); }
+    /* ② level / logger / event（业界惯例键名）*/
+    { char tmp[16]; snprintf(tmp,sizeof tmp,"%s",lv_name(e->lv)); lf_kv_str(&w,"level",tmp); }
+    lf_kv_str(&w,"logger",e->mod?e->mod:"");
+    lf_kv_str(&w,"event",e->ev?e->ev:"");
+    /* ③ rc：成功且是 begin/alive 不打（省字节）；done/fail 必打（契约：完成行带结果）*/
+    if(e->rc!=0 || (e->ev && (!strcmp(e->ev,"done")||!strcmp(e->ev,"fail"))))
+        lf_kv_num(&w,"rc",e->rc);
     if(e->err) lf_kv_num(&w,"errno",e->err);
-    if(e->msg&&e->msg[0]) lf_kv_str(&w,"msg",e->msg);
+    if(e->msg&&e->msg[0]) lf_kv_str(&w,"message",e->msg);
     for(int i=0;i<e->nf;i++){
         if(e->f[i].kind==1)      lf_kv_str(&w,e->f[i].k,e->f[i].s);
         else if(e->f[i].kind==2) lf_kv_num(&w,e->f[i].k,e->f[i].n);
@@ -415,10 +438,10 @@ void img_ev_emit(img_ev *e){
     }
     if(w.p<w.end) *w.p++='\n';
     size_t n=(size_t)(w.p-buf);
-    if(G.fd>=0) session_flush();       /* 先补会话行，再写事件（顺序：头 → 事）*/
+    if(G.fd>=0) session_flush();       /* 先补会话行，再写事件 */
     pump(buf,n,e->lv);
-    human_emit(e);                     /* 屏幕人话行（Linux 风格）*/
-    if(e->lv<=ring_lv) img_ring_add(buf);   /* 过程事件进内存（供失败卡片） */
+    human_emit(e);                     /* 屏幕人话行 */
+    if(e->lv<=ring_lv) img_ring_add(buf);
 }
 
 /* ---------- 里程碑 ---------- */
@@ -430,7 +453,7 @@ void img_span_prep(img_span *s,const char *mod,const char *op,const char *msg){
     memset(s,0,sizeof *s);
     s->mod=mod; s->op=op; s->t0=now_ms(); s->depth=g_depth;
     img_ev_init(&s->ev,IMG_LV_INFO,mod,"begin",IMG_OK,msg);
-    img_ev_str(&s->ev,"op",op);
+    img_ev_str(&s->ev,"action",op);
     (void)g_begin_msg;
 }
 void img_span_kv_str(img_span *s,const char *k,const char *v){
@@ -449,8 +472,8 @@ void img_span_end(img_span *s,int rc){
     if(g_depth>0) g_depth--;
     img_ev e;
     if(!img_ev_init(&e,IMG_LV_INFO,s->mod,"done",rc,IMG_OK==rc?"":NULL)) return;
-    img_ev_str(&e,"op",s->op);
-    img_ev_i64(&e,"ms",now_ms()-s->t0);
+    img_ev_str(&e,"action",s->op);
+    img_ev_i64(&e,"duration_ms",now_ms()-s->t0);
     img_ev_emit(&e);
 }
 
@@ -471,9 +494,9 @@ void img_hb(const char *mod,const char *op,const char *where,uint64_t iter){
     } else G.hb_interval_ms=HB_STEP_MS;
     img_ev e;
     if(img_ev_init(&e,IMG_LV_INFO,mod?mod:"hb","alive",IMG_OK,"")){
-        img_ev_str(&e,"op",op?op:"");
+        img_ev_str(&e,"action",op?op:"");
         if(where) img_ev_str(&e,"where",where);
-        img_ev_u64(&e,"iter",iter);
+        img_ev_u64(&e,"iterations",iter);
         img_ev_u64(&e,"gap_ms",(uint64_t)(t-G.hb_last_ms));
         if(!moved) img_ev_u64(&e,"stuck_ms",(uint64_t)G.hb_interval_ms);
         img_ev_emit(&e);
@@ -486,8 +509,8 @@ void img_error_report(int rc,const char *code,const char *mod,const char *op,
                       const char *where,const char *why,const char *suggest){
     img_ev e;
     if(img_ev_init(&e,IMG_LV_ERROR,mod?mod:"err","fail",rc,why)){   /* ★ E 级：任何级别都写 */
-        img_ev_str(&e,"code",code?code:"?");
-        img_ev_str(&e,"op",op?op:"");
+        img_ev_str(&e,"error_code",code?code:"?");
+        img_ev_str(&e,"action",op?op:"");
         if(where) img_ev_str(&e,"at",where);
         img_ev_emit(&e);
     }

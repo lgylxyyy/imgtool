@@ -517,8 +517,8 @@ static int dir_add_entry(img_fat32_fs *fs, uint32_t dirclus, const char *name,
             img_ev_u64(&e,"attr",is_dir?ATTR_DIR:(d[11]|0));
             img_ev_u64(&e,"lfn",(uint64_t)lfn_slots);
             img_ev_u64(&e,"alias",aliased?1u:0u);
-            img_ev_u64(&e,"clus",clus);
-            img_ev_u64(&e,"size",size);
+            img_ev_u64(&e,"cluster",clus);
+            img_ev_u64(&e,"size_bytes",size);
             img_ev_emit(&e);
         }
     }
@@ -686,7 +686,7 @@ int img_fat32_put_file(img_fat32_fs *fs, const char *local_path,
     if(fd<0) return IMG_ENOENT;
     struct stat st; if(fstat(fd,&st)<0){ close(fd); return IMG_EIO; }
     size_t len=(size_t)st.st_size;
-    img_span_kv_u64(&sp,"size",len);
+    img_span_kv_u64(&sp,"size_bytes",len);
     img_span_begin(&sp);
 
     uint32_t dir; char nm[256]; bool ex=false; dir_ent old;
@@ -735,7 +735,7 @@ int img_fat32_put_file(img_fat32_fs *fs, const char *local_path,
         return rc;
     }
     rc=put_finalize(fs,dir,nm,first,(uint32_t)len,ex,&old);
-    img_span_kv_u64(&sp,"written",(uint64_t)len);
+    img_span_kv_u64(&sp,"written_bytes",(uint64_t)len);
     img_span_end(&sp,rc);
     if(rc==IMG_OK && prog){
         img_prog_phase(prog, IMG_PH_COPY, "写入 FAT32");

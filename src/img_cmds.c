@@ -138,7 +138,7 @@ static int cmd_fat_put(img_ctx *ctx, const img_args *in, img_result *out){
         /* 查不到（如管道类 fd）：留痕但不拦 —— 卡片里会写明"宿主剩余未知" */
         img_ev e;
         if(img_ev_init(&e,IMG_LV_WARN,"host","free_unknown",IMG_OK,"宿主剩余空间未知，跳过宿主校验")){
-            img_ev_u64(&e,"need",est_host);
+            img_ev_u64(&e,"need_bytes",est_host);
             img_ev_emit(&e);
         }
     } else if(host_free < est_host){
@@ -163,7 +163,7 @@ static int cmd_fat_put(img_ctx *ctx, const img_args *in, img_result *out){
         if(rrc!=IMG_OK){
             img_ev e;                     /* 占不到 ≠ 不能写，只是"无法保证"（部分 Android 存储不支持 fallocate）*/
             if(img_ev_init(&e,IMG_LV_WARN,"host","reserve_fail",rrc,"fallocate 不支持，无法保证宿主空间")){
-                img_ev_u64(&e,"need",est_host);
+                img_ev_u64(&e,"need_bytes",est_host);
                 img_ev_emit(&e);
             }
         }
@@ -180,7 +180,7 @@ static int cmd_fat_put(img_ctx *ctx, const img_args *in, img_result *out){
                         "空间不足→扩容分区或换小文件；镜像损坏→先 imgq2test 校验");
         return rc;
     }
-    img_result_u64(out,"written",(uint64_t)fsz);
+    img_result_u64(out,"written_bytes",(uint64_t)fsz);
     img_result_i64(out,"ms",ms);
     return IMG_OK;
 }

@@ -121,11 +121,11 @@ int main(int argc,char**argv){
         if(!L || line[L-1]!='\n'){ bad++; continue; }          /* 半行 = 交错 */
         /* logfmt 合法性：必须 t=<数字> 开头、含 ev=、引号成对
          *   （并发写若没加锁，一定会出现两行拼接/半行 → 这三条都会不满足）*/
-        if(strncmp(line,"t=",2)){ bad++; continue; }
+        if(strncmp(line,"time=\"",5)){ bad++; continue; }
         {   int q=0; for(size_t i=0;i<L;i++) if(line[i]=='"') q++;
             if(q%2){ bad++; continue; }
         }
-        {   const char *e=strstr(line," ev="); if(!e){ bad++; continue; } }
+        {   const char *e=strstr(line," event="); if(!e){ bad++; continue; } }
     }
     if(f) fclose(f);
     printf("     日志 %d 行，坏行 %d\n",lines,bad);
