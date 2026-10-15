@@ -156,22 +156,109 @@ __attribute__((unused)) static void name_to_83_trim(const char *nm, char out[12]
     memcpy(out,pad,(size_t)i+1);
 }
 
-/* 在目录簇里找 want（不区分大小写，支持 LFN 与 8.3）。目录会自动跨簇。 */
+/* 从一个 32 字节目录项里取元数据 */
+static void ent_fill(dir_ent *o, const uint8_t *e, uint64_t slot_off){
+    o->found    = true;
+    o->is_dir   = (e[11] & ATTR_DIR)!=0;
+    o->size     = (uint32_t)e[28]|((uint32_t)e[29]<<8)|((uint32_t)e[30]<<16)|((uint32_t)e[31]<<24);
+    o->cluster  = ((uint32_t)e[20]<<16)|((uint32_t)e[21]<<24) | ((uint32_t)e[26]|((uint32_t)e[27]<<8));
+    o->slot_off = slot_off;
+}
+/* 把 8.3 项名字拼成点号形（大写） */
+static void ent_83_name(const uint8_t *e, char out[12]){
+    int j=0;
+    for(int k=0;k<8 && e[k]!=' ';k++) out[j++]=(char)((e[k]>='a'&&e[k]<='z')?e[k]-32:e[k]);
+    if(e[8]!=' '){ out[j++]='.'; for(int k=8;k<11 && e[k]!=' ';k++)
+        out[j++]=(char)((e[k]>='a'&&e[k]<='z')?e[k]-32:e[k]); }
+    out[j]=0;
+}
+
+/* 目录里是否已经存在某个 11 字节 8.3 名（跳过 LFN 项、卷标项与已删除项） */
+static int dir_has_83(img_fat32_fs *fs, uint32_t dirclus, const uint8_t n83[11]){
+    size_t csz = (size_t)fs->L.sectors_per_cluster * 512;
+    uint8_t *buf = malloc(csz);
+    if(!buf) return 0;
+    uint32_t c = dirclus;
+    while(c>=2 && c<FAT32_EOC){
+        if(rd(fs, clus_off(fs,c), buf, csz)){ free(buf); return 0; }
+        for(size_t i=0;i+ENTRY_SIZE<=csz;i+=ENTRY_SIZE){
+            uint8_t *e = buf+i;
+            if(e[0]==0x00){ free(buf); return 0; }              /* 目录结束 */
+            if(e[0]==0xE5) continue;
+            if((e[11]&0x0F)==0x0F) continue;
+            if(e[11] & ATTR_VOLUME) continue;
+            if(!memcmp(e,n83,11)){ free(buf); return 1; }
+        }
+        uint32_t nx=0; if(fat_get(fs,c,&nx)) break;
+        c=nx;
+    }
+    free(buf);
+    return 0;
+}
+
+/* 生成不与目录内已有项冲突的 11 字节 8.3 名（*aliased 返回是否被迫改名）。
+ *
+ * ★ Windows 规则：8.3 短名重名时用 '~N'（基名保留前几字符）。
+ *   不做这一步的后果见 dir_find 顶部注释 —— 两个长名共用短名，
+ *   后一个会把前一个"覆盖"掉，文件凭空消失。*/
+static void make_short_83(img_fat32_fs *fs, uint32_t dirclus, const char *name,
+                          uint8_t out83[11], bool *aliased){
+    char pad[12]; name_to_83(name, pad);
+    if(aliased) *aliased=false;
+    if(!dir_has_83(fs, dirclus, (const uint8_t*)pad)){ memcpy(out83,pad,11); return; }
+    int blen=0; while(blen<8 && pad[blen]!=' ') blen++;
+    char ext[3]; for(int k=0;k<3;k++) ext[k]=pad[8+k];
+    for(int n=1;n<1000000;n++){
+        char num[12]; snprintf(num,sizeof num,"~%d",n);
+        int nl=(int)strlen(num);
+        int keep=8-nl; if(keep<1) keep=1; if(keep>blen) keep=blen;
+        uint8_t cand[11]; memset(cand,' ',11);
+        memcpy(cand, pad, (size_t)keep);
+        memcpy(cand+keep, num, (size_t)nl);
+        memcpy(cand+8, ext, 3);
+        if(!dir_has_83(fs, dirclus, cand)){ memcpy(out83,cand,11); if(aliased) *aliased=true; return; }
+    }
+    memcpy(out83, pad, 11);
+}
+
+/* 在目录簇里找 want（不区分大小写，支持 LFN 与 8.3）。目录会自动跨簇。
+ *
+ * ★ 长名/短名【别名】陷阱（实测踩到，症状是文件"写成功"却不见了）：
+ *   "kd_02_1414.dll" 与 "kd_02_14e4.dll" 截断出的 8.3 短名都是
+ *   "KD_02_14.DLL"。若只看短名判定，第二个会被当成"已存在"而
+ *   【覆盖第一个的文件项】—— 目录里项数不增，文件凭空消失。
+ *   规则：① 项上【有 LFN】就只比 LFN，绝不回退比短名；
+ *        ② 短名匹配只作【兜底】，而且要扫完全目录 —— 万一后面还有
+ *           一条 LFN 真正匹配的项（长名才是身份，短名只是别名）。*/
 static int dir_find(img_fat32_fs *fs, uint32_t dirclus, const char *want, dir_ent *out){
     size_t csz = (size_t)fs->L.sectors_per_cluster * 512;
     uint8_t *buf = malloc(csz);
     if(!buf) return IMG_ENOMEM;
     memset(out,0,sizeof *out);
     char want83[12]; name_to_83_dot(want, want83);
+    /* ★ 只有当【请求名本身就是 8.3 形状】时才允许用短名兜底匹配。
+     *   否则 "xxxxxxxxx.dat"（9 字符基名）会拿截断后的 "XXXXXXXX.DAT"
+     *   去撞已有的 "xxxxxxxx.dat" —— 又是同一个别名陷阱。*/
+    bool want_is83 = false;
+    {
+        const char *dot = strrchr(want,'.');
+        int base = dot ? (int)(dot-want) : (int)strlen(want);
+        int ext  = dot ? (int)strlen(dot+1) : 0;
+        want_is83 = (base>=1 && base<=8 && ext<=3);
+    }
+    char wantu[260]; snprintf(wantu,sizeof wantu,"%s",want);
+    for(char *p=wantu;*p;p++) if(*p>='a'&&*p<='z') *p-=32;
     char lfn[260]; lfn[0]=0;
     bool have_lfn=false;
+    dir_ent fb83; memset(&fb83,0,sizeof fb83);
+    bool have_fb83=false;
     uint32_t c = dirclus;
     while(c>=2 && c<FAT32_EOC){
         uint64_t coff = clus_off(fs, c);
         if(rd(fs, coff, buf, csz)){ free(buf); return IMG_EIO; }
         for(size_t i=0;i+ENTRY_SIZE<=csz;i+=ENTRY_SIZE){
             uint8_t *e = buf+i;
-            if(e[0]==0x00){ free(buf); return IMG_OK; }       /* 目录结束 */
+            if(e[0]==0x00) goto done;                          /* 目录结束 */
             if(e[0]==0xE5){ lfn[0]=0; have_lfn=false; continue; }
             if((e[11] & 0x0F)==0x0F){                          /* LFN 项 */
                 int ord = e[0] & 0x1F;
@@ -190,39 +277,30 @@ static int dir_find(img_fat32_fs *fs, uint32_t dirclus, const char *want, dir_en
                 continue;
             }
             if(e[11] & ATTR_VOLUME){ lfn[0]=0; have_lfn=false; continue; }
-            /* 比对：LFN 优先，其次 8.3 */
-            bool hit=false;
-            if(have_lfn && lfn[0]){
+            bool had_lfn = have_lfn && lfn[0];
+            if(had_lfn){
                 char a[260]; snprintf(a,sizeof a,"%s",lfn);
-                char b[260]; snprintf(b,sizeof b,"%s",want);
-                for(int i=0;a[i];i++) if(a[i]>='a'&&a[i]<='z') a[i]-=32;
-                for(int i=0;b[i];i++) if(b[i]>='a'&&b[i]<='z') b[i]-=32;
-                if(!strcmp(a,b)) hit=true;
-            }
-            if(!hit){
-                char n[12]; int j=0;
-                for(int k=0;k<8 && e[k]!=' ';k++) n[j++]=(char)e[k];
-                if(e[8]!=' '){ n[j++]='.'; for(int k=8;k<11 && e[k]!=' ';k++) n[j++]=(char)e[k]; }
-                n[j]=0;
-                for(int i=0;n[i];i++) if(n[i]>='a'&&n[i]<='z') n[i]-=32;
-                if(!strcmp(n, want83)) hit=true;
-            }
-            if(hit){
-                out->found=true;
-                out->is_dir = (e[11] & ATTR_DIR)!=0;
-                out->cluster = ((uint32_t)e[28]|((uint32_t)e[29]<<8)|((uint32_t)e[30]<<16)|((uint32_t)e[31]<<24));
-                out->size    = (uint32_t)e[28]|((uint32_t)e[29]<<8)|((uint32_t)e[30]<<16)|((uint32_t)e[31]<<24);
-                out->cluster = ((uint32_t)e[20]<<16)|((uint32_t)e[21]<<24) | ((uint32_t)e[26]|((uint32_t)e[27]<<8));
-                out->slot_off = coff + i;
-                free(buf);
-                return IMG_OK;
+                for(char *p=a;*p;p++) if(*p>='a'&&*p<='z') *p-=32;
+                if(!strcmp(a,wantu)){                    /* LFN 命中 → 立刻返回 */
+                    ent_fill(out, e, coff+i);
+                    free(buf);
+                    return IMG_OK;
+                }
+            } else {
+                char n[12]; ent_83_name(e, n);
+                if(want_is83 && !strcmp(n, want83) && !have_fb83){   /* 先记账，扫完再定 */
+                    ent_fill(&fb83, e, coff+i);
+                    have_fb83=true;
+                }
             }
             lfn[0]=0; have_lfn=false;
         }
         uint32_t nx=0; if(fat_get(fs,c,&nx)){ free(buf); return IMG_EIO; }
         c=nx;
     }
+done:
     free(buf);
+    if(have_fb83) *out = fb83;
     return IMG_OK;
 }
 
@@ -313,8 +391,19 @@ static int dir_make_room(img_fat32_fs *fs, uint32_t dirclus, int nslots, uint64_
         uint32_t nx=0; if(fat_get(fs,c,&nx)){ free(buf); return IMG_EIO; }
         c=nx;
     }
-    /* 目录链已走完仍不够 → 给目录追加一个簇 */
-    (void)prev;
+    /* 目录链已走完仍不够 → 给目录追加一个簇
+     * ★ 追加【之前】必须把上一个簇尾部的空槽改成 0xE5（"已删除"标记）：
+     *   那里的 0x00 会被读方当成【目录结束】—— 于是新簇里的项全都
+     *   读不到（实测症状：目录项数卡在 16/每簇不再增长，文件"写成功"却消失）。
+     *   0xE5 与 0x00 在读方眼里都是空槽，但不会终止目录。*/
+    if(prev>=2 && prev<FAT32_EOC){
+        uint64_t poff = clus_off(fs, prev);
+        if(rd(fs, poff, buf, csz)){ free(buf); return IMG_EIO; }
+        bool changed=false;
+        for(size_t i=0;i+ENTRY_SIZE<=csz;i+=ENTRY_SIZE)
+            if(buf[i]==0x00 || buf[i]==0xE5){ buf[i]=0xE5; changed=true; }
+        if(changed && wr(fs, poff, buf, csz)){ free(buf); return IMG_EIO; }
+    }
     uint32_t nc = alloc_cluster(fs);
     if(!nc){ free(buf); return IMG_EFULL; }
     if(prev>=2 && prev<FAT32_EOC){
@@ -343,7 +432,17 @@ static int dir_add_entry(img_fat32_fs *fs, uint32_t dirclus, const char *name,
         int ext  = dot ? (int)strlen(dot+1) : 0;
         fits83 = (base>=1 && base<=8 && ext<=3);
     }
-    int lfn_slots = fits83 ? 0 : ((nchars + 12) / 13);
+    /* ★ 短名必须目录内唯一：重名时退化成 '~N'（Windows 规则）。
+     *   否则两个长名共用同一个短名 → 后写的会把先写的当成"已存在"覆盖掉。*/
+    uint8_t n83[12]; bool aliased=false;
+    make_short_83(fs, dirclus, name, n83, &aliased);
+    /* ★ 名字里带小写字母也必须有 LFN —— 8.3 名只能是大写，
+     *   不给 LFN 的话 "bootmgfw.efi" 在盘上就变成 "BOOTMGFW.EFI"（大小写丢失）。
+     *   Windows 对这类名字一律写 LFN 保住原始大小写（真值 ESP 里就是这样）。*/
+    bool has_lower=false;
+    for(const char *p=name; *p; p++) if(*p>='a'&&*p<='z'){ has_lower=true; break; }
+    bool need_lfn = !fits83 || aliased || has_lower;
+    int lfn_slots = need_lfn ? ((nchars + 12) / 13) : 0;
     int total = lfn_slots + 1;
     uint64_t off=0;
     int rc = dir_make_room(fs, dirclus, total, &off);
@@ -352,11 +451,17 @@ static int dir_add_entry(img_fat32_fs *fs, uint32_t dirclus, const char *name,
     /* ★ LFN 项的字节13 必须是 8.3 名的校验和 —— mtools 等严格实现会校验，
      *   不对就【整条 LFN 丢弃】（表现为名字退化成截断的 8.3，如 MICROSOF）。
      *   （我自己踩过：实现宽松能读，但外部工具读不到）*/
-    uint8_t n83[12]; name_to_83(name, (char*)n83);
     uint8_t sum = lfn_checksum(n83);
     /* 写 LFN（按【倒序】：磁盘上是 ord N..1，紧跟 8.3 之前的是 ord1）*/
     for(int ord=lfn_slots; ord>=1; ord--){
-        uint8_t e[ENTRY_SIZE]; memset(e,0xFF,ENTRY_SIZE);
+        /* ★ 必须先清零：type(字节12) 与 FstClusLO(字节26..27) 不在下面的
+         *   字符槽里，原先 memset 0xFF 会把它们留成 0xFF/0xFFFF ——
+         *   type≠0 的 LFN 项被 Windows 的 FAT 驱动直接丢弃，
+         *   长名退化成截断的 8.3 名（"Microsoft"→"MICROSOF"）→ 路径解析失败
+         *   → bootmgr 报 0xc000000f「BCD 丢失」。
+         *   （mtools 与自己的读取器都不看这两个字段，所以自测一直是绿的；
+         *     padding 字符槽仍由下面按 0xFFFF 写，不受清零影响。）*/
+        uint8_t e[ENTRY_SIZE]; memset(e,0,ENTRY_SIZE);
         e[0] = (uint8_t)ord;
         e[11] = ATTR_LFN;
         e[13] = sum;
@@ -373,14 +478,40 @@ static int dir_add_entry(img_fat32_fs *fs, uint32_t dirclus, const char *name,
         if(wr(fs, off, e, ENTRY_SIZE)) return IMG_EIO;
         off += ENTRY_SIZE;
     }
-    /* 8.3 项 */
+    /* 8.3 项（用 make_short_83 定下的唯一短名，而不是再算一遍） */
     uint8_t d[ENTRY_SIZE]; memset(d,0,ENTRY_SIZE);
-    name_to_83(name, (char*)d);
+    memcpy(d, n83, 11);
     d[11] = is_dir ? ATTR_DIR : 0x00;
     put_u16(d+20, (uint16_t)(clus >> 16));   /* FstClusHI */
     put_u16(d+26, (uint16_t)(clus & 0xFFFF));/* FstClusLO */
     put_u32(d+28, is_dir ? 0 : size);
     return wr(fs, off, d, ENTRY_SIZE);
+}
+
+/* 在新建子目录的簇头写入 '.' 与 '..' 两项 —— FAT 规范强制要求。
+ *
+ * ★ 少了它们会怎样（实测，2×2 交叉实验定罪）：
+ *   我们的卷 + 我们建的目录        → bootmgr 报 0xc000000f「BCD 丢失」
+ *   我们的卷 + mtools 建的目录     → 正常读出 BCD、走到 winload
+ *   diskA 的卷 + 我们写的目录项    → 正常读出 BCD
+ *   同一个文件、同一份 BCD，唯一差别就是目录里缺不缺这两项。
+ *   （mmd/mkfs 都会写点号项；自己写目录时漏了。）
+ * 格式（取自 diskA 真值逐字节）：名字 '.'+10空格 / '..'+9空格，attr=0x10，
+ * size=0，`.` 指向自身簇，`..` 指向父簇（父是根目录时写 0）。 */
+static int dir_write_dots(img_fat32_fs *fs, uint32_t self, uint32_t parent){
+    uint8_t e[ENTRY_SIZE];
+    memset(e,0,ENTRY_SIZE);
+    memset(e,' ',11); e[0]='.'; e[11]=ATTR_DIR;
+    put_u16(e+20,(uint16_t)(self>>16));
+    put_u16(e+26,(uint16_t)(self&0xFFFF));
+    if(wr(fs, clus_off(fs,self), e, ENTRY_SIZE)) return IMG_EIO;
+    memset(e,0,ENTRY_SIZE);
+    memset(e,' ',11); e[0]='.'; e[1]='.'; e[11]=ATTR_DIR;
+    uint32_t p = (parent==fs->L.root_cluster) ? 0 : parent;
+    put_u16(e+20,(uint16_t)(p>>16));
+    put_u16(e+26,(uint16_t)(p&0xFFFF));
+    if(wr(fs, clus_off(fs,self)+ENTRY_SIZE, e, ENTRY_SIZE)) return IMG_EIO;
+    return IMG_OK;
 }
 
 int img_fat32_mkdir_p(img_fat32_fs *fs, const char *abs_path){
@@ -405,6 +536,9 @@ int img_fat32_mkdir_p(img_fat32_fs *fs, const char *abs_path){
         if(rc) return rc;
         rc = dir_add_entry(fs, dir, t, nc, 0, true);
         if(rc) return rc;
+        /* ★ 新子目录里必须有 . 与 ..（见 dir_write_dots 注释） */
+        rc = dir_write_dots(fs, nc, dir);
+        if(rc) return rc;
         dir = nc;
     }
     return IMG_OK;
@@ -414,7 +548,18 @@ int img_fat32_mkdir_p(img_fat32_fs *fs, const char *abs_path){
 static int write_data(img_fat32_fs *fs, const void *data, size_t len,
                       const char *dst_abs_path){
     char nm[256]; uint32_t dir;
-    if(split_parent(fs, dst_abs_path, &dir, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
+    if(split_parent(fs, dst_abs_path, &dir, nm, sizeof nm)!=IMG_OK){
+        /* ★ 父目录不存在时按头文件承诺【自动建出来】。
+         *   原先直接返回 ENOENT —— 头文件写着"自动建父目录"、实现却没有，
+         *   于是往空 ESP 放文件必须调用方先 mkdir，App 里极易漏（实测 142 个文件全失败）。*/
+        char par[512]; snprintf(par,sizeof par,"%s",dst_abs_path);
+        char *sl=strrchr(par,'/');
+        if(!sl) return IMG_ENOENT;
+        if(sl==par) par[1]='\0'; else *sl='\0';
+        int mrc=img_fat32_mkdir_p(fs, par);
+        if(mrc!=IMG_OK) return mrc;
+        if(split_parent(fs, dst_abs_path, &dir, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
+    }
     dir_ent e;
     int rc = dir_find(fs, dir, nm, &e);
     if(rc) return rc;
