@@ -195,7 +195,9 @@ static void jesc(W *w,const char *s){
 }
 static void w_key(W *w,const char *k){
     if(w->p>w->start) *w->p++=',';      /* ★ 首字段不能加逗号 */
+    if(w->p<w->end) *w->p++='"';        /* ★ key 必须带引号，否则整个 JSON 非法 */
     jesc(w,k);
+    if(w->p<w->end) *w->p++='"';
     if(w->p<w->end) *w->p++=':';
 }
 static void w_str(W *w,const char *k,const char *v){

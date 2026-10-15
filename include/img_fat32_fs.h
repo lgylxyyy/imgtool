@@ -31,6 +31,8 @@ void img_fat32_unmount(img_fat32_fs *fs);
 const img_fat32_layout_t *img_fat32_fs_layout(const img_fat32_fs *fs);
 
 bool img_fat32_path_exists(img_fat32_fs *fs, const char *abs_path);
+/* 剩余空间（字节）。扫描 FAT 数空簇，结果缓存到 FAT 下次被修改 */
+uint64_t img_fat32_free_bytes(img_fat32_fs *fs);
 int  img_fat32_file_size(img_fat32_fs *fs, const char *abs_path, uint64_t *out);
 
 /* 递归建目录；已存在则成功 */

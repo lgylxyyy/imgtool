@@ -35,6 +35,8 @@ struct img_fat32_fs {
     uint64_t   data_off;          /* 数据区字节偏移 */
     uint32_t   alloc_hint;        /* 下次分配从这里往后找（加速）*/
     bool       writable;
+    uint64_t   free_bytes;        /* 剩余空间缓存（见 img_fat32_free_bytes）*/
+    bool       free_valid;
 };
 
 /* ---------- 底层读写 ---------- */
@@ -58,6 +60,7 @@ static int fat_get(img_fat32_fs *fs, uint32_t c, uint32_t *out){
     return IMG_OK;
 }
 static int fat_set(img_fat32_fs *fs, uint32_t c, uint32_t v){
+    fs->free_valid = false;            /* FAT 变了 → 剩余空间缓存失效 */
     v &= FAT32_MASK;
     uint8_t e[4];
     /* 保留高 4 位（通常是 0xF）*/
@@ -800,4 +803,26 @@ int img_fat32_rm(img_fat32_fs *fs, const char *abs_path){
         else break;
     }
     return wr(fs, e.slot_off, d, ENTRY_SIZE);
+}
+
+/* 剩余空间（字节）：扫一遍 FAT0 数空簇。首次调用后缓存，直到 FAT 被修改。
+ * 用途：App 想在写大文件前校验空间（默认不校验 —— 见 DESIGN-OUTPUT.md 第五节） */
+uint64_t img_fat32_free_bytes(img_fat32_fs *fs){
+    if(!fs) return 0;
+    if(fs->free_valid) return fs->free_bytes;
+    size_t fat_bytes=(size_t)fs->L.fat_size_sectors*512;
+    uint8_t *fat=malloc(fat_bytes);
+    if(!fat) return 0;
+    if(rd(fs, fs->fat_off, fat, fat_bytes)){ free(fat); return 0; }
+    uint64_t free_c=0;
+    for(uint32_t c=2;c<fs->L.cluster_count+2;c++){
+        size_t o=(size_t)c*4;
+        if(o+4>fat_bytes) break;
+        uint32_t v=((uint32_t)fat[o]|((uint32_t)fat[o+1]<<8)|((uint32_t)fat[o+2]<<16)|((uint32_t)fat[o+3]<<24)) & FAT32_MASK;
+        if(v==0) free_c++;
+    }
+    free(fat);
+    fs->free_bytes = free_c*(uint64_t)fs->L.sectors_per_cluster*512;
+    fs->free_valid = true;
+    return fs->free_bytes;
 }

@@ -42,3 +42,5 @@ target_link_libraries(imgfatfs PRIVATE imgtool)
 
 add_executable(imgwimls imgwimls.c)
 target_link_libraries(imgwimls PRIVATE wim)
+add_executable(imgcmd imgcmd.c)
+target_link_libraries(imgcmd PRIVATE imgtool)

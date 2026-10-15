@@ -1,0 +1,205 @@
+/* img_cmds.c — 命令表（加新功能就在这里加一行 + 写一个 handler）
+ *
+ * 每个命令 = {名字, 版本, 帮助, 参数规格[], handler}
+ * 参数规格里的类型/必填/默认/校验，CLI 与 App 共用 —— 不再两处各写一遍。
+ */
+#define _POSIX_C_SOURCE 200809L
+#include "img_cmd.h"
+#include "img_io.h"
+#include "img_fat32.h"
+#include "img_fat32_fs.h"
+#include "img_event.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+static long long now_ms_(void){
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+    return (long long)ts.tv_sec*1000 + ts.tv_nsec/1000000;
+}
+
+/* ---------- 参数级校验（只写一处，CLI/App 都走这里） ---------- */
+static int chk_lba(const char *v, char *why, size_t cap){
+    uint64_t x=strtoull(v,NULL,0);
+    if(x<1){ snprintf(why,cap,"LBA 必须 >=1（0 是 MBR 区，绝不允许当分区用）"); return IMG_EINVAL; }
+    if(x>0xFFFFFFFFull){ snprintf(why,cap,"LBA 过大（>2^32）"); return IMG_ERANGE; }
+    return IMG_OK;
+}
+
+/* ================= 命令 1：img.info ================= */
+static const img_arg A_INFO[] = {
+    {"img", IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
+};
+static int cmd_img_info(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)in;
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){
+        img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),
+                        "不是合法的 qcow2（魔数或版本不符）",
+                        "确认是本工具创建的镜像；或先用 imgq2test 校验");
+        return IMG_EFORMAT;
+    }
+    img_result_u64(out,"size_bytes",img_qcow2_size(q));
+    img_parttable_t *pt=NULL;
+    if(img_ctx_parttable(ctx,&pt)==IMG_OK){
+        img_result_str(out,"table", pt->table==IMG_TABLE_GPT?"GPT":(pt->table==IMG_TABLE_MBR?"MBR":"NONE"));
+        img_result_u64(out,"disk_sectors",pt->disk_sectors);
+        if(pt->table==IMG_TABLE_GPT) img_result_str(out,"disk_guid",pt->disk_guid);
+        int used=0; for(int i=0;i<IMG_MAX_PARTITIONS;i++) if(pt->parts[i].used) used++;
+        img_result_u64(out,"partitions",(uint64_t)used);
+    }
+    return IMG_OK;
+}
+
+/* ================= 命令 2：part.show ================= */
+static const img_arg A_PTSHOW[] = {
+    {"img", IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
+};
+static char g_pt_json[8192];        /* 单线程；handler 产出后立即渲染 */
+static int cmd_part_show(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)in;
+    img_parttable_t *pt=NULL;
+    int rc=img_ctx_parttable(ctx,&pt);
+    if(rc!=IMG_OK){
+        img_result_fail(out,rc,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),
+                        "镜像可能损坏；用 imglayout check 复核");
+        return rc;
+    }
+    int n=img_parttable_json(pt,g_pt_json,sizeof g_pt_json);
+    if(n<=0){ img_result_fail(out,IMG_EIO,"PART-JSON-FAIL",img_ctx_path(ctx),"分区表序列化失败",NULL); return IMG_EIO; }
+    img_result_raw(out,"pt",g_pt_json);
+    return IMG_OK;
+}
+
+/* ================= 命令 3：fat.put（★ 演示 check_size 开关） ================= */
+static const img_arg A_FATPUT[] = {
+    {"img",        IMG_A_STR,  true,  NULL,   "镜像路径（qcow2）",        NULL},
+    {"lba",        IMG_A_U64,  true,  NULL,   "目标分区起始 LBA",         chk_lba},
+    {"src",        IMG_A_STR,  true,  NULL,   "本地源文件路径",           NULL},
+    {"dst",        IMG_A_STR,  true,  NULL,   "分区内目标路径（/ 开头）", NULL},
+    {"check_size", IMG_A_BOOL, false, "false","写入前校验空间（默认关：App 显式请求才校验）", NULL},
+};
+static int cmd_fat_put(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *src=img_args_get(in,"src"), *dst=img_args_get(in,"dst");
+    bool check = img_args_bool(in,"check_size",false) || img_ctx_check_size(ctx);
+
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),"不是合法 qcow2",NULL); return IMG_EFORMAT; }
+
+    FILE *f=fopen(src,"rb");
+    if(!f){
+        img_result_fail(out,IMG_ENOENT,"SRC-NOTFOUND",src,
+                        "源文件打不开（不存在/无权限）","检查路径与权限");
+        return IMG_ENOENT;
+    }
+    fseek(f,0,SEEK_END); long long fsz=ftell(f); fclose(f);
+
+    img_fat32_fs *fs=img_fat32_mount(q,lba,true);
+    if(!fs){
+        img_result_fail(out,IMG_EFORMAT,"FAT-MOUNT-FAIL",dst,
+                        "目标 LBA 上不是合法 FAT32（未格式化或 LBA 不对）",
+                        "先用 imgmkfs 格式化该分区，或核对 --lba");
+        return IMG_EFORMAT;
+    }
+
+    /* ★ 尺寸校验开关：默认【不校验】（App 显式请求才校验）。
+     *   不校验也必须把底层失败报清楚（ENOSPC 会转成同一张失败信封）。*/
+    if(check){
+        uint64_t freeb=img_fat32_free_bytes(fs);
+        if(freeb < (uint64_t)fsz){
+            img_fat32_unmount(fs);
+            char why[256];
+            snprintf(why,sizeof why,"目标分区剩余 %llu MB，要写入 %lld MB",
+                     (unsigned long long)(freeb/1048576), fsz/1048576);
+            img_result_fail(out,IMG_EFULL,"FAT-ENOSPC",dst,why,
+                            "换更小的文件，或先扩容该分区（imgresize）");
+            return IMG_EFULL;
+        }
+    }
+
+    long long t0=now_ms_();
+    int rc=img_fat32_put_file(fs,src,dst,NULL);
+    long long ms=now_ms_()-t0;
+    img_fat32_unmount(fs);
+
+    if(rc!=IMG_OK){
+        img_result_fail(out,rc, rc==IMG_EFULL?"FAT-ENOSPC":"FAT-PUT-FAIL", dst,
+                        rc==IMG_EFULL?"目标分区空间不足":"写入失败（详见日志/事件）",
+                        "空间不足→扩容分区或换小文件；镜像损坏→先 imgq2test 校验");
+        return rc;
+    }
+    img_result_u64(out,"written",(uint64_t)fsz);
+    img_result_i64(out,"ms",ms);
+    return IMG_OK;
+}
+
+/* ================= 命令 4：fat.ls ================= */
+static const img_arg A_FATLS[] = {
+    {"img",  IMG_A_STR, true,  NULL, "镜像路径（qcow2）",  NULL},
+    {"lba",  IMG_A_U64, true,  NULL, "分区起始 LBA",        chk_lba},
+    {"path", IMG_A_STR, false, "/",  "分区内目录（/ 开头）", NULL},
+};
+typedef struct { char *p, *end; int n; } lsbuf;
+static void ls_cb(void *ud, const char *name, bool isdir, uint64_t size){
+    lsbuf *b=(lsbuf*)ud;
+    if(b->p>=b->end) return;
+    if(b->n) *b->p++=',';
+    b->n++;
+    char item[512];
+    int n=snprintf(item,sizeof item,"{\"name\":\"%s\",\"dir\":%s,\"size\":%llu}",
+                   name?name:"", isdir?"true":"false",(unsigned long long)size);
+    if(n>0 && b->p+n<b->end){ memcpy(b->p,item,(size_t)n); b->p+=n; }
+}
+static char g_ls_json[65536];
+static int cmd_fat_ls(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *path=img_args_get(in,"path"); if(!path||!*path) path="/";
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),"不是合法 qcow2",NULL); return IMG_EFORMAT; }
+    img_fat32_fs *fs=img_fat32_mount(q,lba,false);
+    if(!fs){
+        img_result_fail(out,IMG_EFORMAT,"FAT-MOUNT-FAIL",path,
+                        "目标 LBA 上不是合法 FAT32","核对 --lba，或先用 imgmkfs 格式化");
+        return IMG_EFORMAT;
+    }
+    g_ls_json[0]='[';
+    lsbuf b={g_ls_json+1, g_ls_json+sizeof g_ls_json-4, 0};
+    int rc=img_fat32_list_dir(fs,path,ls_cb,&b);
+    b.p[0]=']'; b.p[1]=0;
+    img_fat32_unmount(fs);
+    if(rc==IMG_ENOTSUP){
+        img_result_fail(out,IMG_ENOENT,"FAT-DIR-NOTFOUND",path,"目录不存在或不是目录","核对路径");
+        return IMG_ENOENT;
+    }
+    if(rc!=IMG_OK){ img_result_fail(out,rc,"FAT-LS-FAIL",path,img_strerror(rc),"镜像可能损坏"); return rc; }
+    img_result_u64(out,"count",(uint64_t)b.n);
+    img_result_raw(out,"entries",g_ls_json);
+    return IMG_OK;
+}
+
+/* ================= 命令 5：cmd.list（自描述：App 可据此自动生成界面） ================= */
+static int cmd_cmd_list(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx; (void)in;
+    static char buf[16384];
+    int n=img_cmd_list_json(buf,sizeof buf);
+    if(n<=0){ img_result_fail(out,IMG_EIO,"LIST-FAIL",NULL,"命令表导出失败",NULL); return IMG_EIO; }
+    img_result_raw(out,"table",buf);
+    return IMG_OK;
+}
+
+/* ================= 表 ================= */
+const img_cmd IMG_CMD_TABLE[] = {
+    {"img.info",  "1.0", "显示镜像基本信息（大小/分区表/分区数）",
+        A_INFO,   (int)(sizeof A_INFO  /sizeof A_INFO[0]),   cmd_img_info},
+    {"part.show", "1.0", "打印分区表（JSON：GPT/MBR + 每个分区）",
+        A_PTSHOW, (int)(sizeof A_PTSHOW/sizeof A_PTSHOW[0]), cmd_part_show},
+    {"fat.put",   "1.0", "把本地文件写入某个 FAT32 分区（带可选空间校验）",
+        A_FATPUT, (int)(sizeof A_FATPUT/sizeof A_FATPUT[0]), cmd_fat_put},
+    {"fat.ls",    "1.0", "列某个 FAT32 分区里的目录",
+        A_FATLS,  (int)(sizeof A_FATLS /sizeof A_FATLS[0]),  cmd_fat_ls},
+    {"cmd.list",  "1.0", "导出命令表（名字/参数规格/帮助）——App 可据此自动生成界面",
+        NULL, 0, cmd_cmd_list},
+};
+const int IMG_CMD_COUNT = (int)(sizeof IMG_CMD_TABLE/sizeof IMG_CMD_TABLE[0]);
