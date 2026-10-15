@@ -30,6 +30,7 @@ typedef enum {
     IMG_ESTATE        = -12,  /* 状态机不允许该操作 */
     IMG_ECANCELLED    = -13,  /* 用户取消 */
     IMG_ETRUNC        = -14,  /* 数据被截断 */
+    IMG_ERANGE        = -15,  /* 请求范围越界（偏移/长度超出镜像，含加法溢出） */
 } img_err_t;
 
 const char *img_strerror(int err);

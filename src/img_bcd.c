@@ -47,6 +47,7 @@ static char *utf8_to_u16(const char *s, size_t *out_len){
 
 /* ---------- 生命周期 ---------- */
 img_bcd *img_bcd_open_file(const char *path){
+    if(!path) return NULL;                  /* ★ 实测：NULL 传进 hivex_open 会段错误 */
     hive_h *h = hivex_open(path, HIVEX_OPEN_WRITE);
     if(!h) return NULL;
     img_bcd *b=calloc(1,sizeof *b);

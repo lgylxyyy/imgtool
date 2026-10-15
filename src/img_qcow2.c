@@ -235,10 +235,14 @@ int img_qcow2_read(img_qcow2 *q, uint64_t off, void *buf, size_t len){
 }
 
 int img_qcow2_read_full(img_qcow2 *q, uint64_t off, void *buf, size_t len){
-    if(!q||!buf) return IMG_EINVAL;
-    if(off >= q->h.size) return IMG_ETRUNC;
-    uint64_t avail = q->h.size - off;
-    return img_qcow2_read(q, off, buf, (len <= avail) ? len : (size_t)avail);
+    if(!q||(!buf&&len)) return IMG_EINVAL;
+    /* ★ 越界必须【先判后读】且【一个字节都不写】。
+     *   原实现是"把 len 裁到剩余长度"再读 —— 调用方把 len 传错时（实测 len=SIZE_MAX）
+     *   会往调用方的小缓冲区里写满整文件 → 踩坏内存/崩溃，而且调用方还看不出错。
+     *   下面的减法写法不会溢出（不写 off+len）。*/
+    uint64_t sz = q->h.size;
+    if(off > sz || (uint64_t)len > sz - off) return IMG_ERANGE;
+    return img_qcow2_read(q, off, buf, len);
 }
 
 /* ---------- 信息 JSON ---------- */

@@ -17,6 +17,7 @@ const char *img_strerror(int e){
     case IMG_ESTATE:     return "当前状态不允许该操作";
     case IMG_ECANCELLED: return "已取消";
     case IMG_ETRUNC:     return "数据被截断";
+    case IMG_ERANGE:     return "请求范围越界（偏移/长度超出镜像）";
     default:             return "未知错误";
     }
 }
