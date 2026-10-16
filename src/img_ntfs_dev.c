@@ -4,6 +4,7 @@
 /* img_ntfs_dev.c — qcow2 → ntfs_device 后端（本文件属我方代码，无 GPL 依赖） */
 #include "img_ntfs_dev.h"
 #include "img_event.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -63,14 +64,21 @@ long long img_ntfs_cb_seek(void *dev, long long offset, int whence){
     return np;
 }
 
+static int devdbg(void){ static int on=-1; if(on<0) on=getenv("IMG_NTFS_DEV_DEBUG")?1:0; return on; }
 static long long do_read(img_ntfs_ctx *c, void *buf, long long n, uint64_t off){
     if(n <= 0) return 0;
-    if(off >= c->size) return 0;                 /* EOF */
+    if(off >= c->size){                          /* 读到分区外 → 返回 0（EOF），
+                                                  * 上层若期待满读会判 EIO —— 这正是要抓的点 */
+        if(devdbg()) fprintf(stderr,"  [ntfs-dev] 读越界 off=%llu>=%llu n=%lld\n",
+                              (unsigned long long)off,(unsigned long long)c->size,n);
+        return 0;
+    }
     uint64_t avail = c->size - off;
     uint64_t want = (uint64_t)n;
     if(want > avail) want = avail;               /* 不越过分区尾 */
     int rc = img_qcow2_read_full(c->q, c->base + off, buf, (size_t)want);
-    if(rc != IMG_OK){ errno = EIO; return -1; }
+    if(rc != IMG_OK){ if(devdbg()) fprintf(stderr,"  [ntfs-dev] 读失败 off=%llu want=%llu rc=%d\n",(unsigned long long)off,(unsigned long long)want,rc);
+        errno = EIO; return -1; }
     return (long long)want;
 }
 
@@ -79,9 +87,11 @@ static long long do_write(img_ntfs_ctx *c, const void *buf, long long n, uint64_
     if(off >= c->size){ errno = ENOSPC; return -1; }
     uint64_t avail = c->size - off;
     uint64_t want = (uint64_t)n;
+    if(want > avail){ if(devdbg()) fprintf(stderr,"  [ntfs-dev] 写越界截断 n=%lld off=%llu size=%llu\n",n,(unsigned long long)off,(unsigned long long)c->size); }
     if(want > avail) want = avail;
     int rc = img_qcow2_write(c->q, c->base + off, buf, (size_t)want);
-    if(rc != IMG_OK){ errno = (rc==IMG_EFULL)?ENOSPC:EIO; return -1; }
+    if(rc != IMG_OK){ if(devdbg()) fprintf(stderr,"  [ntfs-dev] 写失败 off=%llu want=%llu rc=%d\n",(unsigned long long)off,(unsigned long long)want,rc);
+        errno = (rc==IMG_EFULL)?ENOSPC:EIO; return -1; }
     return (long long)want;
 }
 

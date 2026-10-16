@@ -44,3 +44,8 @@ target_link_libraries(wim_apply_test PRIVATE imgtool)
 
 add_executable(fatput fatput.c)
 target_link_libraries(fatput PRIVATE imgtool)
+
+add_executable(ntfs_probe ntfs_probe.c)
+target_link_libraries(ntfs_probe PRIVATE imgtool)
+target_include_directories(ntfs_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+

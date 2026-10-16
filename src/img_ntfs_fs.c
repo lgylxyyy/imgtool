@@ -51,6 +51,8 @@ img_ntfs_fs *img_ntfs_mount_rw(img_qcow2 *q, uint64_t part_lba, uint64_t part_by
     return fs;
 }
 
+ntfs_volume *img_ntfs_probe_vol(img_ntfs_fs *fs){ return fs?fs->vol:NULL; }   /* 诊断用 */
+
 void img_ntfs_umount(img_ntfs_fs *fs){
     if(!fs) return;
     if(fs->mounted && fs->vol){
@@ -416,4 +418,175 @@ int img_ntfs_write_reagent(img_ntfs_fs *fs, const char *winre_dir_abs,
     char full[512];
     snprintf(full,sizeof full, "%s/ReAgent.xml", dnorm[0]?dnorm:"");   /* 空目录 = 根，避免 "//" */
     return img_ntfs_put_file_mem(fs, xml, strlen(xml), full);
+}
+
+/* ================================================================
+ * 列目录 / 空闲空间 / 卷标 / 搬移原语（part.scan 与 ntfs.rename 的底层）
+ * ================================================================ */
+
+/* ---------- 列目录：ntfs_readdir + ntfs_ucstombs → 和 FAT 同一套 cb 契约 ---------- */
+typedef struct { img_ntfs_list_cb cb; void *ud; } ntfs_list_ctx;
+static int ntfs_list_fill(void *dirent, const ntfschar *name, const int name_len,
+                          const int name_type, const s64 pos,
+                          const MFT_REF mref, const unsigned dt_type){
+    ntfs_list_ctx *c=(ntfs_list_ctx*)dirent;
+    (void)name_type; (void)pos;
+    /* ★ 系统元数据文件（$MFT/$Bitmap/$Volume… 记录号 < FILE_first_user=16）
+     *   会被 ntfs_readdir 列出来 —— 但它们不是"用户数据"，
+     *   否则刚格式化的空卷也会被误报成 level2（有数据）。*/
+    if(((uint64_t)le64_to_cpu(mref) & 0xFFFFFFFFFFFFULL) < (uint64_t)FILE_first_user) return 0;
+    if(name_len==1 && name[0]=='.')  return 0;      /* 防御：NTFS 索引里本不该有 . / .. */
+    if(name_len==2 && name[0]=='.' && name[1]=='.') return 0;
+    char *out=NULL;
+    if(ntfs_ucstombs(name, name_len, &out, -1)<0 || !out) return 0;  /* 转不出的名字跳过，不打断列表 */
+    c->cb(c->ud, out, dt_type==NTFS_DT_DIR, 0);
+    free(out);
+    return 0;
+}
+int img_ntfs_list_dir(img_ntfs_fs *fs, const char *abs_path,
+                      img_ntfs_list_cb cb, void *ud){
+    if(!fs||!fs->mounted||!cb) return IMG_EINVAL;
+    ntfs_inode *di=lookup(fs->vol, (abs_path&&abs_path[0])?abs_path:"/", NULL);
+    if(!di) return IMG_ENOENT;
+    ntfs_list_ctx c={cb,ud};
+    s64 pos=0;
+    int r=ntfs_readdir(di,&pos,&c,ntfs_list_fill);
+    ntfs_inode_close(di);
+    return r<0?IMG_EIO:IMG_OK;
+}
+
+/* ---------- 空闲/已用：直接数 $Bitmap（NTFS 位图：1=已分配 0=空闲）---------- */
+int img_ntfs_free_bytes(img_ntfs_fs *fs, uint64_t *out_free, uint64_t *out_used){
+    if(!fs||!fs->vol||!fs->vol->lcnbmp_na) return IMG_EINVAL;
+    ntfs_volume *vol=fs->vol;
+    s64 nr=vol->nr_clusters;
+    int cs=vol->cluster_size;
+    if(nr<=0||cs<=0) return IMG_ESTATE;
+    size_t nb=(size_t)((nr+7)/8);
+    unsigned char *bm=(unsigned char*)calloc(1,nb?nb:1);
+    if(!bm) return IMG_ENOMEM;
+    s64 got=ntfs_attr_pread(vol->lcnbmp_na,0,(s64)nb,bm);
+    if(got!=(s64)nb){ free(bm); return IMG_EIO; }
+    s64 free_cl=0;
+    for(size_t i=0;i<nb;i++){
+        if((i+1)*8<=(size_t)nr) free_cl += 8-__builtin_popcount(bm[i]);
+        else for(int b=0;b<8;b++){                 /* 末字节里超出 nr_clusters 的位按"已分配"算 */
+            s64 cl=(s64)i*8+b;
+            if(cl<nr && !(bm[i]&(1u<<b))) free_cl++;
+        }
+    }
+    free(bm);
+    if(out_free) *out_free=(uint64_t)free_cl*(uint64_t)cs;
+    if(out_used) *out_used=(uint64_t)(nr-free_cl)*(uint64_t)cs;
+    return IMG_OK;
+}
+
+/* ---------- 卷标（$Volume 的 AT_VOLUME_NAME；没有就空串）---------- */
+int img_ntfs_label(img_ntfs_fs *fs, char *out, size_t cap){
+    if(!fs||!out||!cap) return IMG_EINVAL;
+    out[0]=0;
+    ntfs_inode *vi=ntfs_inode_open(fs->vol, FILE_Volume);
+    if(!vi) return IMG_ENOENT;
+    ntfs_attr *na=ntfs_attr_open(vi, AT_VOLUME_NAME, NULL, 0);
+    if(!na){ ntfs_inode_close(vi); return IMG_OK; }     /* 无卷标 → 空串，不算错 */
+    char tmp[512];
+    s64 got=ntfs_attr_pread(na, 0, (s64)sizeof tmp, tmp);
+    if(got>0){
+        char *u=NULL;
+        if(ntfs_ucstombs((const ntfschar*)tmp, (int)got/2, &u, -1)>=0 && u){
+            snprintf(out,cap,"%s",u); free(u);
+        }
+    }
+    ntfs_attr_close(na);
+    ntfs_inode_close(vi);
+    return IMG_OK;
+}
+
+/* ---------- 搬移原语：/名字 → /目标目录/名字（同名，只换父目录）----------
+ * 实测踩坑（tests/ntfs_probe.c 三场景隔离出来的），实现必须遵守三条：
+ *   1) ntfs_link 只改【内存】的目录索引（小目录的项住在目标目录 MFT 记录里），
+ *      必须 ntfs_inode_sync(目标目录) 落盘 —— 否则 ntfs_delete 收尾时会
+ *      重新从盘上打开父目录查索引 → 查不到 → 库里 ENOENT 被改写成 EIO。
+ *   2) ntfs_delete 【会消费】传入的 ni 与 dir_ni（无论成败，内部都 close 掉），
+ *      调用方绝不能再碰它们；下一轮要重新 open。
+ *   3) 删除失败时根目录旧名还在（数据没丢），只需回滚目标目录里多出的链接。*/
+int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
+                       const char **names, int nnames, int *moved_out){
+    if(moved_out) *moved_out=0;
+    if(!fs||!fs->mounted||!dst_dir||!names||nnames<=0) return IMG_EINVAL;
+    if(img_ntfs_mkdir_p(fs, dst_dir)!=IMG_OK) return IMG_EIO;
+
+    int moved=0, first_err=0;
+    for(int i=0;i<nnames;i++){
+        const char *nm=names[i];
+        if(!nm||!*nm||!strcmp(nm,".")||!strcmp(nm,"..")) continue;
+        ntfschar *u=NULL; size_t ul=0;
+        if(!to_ntfs(nm,&u,&ul)) continue;
+
+        ntfs_inode *dst=lookup(fs->vol, dst_dir, NULL);     /* 每轮新开（上轮可能被消费）*/
+        ntfs_inode *root=ntfs_inode_open(fs->vol, FILE_root);
+        if(!dst||!root){
+            if(dst) ntfs_inode_close(dst);
+            if(root) ntfs_inode_close(root);
+            free(u);
+            if(!first_err) first_err=IMG_EIO;
+            continue;
+        }
+        errno=0;
+        MFT_REF ref=ntfs_inode_lookup_by_name(root,u,ul);
+        if(!mftref_ok(ref)){
+            ntfs_inode_close(dst); ntfs_inode_close(root); free(u);
+            if(!first_err) first_err=IMG_ENOENT;
+            continue;
+        }
+        ntfs_inode *ni=ntfs_inode_open(fs->vol, ref);
+        if(!ni){
+            ntfs_inode_close(dst); ntfs_inode_close(root); free(u);
+            if(!first_err) first_err=IMG_EIO;
+            continue;
+        }
+
+        int lr=ntfs_link(ni,dst,u,(u8)ul);                 /* ① 目标目录加同名链接（内存）*/
+        int err=0;
+        if(lr==0 && ntfs_inode_sync(dst)!=0){              /* ② ★ 落盘（本次事故的根因）*/
+            err=errno?errno:EIO;
+            lr=-1;
+        }
+        if(lr==0){
+            char path[512]; snprintf(path,sizeof path,"/%s",nm);
+            errno=0;
+            int dr=ntfs_delete(fs->vol, path, ni, root, u, (u8)ul); /* ③ 消费 ni+root */
+            ni=NULL; root=NULL;
+            if(dr==0){ moved++; ntfs_inode_close(dst); free(u); continue; }
+            err=errno?errno:EIO;
+            /* ④ 回滚：把目标目录里多出来的同名链接删掉（fresh opens，它也会被消费）*/
+            char dp[600]; snprintf(dp,sizeof dp,"%s/%s", dst_dir, nm);
+            ntfs_inode *r2=ntfs_inode_open(fs->vol, FILE_root);
+            ntfs_inode *d2=lookup(fs->vol, dst_dir, NULL);
+            ntfschar *u2=NULL; size_t ul2=0;
+            if(r2&&d2&&to_ntfs(nm,&u2,&ul2)){
+                MFT_REF rf2=ntfs_inode_lookup_by_name(d2,u2,ul2);
+                if(mftref_ok(rf2)){
+                    ntfs_inode *n2=ntfs_inode_open(fs->vol, rf2);
+                    if(n2){
+                        (void)ntfs_delete(fs->vol, dp, n2, d2, u2, (u8)ul2);
+                        n2=NULL;
+                    }
+                    d2=NULL;                              /* d2 被 ntfs_delete 消费 */
+                }
+            }
+            if(r2) ntfs_inode_close(r2);
+            if(d2) ntfs_inode_close(d2);
+            free(u2);
+        } else {
+            /* link 或 sync 失败：链接没进盘 → 直接清理内存对象即可（根目录原样，无残留）*/
+            ntfs_inode_close(ni); ntfs_inode_close(root);
+        }
+        ntfs_inode_close(dst);
+        free(u);
+        if(!first_err) first_err = (err==EPERM)?IMG_ENOTSUP:IMG_EIO;
+    }
+    if(moved>0) *moved_out=moved;
+    if(moved>0) return IMG_OK;
+    return first_err?first_err:IMG_ESTATE;
 }

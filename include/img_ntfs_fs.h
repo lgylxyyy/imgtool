@@ -58,6 +58,24 @@ int img_ntfs_put_file(img_ntfs_fs *fs, const char *local_path,
 /* 取文件大小，不存在返回 IMG_ENOENT */
 int img_ntfs_file_size(img_ntfs_fs *fs, const char *abs_path, uint64_t *out_size);
 
+/* ---------- part.scan / 搬移 用的底层（第2、3件）---------- */
+typedef void (*img_ntfs_list_cb)(void *ud, const char *name, bool is_dir, uint64_t size);
+/* 列目录（size 恒为 0：NTFS 取大小要再开 inode，调用方要大小用 img_ntfs_file_size）
+ * 契约与 img_fat32_list_dir 一致；不含 "."/".."；名字为 UTF-8 */
+int img_ntfs_list_dir(img_ntfs_fs *fs, const char *abs_path,
+                      img_ntfs_list_cb cb, void *ud);
+/* 空闲/已用字节（数 $Bitmap 位 × 簇大小；不含簇以下的零碎尾部） */
+int img_ntfs_free_bytes(img_ntfs_fs *fs, uint64_t *out_free, uint64_t *out_used);
+/* 卷标（无卷标 → 空串；失败返回 <0） */
+int img_ntfs_label(img_ntfs_fs *fs, char *out, size_t cap);
+/* 搬移原语：把【给定名字】移进 dst_dir（dst_dir 不存在则先建）
+ * ★ 层归属：这是机制不是政策 —— 搬谁由调用方（App）给名单；
+ *   搬完每个名字保持不变（/Windows → /Windows.old/Windows）。
+ * moved_out 返回实际搬动个数。返回 IMG_OK/IMG_E* */
+int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
+                       const char **names, int nnames, int *moved_out);
+
+
 #ifdef __cplusplus
 }
 #endif

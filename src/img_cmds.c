@@ -260,7 +260,7 @@ static int cmd_wim_size(img_ctx *ctx, const img_args *in, img_result *out){
 }
 
 /* ================= 命令 5b：wim.apply（灌入 WIM/ESD，可先格式化目标分区）====================
- * ★ 默认先【格式化】（--format=on）：
+ * ★ 默认【不格式化】（--format=off，用户拍板：有数据先问 App）；显式 --format=on 才格式化：
  *   1) 防残留 —— 目标分区若是旧系统/别的数据，wimlib 是覆盖式写入，不会清掉没被覆盖的旧文件；
  *   2) 阶段分离 —— 格式化与灌入是两个里程碑，日志能定位卡在哪一步（规范第七节要求）；
  *   3) 参数可控 —— 簇大小/卷标由我们定，不随 wimlib 实现版本漂移。
@@ -272,7 +272,7 @@ static const img_arg A_WIMAPPLY[] = {
     {"lba",    IMG_A_U64,  true,  NULL,      "目标分区起始 LBA",  chk_lba},
     {"wim",    IMG_A_STR,  true,  NULL,      "WIM/ESD 文件路径",  NULL},
     {"index",  IMG_A_U64,  false, "1",       "WIM 内的映像索引",  NULL},
-    {"format", IMG_A_ENUM, false, "on",      "灌入前是否格式化目标分区（on|off）", NULL},
+    {"format", IMG_A_ENUM, false, "off",      "灌入前是否格式化目标分区（on|off）", NULL},
     {"label",  IMG_A_STR,  false, "Windows", "（format=on）卷标", NULL},
     {"no_acls", IMG_A_BOOL,false, "false",   "不要 ACL（跨平台/不需要时开）", NULL},
     {"no_attrs",IMG_A_BOOL,false, "false",   "不要扩展属性", NULL},

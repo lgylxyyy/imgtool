@@ -21,3 +21,7 @@
  *   所以回调一律从我们自己的全局上下文取（img_ntfs_get_active_ctx）。 */
 extern struct ntfs_device_operations *img_ntfs_device_ops(void);
 #endif
+
+/* 诊断/探针专用：把挂载句柄里的 ntfs_volume* 暴露出来（tests/ntfs_probe.c 用）*/
+struct img_ntfs_fs;
+ntfs_volume *img_ntfs_probe_vol(struct img_ntfs_fs *fs);
