@@ -133,6 +133,28 @@ qemu-arm-static -L /usr/arm-linux-gnueabihf /tmp/b-arm32/tools/imgcmd ...
 风险评估：NTFS 路径全程用 libntfs-3g 自己的 s64/u64（显式 64 位），我方代码同为 uint64_t；
 真机（arm32 Android，从源码编 ntfsprogs）上做一次 WIM 灌入冒烟即可闭环。
 
+### I/O 超时（无进展看门狗，硬缺口 #2，2026-10-16 完成）
+**为什么是"无进展超时"而不是"总时长超时"**：总时长会误杀合法慢操作（实测 WIM 灌入在
+swap 吃紧时 461s 但全程 I/O 连续不断）；无进展超时只盯"连续 N 毫秒没有任何一次读写完成"。
+
+**默认 30 秒的依据（自有实测）**：
+| 依据 | 数字 |
+|---|---|
+| 1MiB 块在 5MB/s 慢卡上的合法间隔 | ~170ms |
+| WIM 最大单次读在慢卡上的间隔 | ~1.6s |
+| 最长正常整段操作（461s 那次）的 I/O 静默 | <1s |
+| 心跳判定"死透了"（2s→4s→…翻倍累计）| ~60s |
+→ 30s 无 I/O = 不是慢是死（触发它 ≈ 1MiB 块写 30 秒 = 34KB/s）。
+**分档建议**：本机镜像 10s / **默认 30s** / SAF·慢介质 60s / `0` 关闭。
+
+实现：`img_io_read/write` 每次完成 → `img_io_touch()`；看门狗线程超时 →
+①记 E 级日志（`error_code=IO-TIMEOUT` + gap_ms，任何级别都不丢）②`img_cancel()`
+③随后每次 I/O 入口 fail-fast（`IMG_ETIMEDOUT=-16`）。
+**诚实边界**：它无法打断"已经卡在内核/JNI 里的那一次调用"；能让后续 I/O 立即失败、
+操作尽快停并给出明确错误码 —— 比"静默挂死"强得多。
+CLI：`--io-timeout-ms=N`（env `IMGTOOL_IO_TIMEOUT_MS`）；默认 30000。
+验证：`tests/timeout_test` 5/5（含 fail-fast）+ 端到端（1ms 触发 IO-TIMEOUT、30s 默认不误杀、0 关闭）。
+
 ### 回归入口（改完代码先跑它）
 ```bash
 tests/run_all.sh      # 7 套：cmd_test 27 条 · corrupt-chain · fd 15 条 · thread 4 组 · cancel 7 条 · bcd · recovery_bcd

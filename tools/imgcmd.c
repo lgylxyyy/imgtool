@@ -78,6 +78,8 @@ static const ETX E_TEXT[] = {                      /* 错误码 → 原因 / 建
                  "检查旧镜像与宿主磁盘（qemu-img check / 空间 / 权限）","Check the old image and host disk (qemu-img check / space / permission)"},
     {"CLONE-VERIFY-FAIL","克隆后校验不通过（已回滚：旧镜像恢复原名）","Clone verification failed (rolled back; the old image was renamed back)",
                  "旧镜像可能损坏；先单独检查它再重试","The old image may be corrupt; check it first, then retry"},
+    {"IO-TIMEOUT","磁盘 I/O 无进展超时（连续一段时间没有任何读写完成）","Disk I/O stalled: nothing completed for the timeout window",
+                 "检查介质/线缆/权限；慢介质可调大 --io-timeout-ms（0=关闭）","Check the media/cable/permission; raise --io-timeout-ms for slow media (0=off)"},
     {"FEATURE-UNAVAILABLE","这个功能在这个构建里不可用（缺一个系统库）","This feature is not available in this build (missing a system library)",
                  "重新编译时开启对应开关并安装库（见 --list 的 features 字段）","Rebuild with the feature switch on and the library installed (see features in --list)"},
     {"CMD-CANCELLED","操作已取消（用户点了停止）","Operation cancelled by the user",
@@ -209,7 +211,7 @@ static void print_help(const img_cmd *c){
 }
 
 int main(int argc, char **argv){
-    const char *cmd=NULL,*log=NULL,*lvl=NULL,*helpcmd=NULL,*logmax=NULL,*progress=NULL;
+    const char *cmd=NULL,*log=NULL,*lvl=NULL,*helpcmd=NULL,*logmax=NULL,*progress=NULL,*iot=NULL;
     bool list=false, ro=false;
     ui_t ui={false};
     img_args *args=img_args_new();
@@ -232,6 +234,7 @@ int main(int argc, char **argv){
         if(!strcmp(key,"log")){ log=val; continue; }
         if(!strcmp(key,"log-level")){ lvl=val; continue; }
         if(!strcmp(key,"log-max")){ logmax=val; continue; }
+        if(!strcmp(key,"io-timeout-ms")){ iot=val; continue; }
         if(!strcmp(key,"progress")){ progress=val; continue; }
         if(!strcmp(key,"lang")){ snprintf(g_lang,sizeof g_lang,"%s",val); continue; }
         if(!eq){ fprintf(stderr,"参数 %s 缺少 =值（例如 --lba=2048）\n",a); img_args_free(args); return 2; }
@@ -251,6 +254,12 @@ int main(int argc, char **argv){
         }
         img_card_set_context(cl);
     }
+    /* I/O 看门狗（无进展超时）：默认 30s；--io-timeout-ms=0 关闭；env IMGTOOL_IO_TIMEOUT_MS 优先级低于参数 */
+    { int tmo=30000;
+      if(!iot){ const char *e=getenv("IMGTOOL_IO_TIMEOUT_MS"); if(e&&*e) tmo=atoi(e); }
+      else tmo=atoi(iot);
+      img_io_watchdog_start(tmo);
+      atexit(img_io_watchdog_stop); }
     /* 屏幕形态：tty → 人话行；非 tty → JSON；--progress=bar|json|none 强制 */
     ui.human = progress ? (!strcmp(progress,"bar")) : (isatty(2)!=0);
     if(progress && !strcmp(progress,"none")) ui.human=false;

@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 #include "img_io.h"
+#include "img_event.h"   /* I/O 看门狗（无进展超时）*/
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -100,6 +101,7 @@ void img_io_close(img_io *io){
 }
 
 int img_io_read(img_io *io, uint64_t off, void *buf, size_t len, size_t *done){
+    if(img_io_timed_out()) return IMG_ETIMEDOUT;   /* 看门狗：卡死后后续 I/O 立刻失败 */
     if(!io||!buf) return IMG_EINVAL;
     size_t got = 0;
     while(got < len){
@@ -112,10 +114,12 @@ int img_io_read(img_io *io, uint64_t off, void *buf, size_t len, size_t *done){
         got += (size_t)r;
     }
     if(done) *done = got;
+    img_io_touch();                          /* 这次 I/O 完成了 → 看门狗重新计时 */
     return IMG_OK;
 }
 
 int img_io_write(img_io *io, uint64_t off, const void *buf, size_t len, size_t *done){
+    if(img_io_timed_out()) return IMG_ETIMEDOUT;   /* 看门狗：卡死后后续 I/O 立刻失败 */
     if(!io||!buf) return IMG_EINVAL;
     if(!io->writable) return IMG_EINVAL;
     size_t put = 0;
@@ -129,6 +133,7 @@ int img_io_write(img_io *io, uint64_t off, const void *buf, size_t len, size_t *
     }
     if(done) *done = put;
     io->size_valid = false;                  /* 大小可能变了 */
+    img_io_touch();                          /* 这次 I/O 完成了 → 看门狗重新计时 */
     return IMG_OK;
 }
 

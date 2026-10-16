@@ -154,6 +154,20 @@ void img_error_report(int rc, const char *code, const char *mod, const char *op,
 /* ★ 失败卡片：人话 + 可整段复制。写屏幕（human 模式）并落 <镜像>.error.txt，
  *   内容含：工具/版本/命令/镜像指纹 / 失败位置 / 错误码 / 原因 / 建议 / 事件尾部。
  *   App 侧可以直接把它塞进"复制到剪贴板"按钮。*/
+/* ---------- I/O 看门狗（无进展超时）----------
+ * 语义：【连续 N 毫秒没有任何一次磁盘读写完成】→ 视为卡死：
+ *   1) 记一条 E 级日志（code=IO-TIMEOUT，任何日志级别都写）
+ *   2) 触发取消（协作式检查点退出）
+ *   ★ 它不能打断"卡在内核/JNI 里的那一次调用"，但能让【随后的每一次 I/O】立刻失败、
+ *     让操作尽快停下来并给出明确错误码 —— 比"静默挂死"强得多。
+ * 默认 30 秒（见 FEATURE-CHECKLIST：1MiB 块在 5MB/s 慢卡上只需 ~170ms，
+ * 30s 无 I/O = 不是慢是死）；0 = 关闭。
+ * 消费方：img_io_read/write 每次完成时 touch；超时后它们在入口 fail-fast。*/
+void img_io_watchdog_start(int timeout_ms);   /* 0=关闭 */
+void img_io_watchdog_stop(void);
+bool img_io_timed_out(void);                  /* 是否已判超时（I/O 入口据此 fail-fast）*/
+void img_io_touch(void);                      /* I/O 层每完成一次读写调一次 */
+
 /* ---------- 取消（P0-2）----------
  * 全局标志：任何线程可置位，正在跑的操作在"安全检查点"退出。
  * 检查点 = 数据写入的每个 1MiB 块；取消后【不写目录项 + 释放已分配簇链】，

@@ -172,6 +172,60 @@ static void pump(const char *line,size_t n,img_lv_t lv,bool force){
     }
 }
 
+/* ---------- I/O 看门狗（无进展超时；与取消是一套：看门狗→取消→I/O fail-fast） ---------- */
+#include <pthread.h>
+#include <stdatomic.h>
+static _Atomic long long g_last_io_ms = 0;    /* 最近一次"读写完成"的时刻 */
+static volatile int  g_io_timeout_ms = 0;     /* 0=关闭 */
+static volatile int  g_io_timed_out  = 0;     /* 已判超时（I/O 入口据此 fail-fast）*/
+static volatile int  g_wd_running    = 0;
+static pthread_t     g_wd_thread;
+
+void img_io_touch(void){ atomic_store_explicit(&g_last_io_ms, now_ms(), memory_order_relaxed); }
+bool img_io_timed_out(void){ return g_io_timed_out!=0; }
+
+static void *wd_main(void *ud){
+    (void)ud;
+    while(g_wd_running){
+        int tmo=g_io_timeout_ms;
+        if(tmo<=0 || g_io_timed_out){ struct timespec ts={0,200*1000*1000}; nanosleep(&ts,NULL); continue; }
+        struct timespec ts={0, (long)((tmo<2000?tmo/4:500)*1000*1000)};
+        nanosleep(&ts,NULL);
+        long long last=atomic_load_explicit(&g_last_io_ms, memory_order_relaxed);
+        if(last==0) continue;                       /* 还没开始过 I/O：不计时 */
+        long long gap=now_ms()-last;
+        if(gap >= tmo && !g_io_timed_out){
+            g_io_timed_out=1;
+            /* ★ E 级：任何日志级别都不丢（卡死是必须留痕的事件）*/
+            img_ev e;
+            if(img_ev_init(&e, IMG_LV_ERROR, "io", "fail", IMG_ETIMEDOUT, "I/O 无进展超时")){
+                img_ev_str(&e,"error_code","IO-TIMEOUT");
+                img_ev_i64(&e,"gap_ms",gap);
+                img_ev_i64(&e,"timeout_ms",tmo);
+                img_ev_emit(&e);
+            }
+            img_cancel();                            /* 协作式：各检查点退出 */
+        }
+    }
+    return NULL;
+}
+void img_io_watchdog_start(int timeout_ms){
+    g_io_timeout_ms = timeout_ms>0 ? timeout_ms : 0;
+    g_io_timed_out  = 0;                          /* 新窗口 = 新状态（否则 once stuck, stuck forever）*/
+    if(g_io_timeout_ms) img_io_touch();             /* 从"现在"开始计时 */
+    if(!g_wd_running){
+        g_wd_running=1;
+        if(pthread_create(&g_wd_thread,NULL,wd_main,NULL)!=0) g_wd_running=0;
+    }
+}
+void img_io_watchdog_stop(void){
+    g_io_timed_out = 0;                            /* 停止即复位（测试/重跑要干净状态）*/
+    if(!g_wd_running) return;
+    g_wd_running=0;
+    pthread_join(g_wd_thread,NULL);
+    g_io_timeout_ms=0;
+}
+
 /* ---------- 取消标志 ---------- */
 static volatile int g_cancel = 0;
 void img_cancel(void){ g_cancel = 1; }

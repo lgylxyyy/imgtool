@@ -35,6 +35,7 @@ head -c 16777216 /dev/urandom > "$W/big.bin"      # 取消测试要够大的源�
 
 run "cmd_test（命令表/校验/日志 27 条）"  bash "$ROOT/tests/cmd_test.sh"
 run "corrupt-chain-test（防死循环）"      bash "$ROOT/tests/corrupt-chain-test.sh"
+run "timeout_test（I/O 看门狗：无进展→超时→fail-fast）" bash -c "./build/tests/timeout_test"
 run "fd_test（fd 生命周期 15 条）"        "$ROOT/build/tests/fd_test" "$W/a.qcow2"
 run "thread_test（并发 4 组）"            "$ROOT/build/tests/thread_test" "$W/a.qcow2" "$W/b.qcow2" 2048 2048 "$W/t.log"
 run "cancel_test（取消 7 条）"            "$ROOT/build/tests/cancel_test" "$W/a.qcow2" 2048 "$W/big.bin"

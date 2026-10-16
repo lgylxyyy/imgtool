@@ -152,6 +152,7 @@ App 传 check_size=on  → 事前"需要 vs 剩余"，不够就提前拒（无�
 | `part.scan` | 扫描分区（App 弹不弹提示的依据）| `img` `lba` 必填 → 返回 level(0/1/2)/fs/label/cluster_bytes/entries_root/used_bytes/free_bytes/looks_like_windows |
 | `ntfs.list` | 列 NTFS 目录（给 App 名单）| `img` `lba` 必填；`path=/` 可选 → count/names(JSON 数组) |
 | `ntfs.rename` | 搬移原语：把【给定名单】移进目标目录 | `img` `lba` `dst` `names` 必填 → moved/dir_used（冲突自动 .001）|
+| （全局参数）| `--io-timeout-ms=N`：I/O 无进展超时（默认 30000；0=关闭；env `IMGTOOL_IO_TIMEOUT_MS`）| 超时 → `IO-TIMEOUT`（rc=-16）+ 触发取消 + 后续 I/O fail-fast |
 | `ntfs.exists` | 查 NTFS 路径存在（断点续跑探测）| `img` `lba` `path` 必填 → exists/size_bytes |
 | `fat.exists` | 查 FAT32 路径存在（断点续跑探测）| 同上（只读挂载，不改盘）|
 | `winre.auto` | 写/删 WinRE 出厂自动启用脚本（SetupComplete.cmd）| `img` `lba`(系统分区) 必填；`enable` **由 App 显式传**（勾选框默认值是 App 的 UI 决策；不传时兜底 true）→ written/bytes 或 removed |

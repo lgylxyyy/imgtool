@@ -62,3 +62,6 @@ endif()
 target_link_libraries(ntfs_probe PRIVATE imgtool)
 target_include_directories(ntfs_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
+
+add_executable(timeout_test timeout_test.c)
+target_link_libraries(timeout_test PRIVATE imgtool)
