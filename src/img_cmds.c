@@ -11,12 +11,14 @@
 #include "img_event.h"
 #include "img_wim_apply.h"
 #include "img_ntfs_fmt.h"
+ #include "img_clone.h"
 #include "img_ntfs_fs.h"   /* part.scan / ntfs.list / ntfs.rename */
 #include "img_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>  /* strcasecmp（Windows/Android 都可用）*/
+ #include <strings.h>
+#include <unistd.h>   /* rename/unlink/access（克隆的改名与回滚护栏）*/  /* strcasecmp（Windows/Android 都可用）*/
 #include <time.h>
 
 static long long now_ms_(void){
@@ -556,6 +558,148 @@ static int cmd_ntfs_rename(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+/* ================= 命令 6e：img.clone（克隆保留分区到新盘 —— 换系统的主路径）====================
+ * 文件名流程（PARTITION-POLICY #10 + 两条硬护栏）：
+ *   X.qcow2 ─①改名─▶ X.old.qcow2（App 可传 old_name） ─②写新─▶ 新镜像占原名 X.qcow2
+ *            ─③校验─▶ 成功：按 keep_old 决定旧副本删/留（默认删 = #9）
+ *                    失败：新盘删掉、旧镜像【改回原名】（护栏 2：用户文件永远在原路径）
+ *   ★ 校验通过前绝不删旧的（护栏 1）；宿主空间不够 → 零操作 + HOST-ENOSPC（#12）*/
+static const img_arg A_IMGCLONE[] = {
+    {"img",      IMG_A_STR,  true,  NULL,     "要克隆的镜像路径（qcow2）", NULL},
+    {"keep",     IMG_A_STR,  true,  NULL,     "要保留的分区起始 LBA，逗号分隔（不列的分区在新盘上留空）", NULL},
+    {"guid",     IMG_A_ENUM, false, "random", "GUID：random=重新生成（默认）|keep=逐字节相同", NULL},
+    {"keep_old", IMG_A_BOOL, false, "false",  "校验通过后是否保留旧镜像副本（默认不保留）", NULL},
+    {"old_name", IMG_A_STR,  false, NULL,     "旧镜像改名后的名字（默认 <名字>.old.qcow2）", NULL},
+};
+static int verify_clone(const char *oldp, const char *newp,
+                        const uint64_t *keep, int nkeep){
+    /* 校验：新盘分区表可读 + 每个保留分区的【头 64KiB】与旧盘逐字节一致 */
+    img_io_opts_t o={0};
+    img_io *a=img_io_open_path(oldp,&o), *b=img_io_open_path(newp,&o);
+    if(!a||!b){ if(a) img_io_close(a); if(b) img_io_close(b); return -1; }
+    img_qcow2_opts_t qo={0};
+    img_qcow2 *qa=img_qcow2_open(a,&qo), *qb=img_qcow2_open(b,&qo);
+    if(!qa||!qb){ if(qa) img_qcow2_close(qa); if(qb) img_qcow2_close(qb);
+                  img_io_close(a); img_io_close(b); return -1; }
+    img_parttable_t ta,tb;
+    int bad=0;
+    if(img_parttable_read(qa,&ta,0)!=IMG_OK || img_parttable_read(qb,&tb,0)!=IMG_OK) bad=1;
+    enum { VCHK = 64*1024 };
+    static unsigned char vb[VCHK], vc[VCHK];
+    for(int k=0; k<nkeep && !bad; k++){
+        uint64_t lba=keep[k];
+        const img_partition_t *pa=NULL;
+        for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+            if(ta.parts[i].used && ta.parts[i].first_lba==lba){ pa=&ta.parts[i]; break; }
+        if(!pa){ bad=1; break; }
+        uint64_t off=pa->first_lba*512u;
+        if(img_qcow2_read_full(qa,off,vb,VCHK)!=IMG_OK ||
+           img_qcow2_read_full(qb,off,vc,VCHK)!=IMG_OK ||
+           memcmp(vb,vc,VCHK)!=0) bad=1;
+    }
+    img_qcow2_close(qa); img_io_close(a);
+    img_qcow2_close(qb); img_io_close(b);
+    return bad?-1:0;
+}
+static int cmd_img_clone(img_ctx *ctx, const img_args *in, img_result *out){
+    const char *src=img_ctx_path(ctx);
+    const char *guidp=img_args_get(in,"guid");
+    bool guid_random = !guidp || !strcmp(guidp,"random");
+    bool keep_old = img_args_bool(in,"keep_old",false);
+
+    /* 名单（上限 32，严格数字） */
+    const char *klist=img_args_get(in,"keep");
+    if(!klist||!klist[0]){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","keep","保留分区名单不能为空",NULL); return IMG_EINVAL; }
+    static char kbuf[512]; snprintf(kbuf,sizeof kbuf,"%s",klist);
+    uint64_t keep[32]; int nkeep=0;
+    for(char *tok=strtok(kbuf,","); tok && nkeep<32; tok=strtok(NULL,",")){
+        while(*tok==' ') tok++;
+        if(!*tok) continue;
+        char *end=NULL; unsigned long long v=strtoull(tok,&end,0);
+        if(!end||*end||v==0){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","keep","LBA 必须是纯数字",NULL); return IMG_EINVAL; }
+        keep[nkeep++]=(uint64_t)v;
+    }
+    if(!nkeep){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","keep","名单解析后为空",NULL); return IMG_EINVAL; }
+
+    /* 宿主空间预检（不足 → 零操作 + 稳定码，#12） */
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+    /* ★ 名单必须【在改名之前】校验：参数错误不该惊动文件系统
+     *   （之前坏 LBA 走了"改名→失败→回滚"整条重流程，回滚是对的但纯属折腾） */
+    for(int k=0;k<nkeep;k++){
+        bool found=false;
+        for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+            if(t->parts[i].used && t->parts[i].first_lba==keep[k]){ found=true; break; }
+        if(!found){
+            char atbuf[32]; snprintf(atbuf,sizeof atbuf,"keep=%llu",(unsigned long long)keep[k]);
+            img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD",atbuf,"这个 LBA 不在分区表里",NULL);
+            return IMG_EINVAL;
+        }
+    }
+    uint64_t need=4u*1024*1024;
+    for(int k=0;k<nkeep;k++){
+        for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+            if(t->parts[i].used && t->parts[i].first_lba==keep[k]){
+                need += (t->parts[i].last_lba - t->parts[i].first_lba + 1)*512u; break; }
+    }
+    need += need/32 + 4u*1024*1024;              /* 约 +3%：元数据/对齐/GPT */
+    { char dir[600]; snprintf(dir,sizeof dir,"%s",src);
+      char *sl=strrchr(dir,'/'); if(sl) *sl=0; else snprintf(dir,sizeof dir,".");
+      uint64_t free_b=img_host_free_bytes_path(dir);
+      if(free_b && free_b < need){
+          img_result_fail(out,IMG_EFULL,"HOST-ENOSPC",src,
+                          "宿主剩余空间不足以克隆（未写入任何字节）","清理宿主磁盘后重试");
+          return IMG_EFULL;
+      } }
+
+    /* 旧镜像改名目标（默认 X.old.qcow2；存在则 .001/.002…） */
+    static char oldp[600];
+    const char *on=img_args_get(in,"old_name");
+    if(on&&on[0]){
+        if(on[0]=='/') snprintf(oldp,sizeof oldp,"%s",on);
+        else { const char *sl=strrchr(src,'/'); snprintf(oldp,sizeof oldp,"%.*s/%s",
+                  sl?(int)(sl-src):0, sl?src:"", on); if(!sl) snprintf(oldp,sizeof oldp,"./%s",on); }
+    } else {
+        const char *dot=strrchr(src,'.'); const char *sl=strrchr(src,'/');
+        if(dot && (!sl || dot>sl)) snprintf(oldp,sizeof oldp,"%.*s.old%s",(int)(dot-src),src,dot);
+        else                       snprintf(oldp,sizeof oldp,"%s.old",src);
+    }
+    if( access(oldp,F_OK)==0 ){
+        char base[600]; snprintf(base,sizeof base,"%s",oldp);   /* 先存基准名再编号（自写自读会重叠）*/
+        bool found=false;
+        for(int i=1;i<=999;i++){
+            snprintf(oldp,sizeof oldp,"%.570s.%03d", base, i);
+            if(access(oldp,F_OK)!=0){ found=true; break; }
+        }
+        if(!found){ img_result_fail(out,IMG_EFULL,"CMD-ARG-BAD","old_name","旧文件编号到 .999 仍冲突",NULL); return IMG_EFULL; }
+    }
+
+    /* ① 改名（源全程只读的前提） ② 写新 ③ 校验 ④ keep_old */
+    if(rename(src,oldp)!=0){ img_result_fail(out,IMG_EIO,"IMG-OPEN-FAIL",src,"旧镜像改名失败（权限/占用）",NULL); return IMG_EIO; }
+    img_clone_stats_t st;
+    rc=img_clone(oldp, src, keep, nkeep, guid_random, &st, NULL);
+    if(rc!=IMG_OK){
+        unlink(src); rename(oldp,src);              /* ★ 回滚：用户文件回到原路径 */
+        const char *code=(rc==IMG_ECANCELLED)?"CMD-CANCELLED":
+                         (rc==IMG_EFULL)?"HOST-ENOSPC":"CLONE-COPY-FAIL";
+        img_result_fail(out,rc,code,src,"克隆失败（已回滚：旧镜像恢复原名）",NULL);
+        return rc;
+    }
+    if(verify_clone(oldp,src,keep,nkeep)!=0){
+        unlink(src); rename(oldp,src);              /* ★ 校验不过 → 回滚 */
+        img_result_fail(out,IMG_EIO,"CLONE-VERIFY-FAIL",src,
+                        "克隆后校验不通过（已回滚：旧镜像恢复原名）","检查旧镜像是否损坏（qemu-img check）");
+        return IMG_EIO;
+    }
+    /* 校验通过 → 才允许动旧文件（护栏 1） */
+    if(!keep_old) unlink(oldp);
+    img_result_u64(out,"bytes_written",st.bytes_written);
+    img_result_u64(out,"parts_copied",(uint64_t)st.parts_copied);
+    img_result_bool(out,"old_kept",keep_old);
+    img_result_str(out,"old_path",keep_old?oldp:"");
+    return IMG_OK;
+}
+
 /* ================= 命令 6：ctl.cancel（请求取消当前操作） =================
  * ★ 用法：另一个线程调用它（或 App 直接调 img_cancel()）。取消是【协作式】的：
  *   正在跑的操作在自己的检查点（每 1MiB/每个目录项前）看到标志就退出，
@@ -599,6 +743,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_NTFSLIST,(int)(sizeof A_NTFSLIST/sizeof A_NTFSLIST[0]), cmd_ntfs_list},
     {"ntfs.rename","1.0", "把【给定名单】的顶层项移进目标目录（冲突自动编号 .001；工具不设默认名）",
         A_NTFSREN,(int)(sizeof A_NTFSREN/sizeof A_NTFSREN[0]), cmd_ntfs_rename},
+    {"img.clone", "1.0", "克隆保留分区到新盘（不列的分区留空 → 换系统主路径；旧镜像自动改名/校验/回滚）",
+        A_IMGCLONE,(int)(sizeof A_IMGCLONE/sizeof A_IMGCLONE[0]), cmd_img_clone},
     {"ctl.cancel","1.0", "请求取消正在执行的操作（另一线程调用；协作式，下一个检查点生效）",
         NULL, 0, cmd_ctl_cancel},
     {"cmd.list",  "1.0", "导出命令表（名字/参数规格/帮助）——App 可据此自动生成界面",

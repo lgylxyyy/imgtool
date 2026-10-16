@@ -74,6 +74,10 @@ static const ETX E_TEXT[] = {                      /* 错误码 → 原因 / 建
                  "换更小的分区或用 imgntfsfs format 单独重试；看日志里的失败行","Use a smaller partition or retry imgntfsfs format; see the fail line"},
     {"WIM-APPLY-FAIL","灌入 WIM 失败（格式化成功，但这步没完成）","Applying the WIM failed (format succeeded, this step didn't)",
                  "看日志里的失败行与 error_code；镜像文件可用 qemu-img check 复核","See the fail line + error_code; verify the image with qemu-img check"},
+    {"CLONE-COPY-FAIL","克隆拷贝失败（已回滚：旧镜像恢复原名）","Clone copy failed (rolled back; the old image was renamed back)",
+                 "检查旧镜像与宿主磁盘（qemu-img check / 空间 / 权限）","Check the old image and host disk (qemu-img check / space / permission)"},
+    {"CLONE-VERIFY-FAIL","克隆后校验不通过（已回滚：旧镜像恢复原名）","Clone verification failed (rolled back; the old image was renamed back)",
+                 "旧镜像可能损坏；先单独检查它再重试","The old image may be corrupt; check it first, then retry"},
     {"CMD-CANCELLED","操作已取消（用户点了停止）","Operation cancelled by the user",
                  "目标分区/文件可能停在半写状态，请重做该步骤","The target may be half-written; redo this step"},
     {NULL,NULL,NULL,NULL,NULL}

@@ -144,6 +144,15 @@ C 空间不够
 
 ---
 
+## 六b、实现状态（2026-10-16）
+| 能力 | 状态 | 验证 |
+|---|---|---|
+| `part.scan`（三级口径）| ✅ | A–E 五盘交叉对拍：未格式化=0 / NTFS·FAT 空卷=1（ntfsls、mtools 列空）/ 有文件=2（条目数一致）|
+| `ntfs.list` | ✅ | 与上游 ntfsls 逐项一致 |
+| `ntfs.rename` | ✅ | 探针三场景（file/emptydir/fulldir）+ 自动编号 .001 + FAT-ENTRY-NOTFOUND 专属码 |
+| `img.clone` | ✅ | 稀疏生效（200MB 分区只写 3MB）/ GUID 重新生成 / 72MB→3.7MB（不列的分区留空）/ 内容 md5 一致 / qemu-img check 通过 / 坏 LBA 预检零改动 / keep_old 两种模式 |
+| `wim.apply` 默认 format=off | ✅ | cmd_test 既有用例仍绿 |
+
 ## 七、验收（进代码前先立字条）
 
 - [ ] 第三节 8~15 全部勾完

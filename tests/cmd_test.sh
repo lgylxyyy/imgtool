@@ -141,6 +141,30 @@ check_err "ntfs.list 路径不存在" "FAT-LS-FAIL" \
 check_err "part.scan LBA 不存在" "CMD-ARG-BAD" \
   "$T/imgcmd" part.scan --img="$W/scan.qcow2" --lba=123456 --progress=bar
 
+echo "════ 4c. img.clone（克隆 + 护栏）════"
+$T/imglayout mk "$W/clone.qcow2" $((20*1024*1024*1024)) gpt --esp 200 --msr 16 >/dev/null 2>&1
+CE=$($T/imgpart show "$W/clone.qcow2" | python3 -c "
+import sys,json; d=json.load(sys.stdin)
+print([p['first'] for p in d['parts'] if p['typeGuid'].startswith('c12a7328')][0])")
+$T/imgmkfs "$W/clone.qcow2" --mkfs $CE ESPVOL >/dev/null 2>&1
+printf 'clone-payload' > /tmp/clone_p.bin
+$T/imgfatfs "$W/clone.qcow2" $CE put /tmp/clone_p.bin /p.bin >/dev/null 2>&1
+G0=$($T/imgcmd img.info --img="$W/clone.qcow2" 2>/dev/null | jq_ "d['data']['disk_guid']")
+j=$("$T/imgcmd" img.clone --img="$W/clone.qcow2" --keep=$CE)
+bw=$(echo "$j" | jq_ "d['data']['bytes_written']")
+[ -n "$bw" ] && [ "$bw" -gt 0 ] && ok "img.clone 成功（写入 $bw 字节，稀疏生效）" || ng "bytes_written=$bw"
+[ ! -e "$W/clone.old.qcow2" ] && ok "默认不保留旧副本（校验通过后删 .old）" || ng ".old 还在"
+G1=$($T/imgcmd img.info --img="$W/clone.qcow2" 2>/dev/null | jq_ "d['data']['disk_guid']")
+[ "$G1" != "$G0" ] && ok "磁盘 GUID 已重新生成" || ng "GUID 没变（应随机）"
+rm -f /tmp/clone_out.bin
+$T/imgfatfs "$W/clone.qcow2" $CE export /p.bin /tmp/clone_out.bin >/dev/null 2>&1
+cmp -s /tmp/clone_p.bin /tmp/clone_out.bin && ok "克隆后内容逐字节一致" || ng "内容不一致"
+before=$(md5sum "$W/clone.qcow2" | cut -c1-32)
+check_err "img.clone 保留名单含坏 LBA" "CMD-ARG-BAD" \
+  "$T/imgcmd" img.clone --img="$W/clone.qcow2" --keep=999999 --progress=bar
+after=$(md5sum "$W/clone.qcow2" | cut -c1-32)
+[ "$before" = "$after" ] && ok "预检失败 → 源文件一字节未动" || ng "源文件被改了！"
+
 echo "════ 5. 日志（--log）：里程碑 + 错误都落盘，且逐行可解析 ════"
 $T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src="$W/blob.bin" --dst=/EFI/blob2.bin \
     --log="$W/run.log" --log-level=info >/dev/null 2>&1
