@@ -28,19 +28,21 @@ print([p['first'] for p in d['parts'] if p['typeGuid'].startswith('ebd0a0a2')][0
 $T/imgntfsfs "$W/d.qcow2" "$LBA" format WIN >/dev/null 2>&1 || { echo "❌ NTFS 格式化失败"; exit 2; }
 echo "  分区 LBA=$LBA；ESD=$(basename "$ESD") 索引=$IDX"
 
-echo "════ ① 正常灌入（这一步耗时最长，约 1~2 分钟）════"
+echo "════ ① 正常灌入（真实命令路径：imgcmd wim.apply，约 1~8 分钟）════"
 export IMGTOOL_LOG="$W/full.log"
 rm -f "$W/full.log"
-if "$TE/wim_apply_test" "$W/d.qcow2" "$LBA" "$ESD" "$IDX" > "$W/full.out" 2>&1; then
-  ok "完整灌入成功（$(tail -2 "$W/full.out" | head -1 | tr -d ' ')）"
+ENVJ="$W/env.json"
+if "$T/imgcmd" wim.apply --img="$W/d.qcow2" --lba="$LBA" --wim="$ESD" --index="$IDX" \
+                        --format=on --label=Windows --log="$W/full.log" --progress=bar \
+                        > "$ENVJ" 2> "$W/full.err"; then
+  ok "imgcmd wim.apply 成功（信封: $(python3 -c "import json;d=json.load(open('$ENVJ'));print('ok=',d['ok'],'formatted=',d['data'].get('formatted'),'index=',d['data'].get('index'))")）"
 else
-  ng "完整灌入失败：$(tail -3 "$W/full.out" | tr '\n' ' ')"
-fi
-grep -q 'event=begin.*action=apply' "$W/full.log" && ok "日志有 begin（带 wim/index/lba）" || ng "日志缺 begin"
-grep -q 'event=done' "$W/full.log" && grep -q 'duration_ms=' "$W/full.log" && ok "日志有 done（带 duration_ms）" || ng "日志缺 done"
+  ng "imgcmd wim.apply 失败：$(cat "$ENVJ" | head -c 300)"; fi
+grep -q 'action=format' "$W/full.log" && ok "日志有【格式化】里程碑（与灌入分开）" || ng "日志缺 format 里程碑"
+grep -q 'action=apply' "$W/full.log" && ok "日志有【灌入】里程碑（带 wim/index/lba）" || ng "日志缺 apply 里程碑"
+grep -q 'event=done' "$W/full.log" && grep -q 'duration_ms=' "$W/full.log" && ok "done 带 duration_ms" || ng "缺 done"
 python3 "$ROOT/tests/logfmt_check.py" "$W/full.log" >/dev/null 2>&1 && ok "日志格式合法（logfmt）" || ng "日志格式有坏行"
-grep -q 'size_bytes=6861906464\|size' "$W/full.log" 2>/dev/null && ok "写入了真实数据（日志可见尺寸）" || true
-echo "  ── 抽取日志 ──"; grep -E 'action=apply' "$W/full.log" | head -3 | sed 's/^/     /'
+grep -E 'action=(format|apply)' "$W/full.log" | sed 's/^/     /'
 echo "  ── 抽回校验：把真实的 Windows 内核抽出来看（不能只信自己的读函数）──"
 K=/Windows/System32/ntoskrnl.exe
 $T/imgntfsfs "$W/d.qcow2" "$LBA" exists "$K" 2>/dev/null | grep -q "是" && ok "存在 $K" || ng "分区里没有 $K"
@@ -52,6 +54,10 @@ if [ -s "$W/k.exe" ]; then
 else
   ng "抽回失败"
 fi
+echo "  ── 格式化后的 $Boot 仍在（说明 mkntfs 的卷没被破坏）──"
+$T/imgdump "$W/d.qcow2" $((LBA*512)) 16 > "$W/bs.bin" 2>/dev/null
+python3 -c "d=open('$W/bs.bin','rb').read(); import sys; sys.exit(0 if d[3:11]==b'NTFS    ' else 1)" \
+  && ok "\$Boot 魔数 NTFS 仍在" || ng "\$Boot 不对"
 
 echo "════ ② 中途取消（另建一张盘，跑 6 秒后取消）════"
 $T/imglayout mk "$W/c.qcow2" $((20*1024*1024*1024)) gpt --esp 200 --msr 16 >/dev/null 2>&1

@@ -10,6 +10,7 @@
 #include "img_fat32_fs.h"
 #include "img_event.h"
 #include "img_wim_apply.h"
+#include "img_ntfs_fmt.h"
 #include "img_host.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -258,6 +259,81 @@ static int cmd_wim_size(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+/* ================= 命令 5b：wim.apply（灌入 WIM/ESD，可先格式化目标分区）====================
+ * ★ 默认先【格式化】（--format=on）：
+ *   1) 防残留 —— 目标分区若是旧系统/别的数据，wimlib 是覆盖式写入，不会清掉没被覆盖的旧文件；
+ *   2) 阶段分离 —— 格式化与灌入是两个里程碑，日志能定位卡在哪一步（规范第七节要求）；
+ *   3) 参数可控 —— 簇大小/卷标由我们定，不随 wimlib 实现版本漂移。
+ * 实测：先格式化再灌 → rc=0，抽回 ntoskrnl.exe 与"直接灌"逐字节一致（md5 相同），
+ *       分区 $Boot 完好、qemu-img check 无错。
+ * 保留原分区用 --format=off（如"只重灌数据不重建卷"的场景）。*/
+static const img_arg A_WIMAPPLY[] = {
+    {"img",    IMG_A_STR,  true,  NULL,      "镜像路径（qcow2）", NULL},
+    {"lba",    IMG_A_U64,  true,  NULL,      "目标分区起始 LBA",  chk_lba},
+    {"wim",    IMG_A_STR,  true,  NULL,      "WIM/ESD 文件路径",  NULL},
+    {"index",  IMG_A_U64,  false, "1",       "WIM 内的映像索引",  NULL},
+    {"format", IMG_A_ENUM, false, "on",      "灌入前是否格式化目标分区（on|off）", NULL},
+    {"label",  IMG_A_STR,  false, "Windows", "（format=on）卷标", NULL},
+    {"no_acls", IMG_A_BOOL,false, "false",   "不要 ACL（跨平台/不需要时开）", NULL},
+    {"no_attrs",IMG_A_BOOL,false, "false",   "不要扩展属性", NULL},
+    {"wimboot", IMG_A_BOOL,false, "false",   "wimboot 模式（文件指针化）", NULL},
+};
+static int cmd_wim_apply_cmd(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *wim=img_args_get(in,"wim");
+    int idx=(int)img_args_u64(in,"index",1);
+
+    /* 表驱动没有 enum 值域校验 → 这里显式判（严格式，不许 --format=maybe 被静默当 off）*/
+    const char *fmt=img_args_get(in,"format");
+    if(fmt && strcmp(fmt,"on") && strcmp(fmt,"off")){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","format","只接受 on|off",NULL);
+        return IMG_EINVAL;
+    }
+    bool do_fmt = !fmt || !strcmp(fmt,"on");
+
+    /* 分区大小（格式化与灌入都要） */
+    img_parttable_t *t=NULL;
+    int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){
+            pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+
+    /* ① 里程碑：格式化（默认开） */
+    if(do_fmt){
+        img_span sp;
+        img_span_prep(&sp,"ntfs","format","格式化系统分区（灌 WIM 前）");
+        img_span_kv_u64(&sp,"lba",lba);
+        img_span_kv_u64(&sp,"size_bytes",pb);
+        img_span_begin(&sp);
+        img_ntfs_fmt_opts_t o; img_ntfs_fmt_defaults(&o,lba,pb);
+        o.label=img_args_get(in,"label");
+        rc=img_ntfs_format(q,&o,NULL);
+        img_span_end(&sp,rc);
+        if(rc){ img_result_fail(out,rc,"NTFS-FORMAT-FAIL",NULL,NULL,NULL); return rc; }
+    }
+
+    /* ② 里程碑：灌入 */
+    img_wim_apply_opts_t wo; memset(&wo,0,sizeof wo);
+    wo.no_acls  =img_args_bool(in,"no_acls",false);
+    wo.no_attrs =img_args_bool(in,"no_attrs",false);
+    wo.wimboot  =img_args_bool(in,"wimboot",false);
+    rc=img_wim_apply(wim,idx,q,lba,&wo,NULL);
+    if(rc){
+        const char *code=(rc==IMG_ECANCELLED)?"CMD-CANCELLED":"WIM-APPLY-FAIL";
+        img_result_fail(out,rc,code,NULL,NULL,NULL);
+        return rc;
+    }
+    img_result_u64(out,"index",(uint64_t)idx);
+    img_result_bool(out,"formatted",do_fmt);
+    return IMG_OK;
+}
+
 /* ================= 命令 6：ctl.cancel（请求取消当前操作） =================
  * ★ 用法：另一个线程调用它（或 App 直接调 img_cancel()）。取消是【协作式】的：
  *   正在跑的操作在自己的检查点（每 1MiB/每个目录项前）看到标志就退出，
@@ -293,6 +369,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_FATLS,  (int)(sizeof A_FATLS /sizeof A_FATLS[0]),  cmd_fat_ls},
     {"wim.size",  "1.0", "估算某个 WIM/ESD 镜像展开后需要多少空间（工具给数字，App 定政策）",
         A_WIMSIZE,(int)(sizeof A_WIMSIZE/sizeof A_WIMSIZE[0]), cmd_wim_size},
+    {"wim.apply","1.0", "灌入 WIM/ESD 到分区（默认先格式化目标分区防残留；--format=off 保留原分区）",
+        A_WIMAPPLY,(int)(sizeof A_WIMAPPLY/sizeof A_WIMAPPLY[0]), cmd_wim_apply_cmd},
     {"ctl.cancel","1.0", "请求取消正在执行的操作（另一线程调用；协作式，下一个检查点生效）",
         NULL, 0, cmd_ctl_cancel},
     {"cmd.list",  "1.0", "导出命令表（名字/参数规格/帮助）——App 可据此自动生成界面",

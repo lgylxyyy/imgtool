@@ -65,6 +65,13 @@ check_err "LBA 上不是 FAT32"   FAT-MOUNT-FAIL    $T/imgcmd fat.ls --img="$W/t
 check_err "镜像不存在"         IMG-OPEN-FAIL     $T/imgcmd img.info --img=/no/such.qcow2
 check_err "目录不存在"         FAT-DIR-NOTFOUND  $T/imgcmd fat.ls --img="$W/t.qcow2" --lba=$LBA --path=/nope
 
+check_err "wim.apply 非法 format 值" "CMD-ARG-BAD" \
+  "$T/imgcmd" wim.apply --img="$W/t.qcow2" --lba=$LBA --wim=/nope.esd --format=maybe --progress=bar
+check_err "wim.apply 缺必填 wim" "CMD-ARG-BAD" \
+  "$T/imgcmd" wim.apply --img="$W/t.qcow2" --lba=$LBA --progress=bar
+check_err "wim.apply LBA 不在分区表" "CMD-ARG-BAD" \
+  "$T/imgcmd" wim.apply --img="$W/t.qcow2" --lba=999999 --wim=/nope.esd --progress=bar
+
 echo "════ 4a. 宿主空间（默认开、不可关）════"
 $T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src="$W/blob.bin" --dst=/EFI/blk2.bin \
     --host_free=1000000 > "$W/host.json" 2>/dev/null

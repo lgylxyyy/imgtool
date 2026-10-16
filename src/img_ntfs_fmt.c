@@ -124,7 +124,13 @@ int img_ntfs_format(img_qcow2 *q, const img_ntfs_fmt_opts_t *o, img_prog *prog){
     opterr  = 1;
     optarg  = NULL;
     optopt  = 0;
+    /* ★ mkntfs 自己往 stdout 打"Creating NTFS volume structures..."之类的话，
+     *   而命令的 stdout 是给 App 解析的【纯 JSON 信封】→ 必须把它的输出挪到 stderr。
+     *   （实测：不重定向时信封前面混进 mkntfs 文案，App 的 json.loads 直接报错）*/
+    int saved_out = dup(1);
+    if(saved_out>=0) dup2(2, 1);
     int rc = mkntfs_main(argc, argv);
+    if(saved_out>=0){ dup2(saved_out, 1); close(saved_out); }
 
     g_fmt_ctx = NULL;
     if(prog){

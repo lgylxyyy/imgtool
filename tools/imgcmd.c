@@ -68,6 +68,10 @@ static const ETX E_TEXT[] = {                      /* 错误码 → 原因 / 建
                  "先用 imgwimls 列出索引","List indexes first with imgwimls"},
     {"WIM-IDX-INVALID","镜像索引不存在","Image index does not exist",
                  "先用 imgwimls 列出索引，再带 --index=N","List indexes first, then pass --index=N"},
+    {"NTFS-FORMAT-FAIL","NTFS 格式化失败（灌 WIM 前的准备步骤）","NTFS format failed (the step before applying)",
+                 "换更小的分区或用 imgntfsfs format 单独重试；看日志里的失败行","Use a smaller partition or retry imgntfsfs format; see the fail line"},
+    {"WIM-APPLY-FAIL","灌入 WIM 失败（格式化成功，但这步没完成）","Applying the WIM failed (format succeeded, this step didn't)",
+                 "看日志里的失败行与 error_code；镜像文件可用 qemu-img check 复核","See the fail line + error_code; verify the image with qemu-img check"},
     {"CMD-CANCELLED","操作已取消（用户点了停止）","Operation cancelled by the user",
                  "目标分区/文件可能停在半写状态，请重做该步骤","The target may be half-written; redo this step"},
     {NULL,NULL,NULL,NULL,NULL}
@@ -245,11 +249,15 @@ int main(int argc, char **argv){
     img_out_open_fd(2, ui.human);      /* human=true → 库不再往 stderr 吐机器行 */
     img_out_set_text(on_event, &ui);   /* ★ 库发码 → 这里出中文/英文人话行 */
 
+    if(!lvl) lvl=getenv("IMGTOOL_LOG_LEVEL");      /* 环境变量同样适用 */
     if(lvl){
         img_lv_t l=IMG_LV_INFO;
         if(!strcmp(lvl,"error")) l=IMG_LV_ERROR; else if(!strcmp(lvl,"warn")) l=IMG_LV_WARN;
         else if(!strcmp(lvl,"debug")) l=IMG_LV_DEBUG; else if(!strcmp(lvl,"trace")) l=IMG_LV_TRACE;
         img_log_set_level(l);
+    }
+    if(!log){                                       /* ★ 环境变量 IMGTOOL_LOG（shell 流水线一行 export 全生效）*/
+        const char *el=getenv("IMGTOOL_LOG"); if(el&&*el) log=el;
     }
     if(log){
         size_t mb=4u*1024*1024;

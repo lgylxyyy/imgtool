@@ -148,6 +148,9 @@ App 传 check_size=on  → 事前"需要 vs 剩余"，不够就提前拒（无�
 ---
 
 ## 六、参数清单（CLI 与 App opts 一一对应）
+
+| `wim.apply` | 灌入 WIM/ESD 到分区（**默认先格式化**防残留；`--format=off` 保留原分区） | `img` `lba` `wim` 必填；`index=1` `format=on` `label=Windows` `no_acls` `no_attrs` `wimboot` 可选 |
+| `wim.size` | 空间估算 | `wim` 必填；`index=1` 可选（命令见 §五） |
 ```
 --log=<路径>| - | none      日志落盘位置（缺省：镜像旁 x.imgtool.log；App 侧建议私有目录+fd）
 --log-level=error|info|debug|trace     缺省 info
