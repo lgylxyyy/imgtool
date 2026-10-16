@@ -89,6 +89,15 @@ tests/wim-apply-test.sh        # 或 WITH_WIM=1 tests/run_all.sh
 > ⚠ 耗时波动大（60s / 71s / 461s 三次实测）：沙箱 swap 吃紧时 qcow2 写路径会被拖慢，
 > 不是代码回归；真机（KVM/hvf）上会稳定得多。
 
+### WinRE 出厂自动启用（2026-10-16，用户实测发现）
+现象：离线拼的盘 `reagentc /info` 显示 Disabled，要手动 `reagentc /enable` 才行（能进恢复环境，只差配置态）。
+根因：`reagentc` 看 `C:\Windows\System32\Recovery\ReAgent.xml` 的 InstallState + BCD 的 recoverysequence；
+      离线构建没跑过 enable → 两处都是禁用态。
+解法（`winre.auto` 命令）：往系统分区写 `\Windows\Setup\Scripts\SetupComplete.cmd`
+      （内容：`reagentc /enable` + 把 /info 输出存日志），Windows 首次开机自动跑。
+      ★ 不离线写 ReAgent.xml：里面是 `GLOBALROOT\...\partition**N**` 写死的分区号，换机会失效；
+        让官方工具在目标机器上自己探测+写才跨机器安全。参考流水线已加 ⑦ 步。
+
 ### 回归入口（改完代码先跑它）
 ```bash
 tests/run_all.sh      # 7 套：cmd_test 27 条 · corrupt-chain · fd 15 条 · thread 4 组 · cancel 7 条 · bcd · recovery_bcd

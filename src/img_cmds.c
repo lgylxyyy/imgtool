@@ -700,6 +700,66 @@ static int cmd_img_clone(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+/* ================= 命令 6f：winre.auto（WinRE 出厂自动启用脚本）====================
+ * 背景（用户实测 + 官方查证）：离线拼的盘里 ReAgent.xml 是禁用态、OS 条目缺
+ * recoverysequence → reagentc /info 显示 Disabled，要用户手动 reagentc /enable。
+ * ★ 官方机制：reagentc /enable 会写 ReAgent.xml + BCD 恢复序列，且支持 offline；
+ *   但它会按【目标机器实际分区号】写 GLOBALROOT 路径 —— 我们在镜像里写死分区号会换机失效。
+ *   所以走"首次开机自动启用"：往系统分区放 SetupComplete.cmd（Windows 部署的官方脚本位），
+ *   首次启动时以 SYSTEM 权限自动跑 reagentc /enable —— 官方工具自己探测+自己写，跨机器安全。
+ * ★ 层归属：机制不是政策 —— 默认写（enable=true），App 可传 false 删除脚本。*/
+static const img_arg A_WINRE_AUTO[] = {
+    {"img",    IMG_A_STR, true,  NULL,   "镜像路径（qcow2）", NULL},
+    {"lba",    IMG_A_U64, true,  NULL,   "Windows 系统分区（NTFS）起始 LBA", chk_lba},
+    {"enable", IMG_A_BOOL,false, "true", "true=写开机自动启用脚本；false=删除它", NULL},
+};
+/* 内容必须是 ASCII + CRLF（cmd.exe 按 OEM/ANSI 读取；带 BOM 或 UTF-8 中文会乱） */
+static const char WINRE_SCRIPT[] =
+    "@echo off\r\n"
+    "rem imgtool: auto-enable Windows RE on first boot (official mechanism: reagentc writes\r\n"
+    "rem          ReAgent.xml + BCD recoverysequence for THIS machine's partition layout)\r\n"
+    "reagentc /enable\r\n"
+    "reagentc /info > \"%SystemRoot%\\Temp\\winre-enable.log\" 2>&1\r\n"
+    "exit /b 0\r\n";
+static int cmd_winre_auto(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba=img_args_u64(in,"lba",0);
+    bool enable = img_args_bool(in,"enable",true);
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){
+            pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+    img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL","/Windows","系统分区不是合法 NTFS",NULL); return IMG_ESTATE; }
+    const char *path="/Windows/Setup/Scripts/SetupComplete.cmd";
+    if(enable){
+        img_span sp;
+        img_span_prep(&sp,"winre","write","写入 WinRE 自启用脚本");
+        img_span_kv_str(&sp,"path",path);
+        img_span_begin(&sp);
+        img_ntfs_mkdir_p(fs,"/Windows/Setup/Scripts");   /* 目录不存在则建（默认不存在）*/
+        rc=img_ntfs_put_file_mem(fs,WINRE_SCRIPT,sizeof WINRE_SCRIPT-1,path);
+        img_span_end(&sp,rc);
+        if(rc){ img_ntfs_umount(fs);
+                img_result_fail(out,rc,"FAT-PUT-FAIL",path,"脚本写入失败（卷只读/空间不足）",NULL); return rc; }
+        img_result_bool(out,"written",true);
+        img_result_u64(out,"bytes",sizeof WINRE_SCRIPT-1);
+    } else {
+        if(img_ntfs_path_exists(fs,path)){
+            rc=img_ntfs_rm(fs,path);
+            if(rc){ img_ntfs_umount(fs);
+                    img_result_fail(out,rc,"FAT-RM-FAIL",path,"删除脚本失败",NULL); return rc; }
+        }
+        img_result_bool(out,"removed",true);
+    }
+    img_ntfs_umount(fs);
+    return IMG_OK;
+}
+
 /* ================= 命令 6：ctl.cancel（请求取消当前操作） =================
  * ★ 用法：另一个线程调用它（或 App 直接调 img_cancel()）。取消是【协作式】的：
  *   正在跑的操作在自己的检查点（每 1MiB/每个目录项前）看到标志就退出，
@@ -745,6 +805,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_NTFSREN,(int)(sizeof A_NTFSREN/sizeof A_NTFSREN[0]), cmd_ntfs_rename},
     {"img.clone", "1.0", "克隆保留分区到新盘（不列的分区留空 → 换系统主路径；旧镜像自动改名/校验/回滚）",
         A_IMGCLONE,(int)(sizeof A_IMGCLONE/sizeof A_IMGCLONE[0]), cmd_img_clone},
+    {"winre.auto","1.0", "写入/删除【首次开机自动启用 WinRE】脚本（SetupComplete.cmd，官方 reagentc 机制）",
+        A_WINRE_AUTO,(int)(sizeof A_WINRE_AUTO/sizeof A_WINRE_AUTO[0]), cmd_winre_auto},
     {"ctl.cancel","1.0", "请求取消正在执行的操作（另一线程调用；协作式，下一个检查点生效）",
         NULL, 0, cmd_ctl_cancel},
     {"cmd.list",  "1.0", "导出命令表（名字/参数规格/帮助）——App 可据此自动生成界面",

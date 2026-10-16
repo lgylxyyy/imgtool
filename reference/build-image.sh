@@ -149,6 +149,11 @@ else
   echo "  (无恢复分区，跳过)"
 fi
 
+echo "════ ⑦ WinRE 出厂自动启用（SetupComplete.cmd → 首次开机自动 reagentc /enable）════"
+# ★ 官方机制：reagentc /enable 按【目标机器实际分区号】写 ReAgent.xml + BCD 恢复序列，
+#   所以不离线写死 GLOBALROOT 路径（换机分区号会变）→ 让 Windows 首次开机自己跑。
+"$T/imgcmd" winre.auto --img="$OUT" --lba="$OSLBA" --progress=bar
+
 echo "════ ⑦ bccheck ════"
 $T/imgbc "$OUT" --uefi 2>/dev/null | tail -1 | sed 's/^/  /'
 echo

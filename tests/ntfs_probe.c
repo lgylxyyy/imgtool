@@ -134,7 +134,8 @@ int main(int argc, char **argv){
                 while(!ntfs_attr_lookup(AT_FILE_NAME, NULL, 0, 0, 0, NULL, 0, actx)){
                     FILE_NAME_ATTR *f2=(FILE_NAME_ATTR*)((u8*)actx->attr + le16_to_cpu(actx->attr->value_offset));
                     char nm[64]; int ml=(int)f2->file_name_length; if(ml>31) ml=31;
-                    for(int i=0;i<ml;i++) nm[i]=(char)(f2->file_name[i]&0x7f); nm[ml]=0;
+                    for(int i=0;i<ml;i++) nm[i]=(char)(f2->file_name[i]&0x7f);
+                    nm[ml]=0;
                     printf("  [walk]  name=%s parent=%llu type=%u\n", nm,
                            (unsigned long long)MREF_LE(f2->parent_directory),
                            (unsigned)f2->file_name_type);

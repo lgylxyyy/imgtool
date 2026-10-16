@@ -152,6 +152,7 @@ App 传 check_size=on  → 事前"需要 vs 剩余"，不够就提前拒（无�
 | `part.scan` | 扫描分区（App 弹不弹提示的依据）| `img` `lba` 必填 → 返回 level(0/1/2)/fs/label/cluster_bytes/entries_root/used_bytes/free_bytes/looks_like_windows |
 | `ntfs.list` | 列 NTFS 目录（给 App 名单）| `img` `lba` 必填；`path=/` 可选 → count/names(JSON 数组) |
 | `ntfs.rename` | 搬移原语：把【给定名单】移进目标目录 | `img` `lba` `dst` `names` 必填 → moved/dir_used（冲突自动 .001）|
+| `winre.auto` | 写/删 WinRE 出厂自动启用脚本（SetupComplete.cmd）| `img` `lba`(系统分区) 必填；`enable=true` 可选 → written/bytes 或 removed |
 | `img.clone` | 克隆保留分区到新盘（换系统主路径）| `img` `keep` 必填；`guid=random` `keep_old=false` `old_name` 可选 → bytes_written/parts_copied/old_kept |
 | `wim.apply` | 灌入 WIM/ESD 到分区（**默认先格式化**防残留；`--format=off` 保留原分区） | `img` `lba` `wim` 必填；`index=1` `format=on` `label=Windows` `no_acls` `no_attrs` `wimboot` 可选 |
 | `wim.size` | 空间估算 | `wim` 必填；`index=1` 可选（命令见 §五） |

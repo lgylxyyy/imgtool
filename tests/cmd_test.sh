@@ -165,6 +165,28 @@ check_err "img.clone 保留名单含坏 LBA" "CMD-ARG-BAD" \
 after=$(md5sum "$W/clone.qcow2" | cut -c1-32)
 [ "$before" = "$after" ] && ok "预检失败 → 源文件一字节未动" || ng "源文件被改了！"
 
+echo "════ 4d. winre.auto（WinRE 出厂自动启用脚本）════"
+$T/imglayout mk "$W/winre.qcow2" $((20*1024*1024*1024)) gpt --esp 200 --msr 16 >/dev/null 2>&1
+WE=$($T/imgpart show "$W/winre.qcow2" | python3 -c "
+import sys,json; d=json.load(sys.stdin)
+print([p['first'] for p in d['parts'] if p['typeGuid'].startswith('ebd0a0a2')][0])")
+$T/imgntfsfs "$W/winre.qcow2" $WE format Windows >/dev/null 2>&1
+j=$("$T/imgcmd" winre.auto --img="$W/winre.qcow2" --lba=$WE)
+wb=$(echo "$j" | jq_ "d['data']['bytes']")
+[ -n "$wb" ] && [ "$wb" -gt 0 ] && ok "winre.auto 写入脚本（$wb 字节）" || ng "写入失败"
+$T/imgntfsfs "$W/winre.qcow2" $WE export /Windows/Setup/Scripts/SetupComplete.cmd /tmp/wr.cmd >/dev/null 2>&1
+grep -q "reagentc /enable" /tmp/wr.cmd && ok "脚本内容含 reagentc /enable" || ng "内容不对"
+LC_ALL=C grep -qP '[^\x09\x0A\x0D\x20-\x7E]' /tmp/wr.cmd && ng "脚本含非 ASCII 字节" || ok "脚本纯 ASCII（cmd.exe 按 OEM 读，带 BOM/UTF-8 会乱）"
+grep -q $'\r$' /tmp/wr.cmd && ok "行尾 CRLF（Windows 要求）" || ng "行尾不是 CRLF"
+$T/imgntfsfs "$W/winre.qcow2" $WE exists /Windows/Setup/Scripts/SetupComplete.cmd 2>&1 | grep -q "是" && \
+  ok "上游 ntfsls 复核：路径存在" || ng "路径不存在"
+"$T/imgcmd" winre.auto --img="$W/winre.qcow2" --lba=$WE --enable=false >/dev/null 2>&1
+$T/imgntfsfs "$W/winre.qcow2" $WE exists /Windows/Setup/Scripts/SetupComplete.cmd 2>&1 | grep -q "否" && \
+  ok "enable=false 删除成功" || ng "删除失败"
+"$T/imgcmd" winre.auto --img="$W/winre.qcow2" --lba=$WE >/dev/null 2>&1
+$T/imgntfsfs "$W/winre.qcow2" $WE exists /Windows/Setup/Scripts/SetupComplete.cmd 2>&1 | grep -q "是" && \
+  ok "再写回幂等" || ng "重写失败"
+
 echo "════ 5. 日志（--log）：里程碑 + 错误都落盘，且逐行可解析 ════"
 $T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src="$W/blob.bin" --dst=/EFI/blob2.bin \
     --log="$W/run.log" --log-level=info >/dev/null 2>&1

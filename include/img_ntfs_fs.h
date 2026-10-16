@@ -68,6 +68,10 @@ int img_ntfs_list_dir(img_ntfs_fs *fs, const char *abs_path,
 int img_ntfs_free_bytes(img_ntfs_fs *fs, uint64_t *out_free, uint64_t *out_used);
 /* 卷标（无卷标 → 空串；失败返回 <0） */
 int img_ntfs_label(img_ntfs_fs *fs, char *out, size_t cap);
+/* 删除单个文件或【空】目录（复用 libntfs-3g 的 ntfs_delete；
+ * ★ 先 sync 父目录再删 —— 否则 ntfs_delete 收尾会读到未落盘的目录项（move_into 踩过）。
+ * 非空目录返回 IMG_ESTATE（不递归删，避免误删整棵树）。 */
+int img_ntfs_rm(img_ntfs_fs *fs, const char *abs_path);
 /* 搬移原语：把【给定名字】移进 dst_dir（dst_dir 不存在则先建）
  * ★ 层归属：这是机制不是政策 —— 搬谁由调用方（App）给名单；
  *   搬完每个名字保持不变（/Windows → /Windows.old/Windows）。

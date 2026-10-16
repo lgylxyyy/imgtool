@@ -510,6 +510,43 @@ int img_ntfs_label(img_ntfs_fs *fs, char *out, size_t cap){
  *   2) ntfs_delete 【会消费】传入的 ni 与 dir_ni（无论成败，内部都 close 掉），
  *      调用方绝不能再碰它们；下一轮要重新 open。
  *   3) 删除失败时根目录旧名还在（数据没丢），只需回滚目标目录里多出的链接。*/
+int img_ntfs_rm(img_ntfs_fs *fs, const char *abs_path){
+    if(!fs||!fs->mounted||!abs_path||!abs_path[0]||!strcmp(abs_path,"/")||!abs_path[1])
+        return IMG_EINVAL;
+    const char *slash=strrchr(abs_path,'/');
+    if(!slash||!slash[1]) return IMG_EINVAL;
+    static char parent[512], name[256];
+    size_t plen=(size_t)(slash-abs_path);
+    if(plen==0){ snprintf(parent,sizeof parent,"/"); }
+    else{ if(plen>=sizeof parent) return IMG_EINVAL;
+          memcpy(parent,abs_path,plen); parent[plen]=0; }   /* ★起点是 abs_path 不是 slash（抄错过→乱码路径→ENOENT）*/
+    if(strlen(slash+1)>=sizeof name) return IMG_EINVAL;
+    snprintf(name,sizeof name,"%s",slash+1);
+
+    ntfschar *u=NULL; size_t ul=0;
+    if(!to_ntfs(name,&u,&ul)) return IMG_EINVAL;
+    ntfs_inode *dir_ni=lookup(fs->vol,parent,NULL);
+    if(!dir_ni){ free(u); return IMG_ENOENT; }
+    errno=0;
+    MFT_REF ref=ntfs_inode_lookup_by_name(dir_ni,u,ul);
+    if(!mftref_ok(ref)){ ntfs_inode_close(dir_ni); free(u); return IMG_ENOENT; }
+    ntfs_inode *ni=ntfs_inode_open(fs->vol,ref);
+    if(!ni){ ntfs_inode_close(dir_ni); free(u); return IMG_EIO; }
+    /* ★ 只删文件，不删目录（当前唯一用途：删 SetupComplete.cmd 这类脚本文件）。
+     *   目录一律拒绝 —— 递归删的误操作比"删不掉"可怕得多；将来真需要再按索引判空。*/
+    if(ni->mrec->flags & MFT_RECORD_IS_DIRECTORY){
+        ntfs_inode_close(ni); ntfs_inode_close(dir_ni); free(u);
+        return IMG_ENOTSUP;
+    }
+    errno=0;
+    /* ★ 先 sync 父目录（落盘）再删 —— move_into 里"本次事故的根因"就是少这一步 */
+    (void)ntfs_inode_sync(dir_ni);
+    int dr=ntfs_delete(fs->vol, abs_path, ni, dir_ni, u, (u8)ul); /* 消费 ni + dir_ni */
+    free(u);
+    if(dr!=0) return (errno==ENOENT)?IMG_ENOENT:IMG_EIO;
+    return IMG_OK;
+}
+
 int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
                        const char **names, int nnames, int *moved_out){
     if(moved_out) *moved_out=0;
