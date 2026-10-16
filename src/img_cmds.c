@@ -996,6 +996,57 @@ static int cmd_mbrboot(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+/* ================= 命令 6j：part.layout（BIOS/MBR 标准布局生成器）====================
+ * 产出：系统保留(活动,0x07) → 系统(0x07) → 恢复(0x27) → 扩展分区(0x0F, 含一个逻辑分区)
+ * ★ 层归属：这是"机制"——尺寸/名字由参数给；默认值只是 CLI 兜底（App 显式传）。
+ * ★ EBR：img_parttable_write 负责写 EBR 链；读表时自动跟链补全逻辑分区。*/
+static const img_arg A_PARTLAYOUT[] = {
+    {"img",       IMG_A_STR,  true,  NULL,  "镜像路径（qcow2，会被建/重写分区表）", NULL},
+    {"sr-mb",     IMG_A_U64,  false, "100", "系统保留分区大小（MiB，活动）", NULL},
+    {"sys-gb",    IMG_A_U64,  true,  NULL,  "系统分区大小（GiB）", NULL},
+    {"rec-gb",    IMG_A_U64,  true,  NULL,  "恢复分区大小（GiB，类型 0x27，紧随系统之后）", NULL},
+    {"logical-name", IMG_A_STR, false, "Data", "扩展分区内逻辑分区的卷标", NULL},
+};
+static int cmd_part_layout(img_ctx *ctx, const img_args *in, img_result *out){
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    uint64_t disk_sectors = img_qcow2_size(q)/512u;
+    uint64_t sr_mb=img_args_u64(in,"sr-mb",100), sys_gb=img_args_u64(in,"sys-gb",0),
+             rec_gb=img_args_u64(in,"rec-gb",0);
+    if(!sys_gb||!rec_gb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","sys-gb","系统/恢复大小必填",NULL); return IMG_EINVAL; }
+    const uint64_t MiB=1024u*1024u, GiB=1024u*1024u*1024u, align=2048;
+    uint64_t sr_sec=sr_mb*MiB/512, sys_sec=sys_gb*GiB/512, rec_sec=rec_gb*GiB/512;
+    img_parttable_t t; memset(&t,0,sizeof t);
+    t.table=IMG_TABLE_MBR; t.disk_sectors=disk_sectors;
+    uint64_t off=align; int idx, rc;
+    if((rc=img_partition_add(&t,off,sr_sec,IMG_MBR_NTFS_EXFAT,NULL,"System Reserved",true,&idx))!=IMG_OK)
+        return img_result_fail(out,rc,"CMD-ARG-BAD","sr-mb","系统保留分区建不了（太小/越界）",NULL), rc;
+    off+=sr_sec;
+    if((rc=img_partition_add(&t,off,sys_sec,IMG_MBR_NTFS_EXFAT,NULL,"Windows",false,&idx))!=IMG_OK)
+        return img_result_fail(out,rc,"CMD-ARG-BAD","sys-gb","系统分区建不了",NULL), rc;
+    off+=sys_sec;
+    if((rc=img_partition_add(&t,off,rec_sec,IMG_MBR_RECOVERY,NULL,"Recovery",false,&idx))!=IMG_OK)
+        return img_result_fail(out,rc,"CMD-ARG-BAD","rec-gb","恢复分区建不了",NULL), rc;
+    off+=rec_sec;
+    /* 扩展分区：吃掉剩余（EBR 占扩展区头 2048 扇区，逻辑分区从 +2048 起）*/
+    uint64_t ext_start=(off+align-1)/align*align;
+    if(disk_sectors<=ext_start+align*2) return img_result_fail(out,IMG_EFULL,"CMD-ARG-BAD","img","剩余空间不够建扩展分区",NULL), IMG_EFULL;
+    if((rc=img_partition_add(&t,ext_start,disk_sectors-ext_start,IMG_MBR_EXTENDED_L,NULL,"Extended",false,&idx))!=IMG_OK)
+        return img_result_fail(out,rc,"CMD-ARG-BAD","img","扩展分区建不了",NULL), rc;
+    const char *lname=img_args_get(in,"logical-name"); if(!lname||!lname[0]) lname="Data";
+    int lidx=img_partition_add_logical(&t, ext_start+align, disk_sectors-ext_start-align,
+                                       IMG_MBR_NTFS_EXFAT, lname);
+    if(lidx<0){ img_result_fail(out,(img_err_t)lidx,"CMD-ARG-BAD","img","逻辑分区建不了",NULL); return lidx; }
+    /* 随机磁盘签名（★ 换新盘不该沿用源盘签名）*/
+    uint32_t sig=0; { FILE *ur=fopen("/dev/urandom","rb"); if(ur){ if(fread(&sig,1,4,ur)!=4) sig=0; fclose(ur);} if(!sig) sig=0x22334455; }
+    t.disk_signature=sig;
+    rc=img_parttable_write(q,&t);
+    if(rc){ img_result_fail(out,rc,"PART-READ-FAIL",NULL,"写分区表失败",NULL); return rc; }
+    img_result_u64(out,"disk_signature",sig);
+    img_result_u64(out,"parts_total",5);      /* 3 主 + 1 扩展 + 1 逻辑 */
+    return IMG_OK;
+}
+
 /* ================= 命令 6：ctl.cancel（请求取消当前操作） =================
  * ★ 用法：另一个线程调用它（或 App 直接调 img_cancel()）。取消是【协作式】的：
  *   正在跑的操作在自己的检查点（每 1MiB/每个目录项前）看到标志就退出，
@@ -1049,6 +1100,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_PARTCOPY,(int)(sizeof A_PARTCOPY/sizeof A_PARTCOPY[0]), cmd_part_copy},
     {"part.mbrboot","1.0", "写 MBR 引导码（参考件）+ 随机磁盘签名（没有它 BIOS 会报「找不到操作系统」）",
         A_MBRBOOT,(int)(sizeof A_MBRBOOT/sizeof A_MBRBOOT[0]), cmd_mbrboot},
+    {"part.layout","1.0", "BIOS/MBR 标准布局生成器（系统保留+系统+恢复0x27+扩展分区含逻辑分区）",
+        A_PARTLAYOUT,(int)(sizeof A_PARTLAYOUT/sizeof A_PARTLAYOUT[0]), cmd_part_layout},
     {"fat.exists", "1.0", "查 FAT32 路径是否存在（断点续跑探测原语）",
         A_FATEXISTS,(int)(sizeof A_FATEXISTS/sizeof A_FATEXISTS[0]), cmd_fat_exists},
     {"ctl.cancel","1.0", "请求取消正在执行的操作（另一线程调用；协作式，下一个检查点生效）",
