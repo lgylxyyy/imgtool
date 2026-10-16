@@ -158,8 +158,9 @@ static void session_flush(void){
 }
 
 /* ---------- 输出（日志 + 屏幕各一份） ---------- */
-static void pump(const char *line,size_t n,img_lv_t lv){
-    if(log_on(lv)){
+/* force=true：无视 --log-level 一律写（ERROR 本来就总是过；cancel 需要它）*/
+static void pump(const char *line,size_t n,img_lv_t lv,bool force){
+    if(force || log_on(lv)){
         img_lock_t *lk=img_global_lock();   /* ★ 并发写日志会交错成半行/坏 JSON */
         img_lock_acquire(lk);
         write_all(G.fd,line,n);
@@ -418,7 +419,8 @@ void img_ev_emit(img_ev *e){
     if(w.p<w.end) *w.p++='\n';
     size_t n=(size_t)(w.p-buf);
     if(G.fd>=0) session_flush();       /* 先补会话行，再写事件 */
-    pump(buf,n,e->lv);
+    {   int lvl_e = (e->lv==IMG_LV_ERROR) || (e->ev && !strcmp(e->ev,"cancel"));
+        pump(buf,n,e->lv,(bool)lvl_e);   /* ERROR / cancel：任何日志级别都不丢 */ }
     if(e->lv<=ring_lv) img_ring_add(buf);
     if(g_text_cb) g_text_cb(e, g_text_ud);   /* ★ 文案归消费端（CLI/App 各用自己的语言表）*/
 }
@@ -449,9 +451,17 @@ void img_span_begin(img_span *s){
 void img_span_end(img_span *s,int rc){
     if(!s) return;
     if(g_depth>0) g_depth--;
+    /* ★ 三种收尾，语义分开（用户取消既不是"完成"也不是"出错"）：
+     *   rc==0          → event=done   （INFO）
+     *   rc==ECANCELLED → event=cancel （WARN；且任何日志级别都不丢 —— 操作没做完必须留痕）
+     *   其它           → event=fail   （ERROR）
+     *   调用方（CLI/App）据此区分"用户点了停止"和"真的坏了"。*/
+    img_lv_t    lv  = (rc==0) ? IMG_LV_INFO  : (rc==IMG_ECANCELLED ? IMG_LV_WARN : IMG_LV_ERROR);
+    const char *evn = (rc==0) ? "done"       : (rc==IMG_ECANCELLED ? "cancel"    : "fail");
     img_ev e;
-    if(!img_ev_init(&e,IMG_LV_INFO,s->mod,"done",rc,IMG_OK==rc?"":NULL)) return;
+    if(!img_ev_init(&e,lv,s->mod,evn,rc,NULL)) return;
     img_ev_str(&e,"action",s->op);
+    if(rc==IMG_ECANCELLED) img_ev_str(&e,"error_code","CMD-CANCELLED");
     img_ev_i64(&e,"duration_ms",now_ms()-s->t0);
     img_ev_emit(&e);
 }

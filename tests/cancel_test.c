@@ -69,6 +69,10 @@ int main(int argc,char**argv){
     if(!g_q || img_qcow2_write_init(g_q)!=IMG_OK){ printf("❌ qcow2\n"); return 1; }
     g_lba=lba; g_src=argv[3];
 
+    /* 先清场：同一张盘重复跑时，上一轮留下的文件会让"不留半成品"的断言假失败 */
+    { img_fat32_fs *fs=img_fat32_mount(g_q,lba,true);
+      if(fs){ img_fat32_rm(fs,"/EFI/cancelled.bin"); img_fat32_unmount(fs); } }
+
     printf("════ ① 写入中途取消 ════\n");
     img_cancel_reset();
     uint64_t base=free_now();

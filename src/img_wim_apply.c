@@ -79,6 +79,7 @@ int img_wim_list_images(const char *wim_path, char *buf, int cap){
 /* ★ wimlib 1.14 的头文件声明了 wimlib_get_error_string()，但发行版的 libwim.so
  *   并没有导出这个符号（链接期 undefined reference）。我们只需要一句人话 + 错误码，
  *   自己给一条，避免依赖一个"声明存在但符号缺失"的 API。*/
+static const char *wim_rc_str(int r) __attribute__((unused));
 static const char *wim_rc_str(int r){
     static char b[64];
     snprintf(b,sizeof b,"wimlib 错误码 %d",r);
@@ -172,10 +173,14 @@ int img_wim_apply(const char *wim_path, int image_idx,
     r = wimlib_extract_image(w, image_idx, dummy, ef);
     wimlib_free(w);
     img_ntfs_ctx_deactivate();
-    img_span_end(&wsp, r? IMG_EIO : IMG_OK);
-    if(r){
-        if(prog) img_prog_done(prog, wim_rc_str(r));
-        return IMG_EIO;
+    /* ★ 是我们主动取消导致的失败 → 报 IMG_ECANCELLED（不要报 I/O 失败）：
+     *   取消是通过 ntfs_device 回调返回 ECANCELED 穿透 wimlib 的，
+     *   wimlib 只会笼统报"读写失败"，调用方无法区分"磁盘坏了"和"用户点了停止"。*/
+    int frc = r ? (img_cancelled() ? IMG_ECANCELLED : IMG_EIO) : IMG_OK;
+    img_span_end(&wsp, frc);
+    if(frc!=IMG_OK){
+        if(prog) img_prog_done(prog, img_strerror(frc));
+        return frc;
     }
     if(prog) img_prog_done(prog, "WIM 灌入完成");
     return IMG_OK;

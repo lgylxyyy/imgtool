@@ -77,6 +77,18 @@ FAT    真正的问题所在：多处 `while(c>=2 && c<FAT32_EOC)` 沿链走，
 | C 命令表骨架 | ✅ `a2a35cc` | `--list`（App 生成界面用）/`--help` 自动生成/统一信封/22 条验收全绿 |
 | B 并发 + fd 契约 | ✅ `5914928` | `fd_test` 15 条 · `thread_test` 4 组全绿；契约见 DESIGN-OUTPUT.md 第七节 |
 
+### WIM 直灌实测（2026-10-16，真 ESD 6.86GB）
+```bash
+tests/wim-apply-test.sh        # 或 WITH_WIM=1 tests/run_all.sh
+```
+| 路径 | 结果 |
+|---|---|
+| 完整灌入 | rc=0；日志 `begin(wim/index/part_lba)` → `done duration_ms=`；**抽回 ntoskrnl.exe 13,862,384 字节、PE 头 MZ** ✓ |
+| 中途取消（6s） | rc=-13 `IMG_ECANCELLED`，5,995 ms 内停下；日志 `event=cancel level=WARN error_code=CMD-CANCELLED` ✓ |
+| 镜像完好性 | 两条路径后 `qemu-img check` 均无错 ✓ |
+> ⚠ 耗时波动大（60s / 71s / 461s 三次实测）：沙箱 swap 吃紧时 qcow2 写路径会被拖慢，
+> 不是代码回归；真机（KVM/hvf）上会稳定得多。
+
 ### 回归入口（改完代码先跑它）
 ```bash
 tests/run_all.sh      # 7 套：cmd_test 27 条 · corrupt-chain · fd 15 条 · thread 4 组 · cancel 7 条 · bcd · recovery_bcd

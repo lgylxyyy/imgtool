@@ -68,6 +68,8 @@ static const ETX E_TEXT[] = {                      /* 错误码 → 原因 / 建
                  "先用 imgwimls 列出索引","List indexes first with imgwimls"},
     {"WIM-IDX-INVALID","镜像索引不存在","Image index does not exist",
                  "先用 imgwimls 列出索引，再带 --index=N","List indexes first, then pass --index=N"},
+    {"CMD-CANCELLED","操作已取消（用户点了停止）","Operation cancelled by the user",
+                 "目标分区/文件可能停在半写状态，请重做该步骤","The target may be half-written; redo this step"},
     {NULL,NULL,NULL,NULL,NULL}
 };
 static const char *txt_act(const char *a){        /* 动作名 */
@@ -120,6 +122,11 @@ static void on_event(const img_ev *e, void *ud){
                              lang_en()?"failed":"失败", img_strerror(e->rc));
         else      n=snprintf(b,sizeof b,"%s %s %s", lang_en()?"ok":"✔", act,
                              lang_en()?"done":"完成");
+        if(ms>=0) n+=snprintf(b+n,sizeof b-(size_t)n," (%lld ms)",ms);
+    } else if(!strcmp(e->ev,"cancel")){
+        long long ms=ev_num_fld(e,"duration_ms",-1);
+        n=snprintf(b,sizeof b,"%s %s %s", lang_en()?"stop":"⏹", act,
+                   lang_en()?"cancelled":"已取消");
         if(ms>=0) n+=snprintf(b+n,sizeof b-(size_t)n," (%lld ms)",ms);
     } else if(!strcmp(e->ev,"alive")){
         if(ev_num_fld(e,"stuck_ms",-1)>=0) return;   /* 疑似卡死：不刷屏 */

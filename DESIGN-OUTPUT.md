@@ -39,7 +39,7 @@ time="2026-10-15 18:39:30.900" level=ERROR logger=cmd event=fail rc=-10 error_co
 | `level` | `ERROR`/`WARN`/`INFO`/`DEBUG`/`TRACE` | slog / zap / logfmt 通吃 |
 | `logger` | 模块（`fat32`/`ntfs`/`bcd`/`part`/`app`…） | logfmt 常用 `logger=` 或 `component=` |
 | `tool` | 哪个程序（`imgmkfs`…，只在会话行出现一次） | — |
-| `event` | 生命周期：`session`/`begin`/`done`/`fail`/`alive` | 结构化日志惯例："event = 发生了什么" |
+| `event` | 生命周期：`session`/`begin`/`done`/**`cancel`**/`fail`/`alive` | 惯例："event = 发生了什么"。**取消是独立事件**（`WARN` 级、必写、带 `error_code=CMD-CANCELLED`），不与"完成/出错"混用 |
 | `action` | 具体操作：`format`/`put`/`save`/`check`… | 审计日志惯用 `action` |
 | `message` | 人话一句话 | Python/R logfmt 用 `message`（Go 用 `msg`）|
 | `rc` | 返回码（0=成功，负值=`img_err_t`） | C/Unix 通用缩写（用户选定保留）|

@@ -352,7 +352,7 @@ int img_ntfs_put_file(img_ntfs_fs *fs, const char *local_path,
     for(;;){
         if(img_cancelled()){ rc=IMG_ECANCELLED; break; }   /* ★ 取消检查点（每 1MiB 一次）*/
         ssize_t r = read(fd, buf, CHUNK);
-        if(r<0){ rc=IMG_EIO; break; }
+        if(r<0){ rc = img_cancelled() ? IMG_ECANCELLED : IMG_EIO; break; }
         if(r==0) break;
         s64 w = ntfs_attr_pwrite(na, done, r, buf);
         if(w != r){ rc=(errno==ENOSPC)?IMG_EFULL:IMG_EIO; break; }

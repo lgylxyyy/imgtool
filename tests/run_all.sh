@@ -50,6 +50,13 @@ if [ -x "$ROOT/build/tests/recovery_bcd_test" ]; then
   else skipped=$((skipped+1)); echo "  ⏭ 跳过 recovery_bcd_test（缺官方 ISO BCD 参考）"; fi
 else skipped=$((skipped+1)); echo "  ⏭ 跳过 recovery_bcd_test（没编进构建）"; fi
 
+# 重型测试（默认跳过，需要时：WITH_WIM=1 tests/run_all.sh）
+if [ "${WITH_WIM:-0}" = "1" ]; then
+  run "wim-apply-test（WIM 直灌 + 中途取消，1~8 分钟）" bash "$ROOT/tests/wim-apply-test.sh"
+else
+  skipped=$((skipped+1)); echo "  ⏭ 跳过 wim-apply-test（重型；要跑：WITH_WIM=1 tests/run_all.sh）"
+fi
+
 echo
 echo "════ 总计：通过 $pass · 失败 $fail · 跳过 $skipped ════"
 if [ $fail -eq 0 ]; then echo "✅ 全量回归通过"; rm -rf "$W"; else echo "❌ 有失败（调试目录 $W 保留）"; fi

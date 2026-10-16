@@ -23,7 +23,7 @@ import sys,json;d=json.load(sys.stdin);print([p['sectors'] for p in d['parts'] i
 echo "  ESP LBA=$ESP_LBA 扇区=$ESP_SEC"
 $T/imgmkfs "$IMG" --mkfs "$ESP_LBA" "TEST" >/dev/null 2>&1 || { echo "格式化失败"; exit 2; }
 printf '/workspace/bootx64.efi\t/EFI/Boot/bootx64.efi\n/etc/hostname\t/EFI/hello.txt\n' > "$W/man.txt"
-/tmp/fatput "$IMG" "$ESP_LBA" "$W/man.txt" >/dev/null || { echo "灌文件失败（先编 /tmp/fatput）"; exit 2; }
+"${T%/tools}/tests/fatput" "$IMG" "$ESP_LBA" "$W/man.txt" >/dev/null || { echo "灌文件失败"; exit 2; }
 $T/imgdump "$IMG" $((ESP_LBA*512)) $((ESP_SEC*512)) > "$W/esp.raw"
 
 echo "════ 1. 正向对照（没改坏之前必须都正常）════"
@@ -54,7 +54,7 @@ PY
 $T/imgraw write "$IMG" $((ESP_LBA*512)) "$W/corrupt_dir.raw" >/dev/null
 t0=$(date +%s.%N)
 timeout 8 $T/imgfatfs "$IMG" "$ESP_LBA" ls /EFI >"$W/o1.txt" 2>&1; rc=$?
-t1=$(date +%s.%N); dt=$(echo "$t1-$t0"|bc)
+t1=$(date +%s.%N); dt=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.2f", b-a}')
 if [ $rc -eq 124 ]; then ng "目录链成环 → timeout 8 秒未返回（仍在死循环！）"
 else ok "目录链成环 → ${dt}s 内返回 rc=$rc (输出: $(tail -1 "$W/o1.txt" | tr -d '\r' | cut -c1-40))"; fi
 
@@ -81,7 +81,7 @@ PY
 $T/imgraw write "$IMG" $((ESP_LBA*512)) "$W/esp2.raw" >/dev/null
 t0=$(date +%s.%N)
 timeout 8 $T/imgfatfs "$IMG" "$ESP_LBA" rm "/EFI/Boot/bootx64.efi" >"$W/o2.txt" 2>&1; rc=$?
-t1=$(date +%s.%N); dt=$(echo "$t1-$t0"|bc)
+t1=$(date +%s.%N); dt=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.2f", b-a}')
 if [ $rc -eq 124 ]; then ng "文件链成环时 rm → timeout 8 秒未返回（free_chain 死循环）"
 else ok "文件链成环时 rm → ${dt}s 内返回 rc=$rc"; fi
 

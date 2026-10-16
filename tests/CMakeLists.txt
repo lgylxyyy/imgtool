@@ -38,3 +38,9 @@ target_link_libraries(thread_test PRIVATE imgtool)
 
 add_executable(cancel_test cancel_test.c)
 target_link_libraries(cancel_test PRIVATE imgtool)
+
+add_executable(wim_apply_test wim_apply_test.c)
+target_link_libraries(wim_apply_test PRIVATE imgtool)
+
+add_executable(fatput fatput.c)
+target_link_libraries(fatput PRIVATE imgtool)
