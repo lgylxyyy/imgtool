@@ -169,6 +169,18 @@ CLI：`--io-timeout-ms=N`（env `IMGTOOL_IO_TIMEOUT_MS`）；默认 30000。
 VBR 用 img_fixboot）→ 官方 winre.wim/boot.sdi 放 0x27 分区 + BIOS 恢复条目 → RunOnce 离线写入
 （libhivex 改 SOFTWARE hive，写 `!WinRE-Enable` 值）→ SeaBIOS 实测进桌面+进恢复环境。
 
+### MBR/BIOS 引导 —— CHS 非法导致 Windows 不认分区（2026-10-16 用户 PE 实测发现）
+**症状**：PE 里磁盘管理显示"磁盘 0：未知/128GB/没有初始化"、整盘"未分配"（Windows 不认分区表），
+而 sfdisk 却能正常读出全部分区（两套校验标准不同）。
+**根因**：MBR 分区表项的【起始 CHS】写的是 `00 00 00` —— CHS 扇区号是 1-based，
+**0 是非法值** → Windows 判分区表损坏 → "未初始化"。代码里注释写着"起始 CHS：用真实计算"但**根本没实现**。
+**修复**：`lba_to_chs()`（255头/63扇区）算真实 CHS，越界用合法哨兵 `fe ff ff`（段=63 ≥1）；
+主表 + EBR 链接项都修。**字节级证据**：修复后项1 = `80 20 21 00 07 7f 39 06 …`
+与 diskB（Windows 认的盘）**逐字节相同**（LBA2048→磁头32/扇区33/柱面0；末扇区→柱面6/磁头127/扇区57）。
+**未解决的下一环**：bootmgr→winload 仍 0xc000000e（CHS 不是它的原因）。
+排除清单：Windows 内容/文件 md5/偏移/签名/BCD绝对偏移/扩展分区/主备启动扇区/克隆完整性 —— 全部一致。
+下一步：等用户手动 `bcdboot C:\Windows /s S: /f BIOS` 修好 → 逐字节 diff 出真差异 → 写进工具。
+
 ### 回归入口（改完代码先跑它）
 ```bash
 tests/run_all.sh      # 7 套：cmd_test 27 条 · corrupt-chain · fd 15 条 · thread 4 组 · cancel 7 条 · bcd · recovery_bcd

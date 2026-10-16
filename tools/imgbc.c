@@ -48,7 +48,7 @@ int main(int argc,char**argv){
     fputs(buf, stdout);
     char sum[256];
     img_bootcheck_summary(&r, sum, sizeof sum);
-    printf("%s\n", sum);
+    fprintf(stderr, "%s\n", sum);   /* ★ stdout 留给 JSON 行，中文汇总去 stderr（否则污染机器输出）*/
     return r.n_required_fail;   /* 退出码 = 必需项未通过数 */
 #endif /* IMG_WITH_NTFS3G */
 }

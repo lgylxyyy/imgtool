@@ -65,6 +65,13 @@ if(IMG_WITH_WIM)
   target_link_libraries(imgwimls PRIVATE imgtool wim)
 endif()
 
+# ★ 离线写 RunOnce（需要 libhivex，同 imggenbcd 的依赖方式）
+if(HIVEX_LIB)
+  add_executable(imgrunonce imgrunonce.c)
+  target_include_directories(imgrunonce PRIVATE ${HIVEX_INC})
+  target_link_libraries(imgrunonce PRIVATE imgtool ${HIVEX_LIB})
+endif()
+
 # ★ imgcmd 是入口命令，任何配置都要有（缺库时命令仍在表里，报 FEATURE-UNAVAILABLE）
 add_executable(imgcmd imgcmd.c)
 target_link_libraries(imgcmd PRIVATE imgtool)

@@ -333,16 +333,32 @@ int img_parttable_free_regions(const img_parttable_t *t, uint64_t total_sectors,
 /* 写入                                                                */
 /* ------------------------------------------------------------------ */
 /* 由分区项构造 16 字节 MBR 条目 */
+/* LBA → CHS（255 头 / 63 扇区 的标准 HDD 几何；超范围用合法哨兵 fe ff ff）
+ * ★ 血泪教训（2026-10-16，用户 PE 实测）：起始 CHS 写 00 00 00 →
+ *   CHS 扇区号是 1-based，0 是【非法值】→ Windows 磁盘管理判"分区表损坏"：
+ *   盘显示"没有初始化、全部未分配"（Windows 不认），而 sfdisk 却能读（两套校验标准不同）。
+ *   diskB（Windows 认的盘）实测：LBA2048 → 20 21 00（磁头32/扇区33/柱面0）与本函数算出的完全一致。*/
+static void lba_to_chs(uint64_t lba, uint8_t out[3]){
+    const uint64_t heads=255, spt=63, per_cyl=heads*spt;
+    uint64_t cyl=lba/per_cyl, rest=lba%per_cyl;
+    uint64_t head=rest/spt, sect=rest%spt+1;
+    if(cyl>1023 || head>255 || sect>63){       /* 超出 CHS 表达范围 → 行业哨兵（段=63 合法）*/
+        out[0]=0xfe; out[1]=0xff; out[2]=0xff;
+        return;
+    }
+    out[0]=(uint8_t)head;
+    out[1]=(uint8_t)((sect & 0x3F) | ((cyl>>8)<<6));
+    out[2]=(uint8_t)(cyl & 0xFF);
+}
 static void build_mbr_entry(const img_partition_t *p, uint8_t e[16]){
     memset(e,0,16);
     e[0] = p->status;
     e[4] = p->type;
     wle32(e+8, (uint32_t)p->first_lba);
     wle32(e+12, (uint32_t)(p->last_lba>=p->first_lba ? p->last_lba-p->first_lba+1 : 0));
-    /* CHS 字段：现代实现只用 LBA；这里按规范填"超出范围"哨兵，避免算错 CHS 溢出 */
-    /* 起始 CHS：用真实计算（安全，磁道内）
-       结束 CHS：扇区数>1024*255*63 时填 fe ff ff（行业惯例哨兵）*/
-    e[5]=0xfe; e[6]=0xff; e[7]=0xff;
+    lba_to_chs(p->first_lba, e+1);              /* 起始 CHS：真值（★不能是 00 00 00）*/
+    if(p->last_lba < 0xFFFFFFFFull) lba_to_chs(p->last_lba, e+5);   /* 结束 CHS：真值 */
+    else { e[5]=0xfe; e[6]=0xff; e[7]=0xff; }   /* >4G-1 无法表达 → 哨兵 */
 }
 
 static int write_mbr(img_qcow2 *q, img_parttable_t *t){
@@ -398,6 +414,7 @@ static int write_mbr(img_qcow2 *q, img_parttable_t *t){
                 wle32(e1+8, (uint32_t)(next-ebr));
                 wle32(e1+12, (uint32_t)(next-ebr));
                 memcpy(eb+446+16, e1, 16);
+                lba_to_chs(0, e1+1); lba_to_chs(0, e1+5);   /* CHS 哨兵（越界 → fe ff ff；★不能全零）*/
             } else {
                 /* 最后一段：段大小覆盖到本段逻辑分区结束 */
                 uint8_t e1[16]; memset(e1,0,16);
@@ -405,6 +422,7 @@ static int write_mbr(img_qcow2 *q, img_parttable_t *t){
                 wle32(e1+8, (uint32_t)(lp.last_lba-ebr+1));
                 wle32(e1+12, (uint32_t)(lp.last_lba-ebr+1));
                 memcpy(eb+446+16, e1, 16);
+                lba_to_chs(0, e1+1); lba_to_chs(0, e1+5);   /* CHS 哨兵（越界 → fe ff ff；★不能全零）*/
             }
             eb[510]=0x55; eb[511]=0xaa;
             rc=img_qcow2_write(q, ebr*512ULL, eb, 512);
