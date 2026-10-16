@@ -113,6 +113,26 @@ tests/wim-apply-test.sh        # 或 WITH_WIM=1 tests/run_all.sh
   4. imgcmd 曾被"整块门"误吞 → 入口命令独立出块（任何配置必须有）
   5. imgntfsfs/imgntfscp 链 mkntfs 对象 → 门从 NTFS3G 改挂 NTFS
 
+### 32 位（armhf）验证 —— 2026-10-16 完成（核心层）
+复现配方（本沙箱实测可用）：
+```bash
+DEBIAN_FRONTEND=noninteractive apt-get install -y gcc-arm-linux-gnueabihf qemu-user-static
+cmake -B /tmp/b-arm32 -S . -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc \
+      -DIMG_WITH_WIM=OFF -DIMG_WITH_NTFS3G=OFF -DIMG_BUILD_TESTS=OFF
+qemu-arm-static -L /usr/arm-linux-gnueabihf /tmp/b-arm32/tools/imgcmd ...
+```
+实测（ELF 32-bit ARM，size_t=4 字节）：
+| 场景 | 结果 |
+|---|---|
+| 建 20GB 盘（64 位偏移）| ✅ size=21474836480，分区/GUID 正确 |
+| FAT 格式化 + put 50MB（1MiB 分块）| ✅ size 精确，**md5 与源逐字节一致** |
+| part.scan / fat.exists | ✅ level=2、free_bytes、size 全对 |
+| img.clone（ESP + 19.9GB 分区）| ✅ rc=0、稀疏生效（写 3MB）、2 分区 |
+| 静态审计 | ✅ 无 `long` 存 64 位偏移、无 `%ld` 打 64 位（全程 uint64_t/`%llu`）|
+**未覆盖**：NTFS 层的 32 位实测 —— noble 源里没有 `libntfs-3g-dev:armhf`。
+风险评估：NTFS 路径全程用 libntfs-3g 自己的 s64/u64（显式 64 位），我方代码同为 uint64_t；
+真机（arm32 Android，从源码编 ntfsprogs）上做一次 WIM 灌入冒烟即可闭环。
+
 ### 回归入口（改完代码先跑它）
 ```bash
 tests/run_all.sh      # 7 套：cmd_test 27 条 · corrupt-chain · fd 15 条 · thread 4 组 · cancel 7 条 · bcd · recovery_bcd

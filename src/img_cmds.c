@@ -461,6 +461,7 @@ static const img_arg A_NTFSLIST[] = {
     {"lba",  IMG_A_U64, true,  NULL, "NTFS 分区起始 LBA", chk_lba},
     {"path", IMG_A_STR, false, "/",  "要列的目录（绝对路径，默认根目录）", NULL},
 };
+#if IMG_WITH_NTFS3G
 #define NTFS_LIST_MAX 4096
 typedef struct { char *b; size_t cap, len; int n; bool truncated; } list_buf_t;
 static void list_json_cb(void *ud, const char *name, bool is_dir, uint64_t size){
@@ -479,6 +480,7 @@ static void list_json_cb(void *ud, const char *name, bool is_dir, uint64_t size)
     if(a->len+(size_t)k+2 < a->cap){ memcpy(a->b+a->len,item,(size_t)k); a->len+=(size_t)k; a->n++; }
     else a->truncated=true;
 }
+#endif /* IMG_WITH_NTFS3G */
 static int cmd_ntfs_list(img_ctx *ctx, const img_args *in, img_result *out){
     if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 目录枚举）","重新编译时开启该功能并安装对应系统库");
 #if IMG_WITH_NTFS3G
@@ -755,6 +757,7 @@ static const img_arg A_WINRE_AUTO[] = {
     {"lba",    IMG_A_U64, true,  NULL,   "Windows 系统分区（NTFS）起始 LBA", chk_lba},
     {"enable", IMG_A_BOOL,false, "true", "true=写开机自动启用脚本；false=删除它", NULL},
 };
+#if IMG_WITH_NTFS3G
 /* 内容必须是 ASCII + CRLF（cmd.exe 按 OEM/ANSI 读取；带 BOM 或 UTF-8 中文会乱） */
 static const char WINRE_SCRIPT[] =
     "@echo off\r\n"
@@ -763,6 +766,7 @@ static const char WINRE_SCRIPT[] =
     "reagentc /enable\r\n"
     "reagentc /info > \"%SystemRoot%\\Temp\\winre-enable.log\" 2>&1\r\n"
     "exit /b 0\r\n";
+#endif /* IMG_WITH_NTFS3G */
 static int cmd_winre_auto(img_ctx *ctx, const img_args *in, img_result *out){
     if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（WinRE 自启用脚本）","重新编译时开启该功能并安装对应系统库");
 #if IMG_WITH_NTFS3G

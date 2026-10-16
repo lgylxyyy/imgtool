@@ -61,12 +61,6 @@ if(IMG_WITH_ZLIB)
 endif()
 
 # ---- 核心静态库 ----
-# ---- wimlib（WIM/ESD 解压；img_wim_apply.c 依赖它，所以要作为库的真实依赖声明）----
-find_library(WIM_LIB wim)
-if(NOT WIM_LIB)
-  message(WARNING "libwim 未找到 → WIM/ESD 相关功能（img_wim_apply / wim.size 命令）不可用")
-endif()
-
 # ---- 库缺失降级判定（wim / ntfs-3g）----
 if(IMG_WITH_NTFS3G)
   find_path(NTFS3G_INC ntfs-3g/volume.h)   # Linux 侧主头（ntfsvolume.h 是 Windows 侧的）
@@ -115,7 +109,10 @@ if(IMG_WITH_NTFS3G)
   # 17 项启动自检只需 libntfs-3g（此前被错绑在 mkntfs 开关下 → 默认构建里 imgbc 链接失败）
   target_sources(imgtool       PRIVATE src/img_bootcheck.c)
 endif()
-target_link_libraries(imgtool PUBLIC ${IMG_ZLIB_LIBS} Threads::Threads ${WIM_LIB})
+target_link_libraries(imgtool PUBLIC ${IMG_ZLIB_LIBS} Threads::Threads)
+if(IMG_WITH_WIM AND WIM_LIB)
+  target_link_libraries(imgtool PUBLIC ${WIM_LIB})
+endif()
 
 # ---- 共享库（Android .so）----
 add_library(imgtool_shared SHARED ${IMG_SOURCES})
@@ -125,7 +122,10 @@ if(IMG_WITH_NTFS3G)
   target_link_libraries(imgtool_shared PUBLIC ${NTFS3G_LIB})
   target_sources(imgtool_shared PRIVATE src/img_bootcheck.c)
 endif()
-target_link_libraries(imgtool_shared PUBLIC ${IMG_ZLIB_LIBS} Threads::Threads ${WIM_LIB})
+target_link_libraries(imgtool_shared PUBLIC ${IMG_ZLIB_LIBS} Threads::Threads)
+if(IMG_WITH_WIM AND WIM_LIB)
+  target_link_libraries(imgtool_shared PUBLIC ${WIM_LIB})
+endif()
 
 # ---- 工具 / 测试 ----
 if(IMG_BUILD_TOOLS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/CMakeLists.txt)
