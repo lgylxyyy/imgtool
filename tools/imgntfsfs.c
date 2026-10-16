@@ -105,7 +105,11 @@ int main(int argc,char**argv){
         }
     } else if(!strcmp(cmd,"exists")){
             printf("  exists %s: %s\n", argv[4], img_ntfs_path_exists(fs,argv[4])?"是":"否");
-        } else { printf("未知命令\n"); rc=1; }
+        } else if(!strcmp(cmd,"ls")){        /* ls <目录> —— 用【上游 ntfsls】列（独立实现对拍用） */
+        if(argc<5){ printf("用法: ls <目录>\n"); rc=IMG_EINVAL; }
+        else { printf("  ── 上游 ntfsls 列目录 %s ──\n", argv[4]);
+               upstream_ls(q,lba,pb, argv[4]); }
+    } else { printf("未知命令\n"); rc=1; }
         img_ntfs_umount(fs);
     }
     /* 用上游工具复核 */

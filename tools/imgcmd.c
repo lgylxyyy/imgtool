@@ -48,6 +48,8 @@ static const ETX E_TEXT[] = {                      /* 错误码 → 原因 / 建
                  "镜像可能损坏，用 imgq2test 校验","Image may be corrupt; verify with imgq2test"},
     {"FAT-DIR-NOTFOUND","目录不存在","Directory does not exist",
                  "核对路径（FAT 不区分大小写，但要写全名）","Check the path (case-insensitive, but needs the full name)"},
+    {"FAT-ENTRY-NOTFOUND","要操作的名字不在目录里（可能已被移动或拼写有误）","The entry does not exist (moved already, or a typo)",
+                 "先用 ntfs.list 看一眼目录里有什么","List the directory first (ntfs.list) to see what's there"},
     {"FAT-RM-FAIL","删除失败","Failed to delete",
                  "只允许删空目录；非空请先删掉里面的文件","Only empty directories can be removed"},
     {"SRC-NOTFOUND","源文件打不开（不存在或无权限）","Cannot open the source file",

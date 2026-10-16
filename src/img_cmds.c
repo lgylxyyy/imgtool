@@ -11,10 +11,12 @@
 #include "img_event.h"
 #include "img_wim_apply.h"
 #include "img_ntfs_fmt.h"
+#include "img_ntfs_fs.h"   /* part.scan / ntfs.list / ntfs.rename */
 #include "img_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>  /* strcasecmp（Windows/Android 都可用）*/
 #include <time.h>
 
 static long long now_ms_(void){
@@ -334,6 +336,226 @@ static int cmd_wim_apply_cmd(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+/* ================= 命令 6b：part.scan（分区扫描 —— App 判断"有没有数据"的依据）====================
+ * ★ 层归属（PARTITION-POLICY #11/#13）：这里只出【事实】，弹窗/按钮/文案全归 App。
+ *   三级口径（用户点名要对拍验证）：
+ *     level 0  无文件系统（空白/未格式化）        → App：直接装
+ *     level 1  有文件系统，但根目录是空的         → App：直接装（别打扰用户）
+ *     level 2  有文件系统 + 根目录非空            → App：弹三选
+ *   附加 looks_like_windows（根目录有 \Windows）→ App 决定提示文案用不用。
+ * 只读语义：FAT 用只读挂载；NTFS 走 libntfs-3g 挂载但不写任何数据。 */
+static const img_arg A_PARTSCAN[] = {
+    {"img", IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
+    {"lba", IMG_A_U64, true, NULL, "要扫描的分区起始 LBA", chk_lba},
+};
+typedef struct { int n; bool win; } scan_acc_t;
+static void scan_count_cb(void *ud, const char *name, bool is_dir, uint64_t size){
+    (void)is_dir; (void)size;
+    scan_acc_t *a=(scan_acc_t*)ud;
+    if(a->n < 1000000) a->n++;
+    if(name && !strcasecmp(name,"Windows")) a->win = true;
+}
+static int cmd_part_scan(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba=img_args_u64(in,"lba",0);
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    img_parttable_t *t=NULL;
+    int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){
+            pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+    img_result_u64(out,"lba",lba);
+    img_result_u64(out,"bytes",pb);
+
+    /* 读引导扇区判文件系统（NTFS 在 +3 的 "NTFS    "；FAT 系看 +0x52 / +3）*/
+    unsigned char bs[512]={0};
+    rc=img_qcow2_read_full(q, lba*512, bs, sizeof bs);
+    if(rc!=IMG_OK){ img_result_fail(out,rc,"PART-READ-FAIL",NULL,NULL,NULL); return rc; }
+    bool is_ntfs = !memcmp(bs+3,"NTFS    ",8);
+    bool is_fat  = !memcmp(bs+0x52,"FAT32   ",8) || (!memcmp(bs+3,"FAT",3) && !is_ntfs);
+    uint64_t spc = bs[0x0D];
+    if(spc) img_result_u64(out,"cluster_bytes", (uint64_t)spc*512);
+    if(!is_ntfs && !is_fat){
+        img_result_str(out,"fs","none");                    /* level 0：空白/未格式化 */
+        img_result_i64(out,"level",0);
+        img_result_bool(out,"has_data",false);
+        return IMG_OK;
+    }
+    scan_acc_t acc={0,false};
+    if(is_ntfs){
+        img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
+        if(!fs){ img_result_str(out,"fs","unknown"); img_result_i64(out,"level",-1);
+                 img_result_bool(out,"has_data",false); return IMG_OK; }
+        int lr=img_ntfs_list_dir(fs,"/",scan_count_cb,&acc);
+        uint64_t free_b=0, used_b=0;
+        if(img_ntfs_free_bytes(fs,&free_b,&used_b)!=IMG_OK){ free_b=0; used_b=0; }
+        char lab[64]=""; if(img_ntfs_label(fs,lab,sizeof lab)!=IMG_OK) lab[0]=0;
+        img_ntfs_umount(fs);
+        if(lr!=IMG_OK){ img_result_str(out,"fs","unknown"); img_result_i64(out,"level",-1);
+                        img_result_bool(out,"has_data",false); return IMG_OK; }
+        img_result_str(out,"fs","NTFS");
+        if(lab[0]) img_result_str(out,"label",lab);
+        img_result_u64(out,"free_bytes",free_b);
+        img_result_u64(out,"used_bytes",used_b);
+    } else {
+        img_fat32_fs *fs=img_fat32_mount(q,lba,false);       /* 只读：扫描不该改盘 */
+        if(!fs){ img_result_str(out,"fs","unknown"); img_result_i64(out,"level",-1);
+                 img_result_bool(out,"has_data",false); return IMG_OK; }
+        img_fat32_list_dir(fs,"/",scan_count_cb,&acc);
+        uint64_t free_b=img_fat32_free_bytes(fs);
+        char lab[12]={0}; memcpy(lab,bs+0x47,11);            /* BPB 卷标（11 字节，可能 "NO NAME"）*/
+        for(int i=0;i<11;i++) if(lab[i]==' ') lab[i]=0;
+        img_fat32_unmount(fs);
+        img_result_str(out,"fs","FAT32");
+        if(lab[0] && strcmp(lab,"NO NAME")) img_result_str(out,"label",lab);
+        img_result_u64(out,"free_bytes",free_b);
+        img_result_u64(out,"used_bytes", pb>free_b?pb-free_b:0);
+    }
+    int level = (acc.n==0) ? 1 : 2;                          /* 有卷但空 / 有文件 */
+    img_result_i64(out,"level",level);
+    img_result_i64(out,"entries_root",acc.n);
+    img_result_bool(out,"has_data", level==2);
+    img_result_bool(out,"looks_like_windows", acc.win);
+    return IMG_OK;
+}
+
+/* ================= 命令 6c：ntfs.list（列目录 —— App 拿名单自己决定搬谁/显示什么）====================
+ * 层归属：给名单的"事实"能力；不带任何"搬谁"的政策（PARTITION-POLICY §四.2）。*/
+static const img_arg A_NTFSLIST[] = {
+    {"img",  IMG_A_STR, true,  NULL, "镜像路径（qcow2）", NULL},
+    {"lba",  IMG_A_U64, true,  NULL, "NTFS 分区起始 LBA", chk_lba},
+    {"path", IMG_A_STR, false, "/",  "要列的目录（绝对路径，默认根目录）", NULL},
+};
+#define NTFS_LIST_MAX 4096
+typedef struct { char *b; size_t cap, len; int n; bool truncated; } list_buf_t;
+static void list_json_cb(void *ud, const char *name, bool is_dir, uint64_t size){
+    list_buf_t *a=(list_buf_t*)ud;
+    if(a->n >= NTFS_LIST_MAX){ a->truncated=true; return; }
+    char item[640];
+    /* name 里可能有引号/反斜杠 → 手写转义（与日志同一套规则）*/
+    int k=snprintf(item,sizeof item,"%s{\"name\":\"", a->n?",":"");
+    for(const unsigned char *p=(const unsigned char*)name; *p && k<(int)sizeof item-32; p++){
+        if(*p=='"'||*p=='\\') item[k++]='\\', item[k++]=(char)*p;
+        else if(*p<0x20) k+=snprintf(item+k,sizeof item-(size_t)k,"\\u%04x",*p);
+        else item[k++]=(char)*p;
+    }
+    k+=snprintf(item+k,sizeof item-(size_t)k,"\",\"dir\":%s,\"size\":%llu}",
+                is_dir?"true":"false",(unsigned long long)size);
+    if(a->len+(size_t)k+2 < a->cap){ memcpy(a->b+a->len,item,(size_t)k); a->len+=(size_t)k; a->n++; }
+    else a->truncated=true;
+}
+static int cmd_ntfs_list(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *path=img_args_get(in,"path"); if(!path||!*path) path="/";
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){
+            pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+    img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL",path,"不是合法 NTFS（未格式化或 LBA 不对）",NULL);
+             return IMG_ESTATE; }
+    static char jbuf[256*1024];
+    list_buf_t acc={jbuf,sizeof jbuf,0,0,false};
+    rc=img_ntfs_list_dir(fs,path,list_json_cb,&acc);
+    img_ntfs_umount(fs);
+    if(rc!=IMG_OK){ img_result_fail(out,rc,"FAT-LS-FAIL",path,"目录读不出（路径不对或卷损坏）",NULL); return rc; }
+    img_result_u64(out,"count",(uint64_t)acc.n);
+    img_result_bool(out,"truncated",acc.truncated);
+    if(!acc.len){ memcpy(jbuf,"[]",2); acc.len=2; }
+    else{                                             /* ★ 补方括号（裸项拼接不是合法 JSON —— 实测踩过）*/
+        if(acc.len+2 >= (int)sizeof jbuf) acc.len=(int)sizeof jbuf-3;
+        memmove(jbuf+1,jbuf,acc.len);
+        jbuf[0]='['; jbuf[acc.len+1]=']'; acc.len+=2; jbuf[acc.len]=0;
+    }
+    img_result_raw(out,"names",jbuf);
+    return IMG_OK;
+}
+
+/* ================= 命令 6d：ntfs.rename（搬移原语 —— 把【给定名单】移进目标目录）====================
+ * ★ 层归属：机制不是政策。搬谁 = App 传名单（通常来自 ntfs.list / part.scan）；
+ *   目标目录名必填、工具不设默认（默认名归 App，PARTITION-POLICY #4）。
+ * 机制细节：目标名冲突自动编号 .001/.002…（与 Windows 的 Windows.old.001 行为一致）。*/
+static const img_arg A_NTFSREN[] = {
+    {"img",   IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
+    {"lba",   IMG_A_U64, true, NULL, "NTFS 分区起始 LBA", chk_lba},
+    {"dst",   IMG_A_STR, true, NULL, "目标目录名（如 Windows.old；冲突自动编号）", NULL},
+    {"names", IMG_A_STR, true, NULL, "要搬动的顶层名，逗号分隔（如 Windows,Program Files,Users）", NULL},
+};
+static int cmd_ntfs_rename(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *dst=img_args_get(in,"dst"), *names=img_args_get(in,"names");
+    if(!dst||!dst[0]||dst[0]!='/'){ /* 允许给裸名，补成根路径 */
+        static char dstp[256];
+        if(!dst||!dst[0]||strchr(dst,'/')==NULL){
+            snprintf(dstp,sizeof dstp,"/%s",(dst&&dst[0])?dst:"");
+            dst=dstp;
+        } else { img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","dst","路径必须以 / 开头且不带尾斜杠",NULL); return IMG_EINVAL; }
+    }
+    if(!names||!names[0]){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","names","名单不能为空",NULL); return IMG_EINVAL; }
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){
+            pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+    img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL",dst,"不是合法 NTFS（未格式化或 LBA 不对）",NULL);
+             return IMG_ESTATE; }
+    /* 预检：名单里的顶层名必须存在 —— 否则给专属错误码（"名字不存在"≠"搬移失败"，
+     * 之前混在一起，排查时分不出"打错字"和"卷坏了"）*/
+    { static char nbuf0[64*208]; snprintf(nbuf0,sizeof nbuf0,"%s",names);
+      for(char *tok=strtok(nbuf0,","); tok; tok=strtok(NULL,",")){
+        while(*tok==' ') tok++;
+        if(!*tok) continue;
+        char full[256]; snprintf(full,sizeof full,"/%s",tok);
+        if(!img_ntfs_path_exists(fs,full)){
+            img_ntfs_umount(fs);
+            img_result_fail(out,IMG_ENOENT,"FAT-ENTRY-NOTFOUND",full,"这个顶层名不在根目录里（可能已被搬走或拼错）",NULL);
+            return IMG_ENOENT;
+        }
+      } }
+    /* 目标名冲突 → 自动编号 .001/.002…（机制，不是政策）*/
+    static char final[256]; snprintf(final,sizeof final,"%s",dst);
+    if(img_ntfs_path_exists(fs,final)){
+        bool found=false;
+        for(int i=1;i<=999;i++){
+            snprintf(final,sizeof final,"%.250s.%03d",dst,i);
+            if(!img_ntfs_path_exists(fs,final)){ found=true; break; }
+        }
+        if(!found){ img_ntfs_umount(fs);
+                    img_result_fail(out,IMG_EFULL,"CMD-ARG-BAD","dst","编号到 .999 仍冲突",NULL); return IMG_EFULL; }
+    }
+    /* 名单：逗号分隔 → 数组（上限 64 项，每项 ≤200 字节）*/
+    static char nbuf[64*208]; const char *list[64]; int nn=0;
+    snprintf(nbuf,sizeof nbuf,"%s",names);
+    for(char *tok=strtok(nbuf,","); tok && nn<64; tok=strtok(NULL,",")){
+        while(*tok==' ') tok++;
+        if(!*tok) continue;
+        list[nn++]=tok;
+    }
+    if(!nn){ img_ntfs_umount(fs);
+             img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","names","名单解析后为空",NULL); return IMG_EINVAL; }
+    int moved=0;
+    rc=img_ntfs_move_into(fs,final,list,nn,&moved);
+    img_ntfs_umount(fs);
+    if(rc!=IMG_OK){ img_result_fail(out,rc,"FAT-RM-FAIL",final,"搬移失败（名字不存在/只读/卷损坏）",NULL); return rc; }
+    img_result_u64(out,"moved",(uint64_t)moved);
+    img_result_u64(out,"requested",(uint64_t)nn);
+    img_result_str(out,"dir_used",final);
+    return IMG_OK;
+}
+
 /* ================= 命令 6：ctl.cancel（请求取消当前操作） =================
  * ★ 用法：另一个线程调用它（或 App 直接调 img_cancel()）。取消是【协作式】的：
  *   正在跑的操作在自己的检查点（每 1MiB/每个目录项前）看到标志就退出，
@@ -371,6 +593,12 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_WIMSIZE,(int)(sizeof A_WIMSIZE/sizeof A_WIMSIZE[0]), cmd_wim_size},
     {"wim.apply","1.0", "灌入 WIM/ESD 到分区（默认先格式化目标分区防残留；--format=off 保留原分区）",
         A_WIMAPPLY,(int)(sizeof A_WIMAPPLY/sizeof A_WIMAPPLY[0]), cmd_wim_apply_cmd},
+    {"part.scan", "1.0", "扫描分区：文件系统/容量/根目录有没有文件（App 弹不弹提示的依据，三级口径）",
+        A_PARTSCAN,(int)(sizeof A_PARTSCAN/sizeof A_PARTSCAN[0]), cmd_part_scan},
+    {"ntfs.list", "1.0", "列 NTFS 目录（给 App 名单：显示什么/搬谁由 App 决定）",
+        A_NTFSLIST,(int)(sizeof A_NTFSLIST/sizeof A_NTFSLIST[0]), cmd_ntfs_list},
+    {"ntfs.rename","1.0", "把【给定名单】的顶层项移进目标目录（冲突自动编号 .001；工具不设默认名）",
+        A_NTFSREN,(int)(sizeof A_NTFSREN/sizeof A_NTFSREN[0]), cmd_ntfs_rename},
     {"ctl.cancel","1.0", "请求取消正在执行的操作（另一线程调用；协作式，下一个检查点生效）",
         NULL, 0, cmd_ctl_cancel},
     {"cmd.list",  "1.0", "导出命令表（名字/参数规格/帮助）——App 可据此自动生成界面",
