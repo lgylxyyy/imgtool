@@ -876,6 +876,126 @@ static int cmd_fat_exists(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+/* ================= 命令 6h：part.copy（跨镜像扇区级拷贝分区 —— GPT→MBR 迁移的搬运工）====================
+ * 场景：用户给一块能启动的 GPT 盘，要把它的【系统分区内容】搬到新 MBR 盘的某个分区里。
+ * ★ 源只读、目标稀疏（全零块跳过）、1MiB 分块（不整分区进内存）。
+ * ★ 层归属：机制不是政策 —— 拷哪个分区、放哪，是 App/流水线的事。*/
+static const img_arg A_PARTCOPY[] = {
+    {"img",       IMG_A_STR, true,  NULL, "目标镜像路径（qcow2，已建好布局）", NULL},
+    {"src",       IMG_A_STR, true,  NULL, "源镜像路径（只读打开，绝不修改）", NULL},
+    {"src-lba",   IMG_A_U64, true,  NULL, "源分区起始 LBA", chk_lba},
+    {"dst-lba",   IMG_A_U64, true,  NULL, "目标分区起始 LBA", chk_lba},
+    {"size-bytes",IMG_A_U64, false, NULL, "拷贝字节数（缺省=min(源分区,目标分区)大小）", NULL},
+};
+static int cmd_part_copy(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t slba=img_args_u64(in,"src-lba",0), dlba=img_args_u64(in,"dst-lba",0);
+    const char *src_path=img_args_get(in,"src");
+    img_qcow2 *dq=img_ctx_qcow2(ctx);
+    if(!dq){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    img_parttable_t *dt=NULL; int rc=img_ctx_parttable(ctx,&dt);
+    if(rc||!dt) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+    img_parttable_t st; {   /* 源：只读打开（★ 全程不写源，是这类迁移安全性的根）*/
+        img_io_opts_t o={0};
+        img_io *sfi=img_io_open_path(src_path,&o);
+        if(!sfi){ img_result_fail(out,IMG_ENOENT,"IMG-OPEN-FAIL",src_path,"源镜像打不开（路径/权限）",NULL); return IMG_ENOENT; }
+        img_qcow2_opts_t qo={0};
+        img_qcow2 *sq=img_qcow2_open(sfi,&qo);
+        if(!sq){ img_io_close(sfi); img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",src_path,"源不是合法 qcow2",NULL); return IMG_EFORMAT; }
+        rc=img_parttable_read(sq,&st,0);
+        if(rc==IMG_OK){
+            img_partition_t *sp=NULL;
+            for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+                if(st.parts[i].used && st.parts[i].first_lba==slba){ sp=&st.parts[i]; break; }
+            img_partition_t *dp=NULL;
+            for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+                if(dt->parts[i].used && dt->parts[i].first_lba==dlba){ dp=&dt->parts[i]; break; }
+            if(!sp||!dp){
+                rc=IMG_EINVAL;
+                img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD", !sp?"src-lba":"dst-lba",
+                                 "该 LBA 不在对应盘的分区表里",NULL);
+            } else {
+                uint64_t sbytes=(sp->last_lba - sp->first_lba + 1)*512u;
+                uint64_t dbytes=(dp->last_lba - dp->first_lba + 1)*512u;
+                uint64_t n=img_args_u64(in,"size-bytes",0);
+                if(!n || n>sbytes) n=sbytes;
+                if(n>dbytes){
+                    rc=IMG_EINVAL;
+                    img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","size-bytes",
+                                     "目标分区装不下这么大的内容（要扩分区/重排布局）",NULL);
+                }
+                if(rc==IMG_OK){
+                    unsigned char *buf=malloc(1024*1024), *zero=calloc(1,1024*1024);
+                    if(!buf||!zero){ rc=IMG_ENOMEM; }
+                    else{
+                        img_span sp2;
+                        img_span_prep(&sp2,"part","copy","跨镜像拷贝分区");
+                        img_span_kv_u64(&sp2,"src_lba",slba);
+                        img_span_kv_u64(&sp2,"dst_lba",dlba);
+                        img_span_kv_u64(&sp2,"size_bytes",n);
+                        img_span_begin(&sp2);
+                        uint64_t done=0, written=0;
+                        while(done<n && rc==IMG_OK){
+                            size_t k=(size_t)((n-done)<(1024*1024)?(n-done):(1024*1024));
+                            rc=img_qcow2_read_full(sq, slba*512u+done, buf, k);
+                            if(rc==IMG_OK && memcmp(buf,zero,k)!=0){   /* ★ 全零跳过（保持稀疏）*/
+                                rc=img_qcow2_write(dq, dlba*512u+done, buf, k);
+                                if(rc==IMG_OK) written+=k;
+                            }
+                            done+=k;
+                        }
+                        img_span_end(&sp2,rc);
+                        if(rc==IMG_OK){
+                            img_result_u64(out,"bytes_copied",done);
+                            img_result_u64(out,"bytes_written",written);  /* 跳零后实际落盘 */
+                        }
+                    }
+                    free(buf); free(zero);
+                }
+            }
+        }
+        img_qcow2_close(sq); img_io_close(sfi);
+    }
+    if(rc!=IMG_OK && out->ok) img_result_fail(out,rc,"PART-COPY-FAIL",NULL,"跨镜像拷贝失败",NULL);
+    return rc;
+}
+
+/* ================= 命令 6i：part.mbrboot（写 MBR 引导码 + 磁盘签名）====================
+ * MBR 的前 440 字节是 BIOS 要执行的引导码；空码 = "Operating System not found"。
+ * 引导码内容来自【参考件】（如 reference/mbr-code-bios.bin，从真装好 Windows 的 MBR 盘提取），
+ * 与 BCD 参考件同一套"工具不硬编码二进制内容"的规矩。*/
+static const img_arg A_MBRBOOT[] = {
+    {"img",   IMG_A_STR, true,  NULL, "镜像（MBR 分区表）", NULL},
+    {"code",  IMG_A_STR, true,  NULL, "引导码文件（440 字节；如 reference/mbr-code-bios.bin）", NULL},
+    {"sig",   IMG_A_STR, false, NULL, "磁盘签名（8 位十六进制；缺省随机生成）", NULL},
+};
+static int cmd_mbrboot(img_ctx *ctx, const img_args *in, img_result *out){
+    const char *code_path=img_args_get(in,"code");
+    FILE *f=fopen(code_path,"rb");
+    if(!f){ img_result_fail(out,IMG_ENOENT,"SRC-NOTFOUND",code_path,"引导码文件打不开",NULL); return IMG_ENOENT; }
+    unsigned char code[512]={0};
+    size_t got=fread(code,1,sizeof code,f); fclose(f);
+    if(got<440){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","code","引导码文件至少要 440 字节",NULL); return IMG_EINVAL; }
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+    if(t->table!=IMG_TABLE_MBR){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","img","MBR 引导码只能写在 MBR 盘上（当前是 GPT）",NULL);
+        return IMG_EINVAL;
+    }
+    memcpy(t->mbr_code, code, 446);          /* 前 446 字节整体（引导码 + 签名位留给我们填）*/
+    const char *sig_s=img_args_get(in,"sig");
+    uint32_t sig;
+    if(sig_s&&sig_s[0]) sig=(uint32_t)strtoul(sig_s,NULL,16);
+    else { FILE *ur=fopen("/dev/urandom","rb"); sig=0; if(ur){ if(fread(&sig,1,4,ur)!=4) sig=0; fclose(ur);} if(!sig) sig=0x11223344; }
+    t->disk_signature = sig;
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    rc=img_parttable_write(q,t);
+    if(rc){ img_result_fail(out,rc,"PART-READ-FAIL",NULL,"写回分区表失败",NULL); return rc; }
+    img_result_u64(out,"disk_signature",sig);
+    img_result_bool(out,"written",true);
+    return IMG_OK;
+}
+
 /* ================= 命令 6：ctl.cancel（请求取消当前操作） =================
  * ★ 用法：另一个线程调用它（或 App 直接调 img_cancel()）。取消是【协作式】的：
  *   正在跑的操作在自己的检查点（每 1MiB/每个目录项前）看到标志就退出，
@@ -925,6 +1045,10 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_WINRE_AUTO,(int)(sizeof A_WINRE_AUTO/sizeof A_WINRE_AUTO[0]), cmd_winre_auto},
     {"ntfs.exists","1.0", "查 NTFS 路径是否存在（断点续跑探测原语：App 判定步骤做完没）",
         A_NTFSEXISTS,(int)(sizeof A_NTFSEXISTS/sizeof A_NTFSEXISTS[0]), cmd_ntfs_exists},
+    {"part.copy", "1.0", "跨镜像扇区级拷贝分区（GPT→MBR 迁移的搬运工；源只读、目标稀疏）",
+        A_PARTCOPY,(int)(sizeof A_PARTCOPY/sizeof A_PARTCOPY[0]), cmd_part_copy},
+    {"part.mbrboot","1.0", "写 MBR 引导码（参考件）+ 随机磁盘签名（没有它 BIOS 会报「找不到操作系统」）",
+        A_MBRBOOT,(int)(sizeof A_MBRBOOT/sizeof A_MBRBOOT[0]), cmd_mbrboot},
     {"fat.exists", "1.0", "查 FAT32 路径是否存在（断点续跑探测原语）",
         A_FATEXISTS,(int)(sizeof A_FATEXISTS/sizeof A_FATEXISTS[0]), cmd_fat_exists},
     {"ctl.cancel","1.0", "请求取消正在执行的操作（另一线程调用；协作式，下一个检查点生效）",

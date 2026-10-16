@@ -155,6 +155,20 @@ swap 吃紧时 461s 但全程 I/O 连续不断）；无进展超时只盯"连续
 CLI：`--io-timeout-ms=N`（env `IMGTOOL_IO_TIMEOUT_MS`）；默认 30000。
 验证：`tests/timeout_test` 5/5（含 fail-fast）+ 端到端（1ms 触发 IO-TIMEOUT、30s 默认不误杀、0 关闭）。
 
+### MBR/BIOS + RE 盘（进行中，2026-10-16）
+**任务**（用户指定）：GPT→MBR 跨格式迁移 —— 128GB MBR 盘：系统保留 + 系统 64GB（从
+`Windows 11 UEFI.qcow2` 的系统分区**扇区级克隆**，不做 NTFS 扩容）+ 恢复 1GB（0x27，
+官方 winre.wim/boot.sdi）+ **扩展分区**（用户点名要练这块）；一次性脚本用 **RunOnce**
+（源盘已进过桌面 → SetupComplete 那次机会已用掉，只能 RunOnce/Startup+自删）。
+**已完成**：
+- ✅ MBR 引导码参考件 `reference/mbr-code-bios.bin`（从 diskB 提取，440 字节）
+- ✅ `part.copy` 跨镜像扇区级拷贝（源只读/目标稀疏/1MiB 分块）——实测 512MB 分区只落盘 3MB、内容逐字节一致
+- ✅ `part.mbrboot` 写引导码+随机签名——实测 **sfdisk 独立认账**（Disklabel type: dos、Disk identifier、活动标记）
+- ✅ EBR/逻辑分区能力此前已在库里（`img_partition.logical` + `add_logical`）
+**待做**：扩展分区布局的 sfdisk 对拍验证 → BIOS 引导文件布局（bootmgr+\Boot\BCD 到活动分区，
+VBR 用 img_fixboot）→ 官方 winre.wim/boot.sdi 放 0x27 分区 + BIOS 恢复条目 → RunOnce 离线写入
+（libhivex 改 SOFTWARE hive，写 `!WinRE-Enable` 值）→ SeaBIOS 实测进桌面+进恢复环境。
+
 ### 回归入口（改完代码先跑它）
 ```bash
 tests/run_all.sh      # 7 套：cmd_test 27 条 · corrupt-chain · fd 15 条 · thread 4 组 · cancel 7 条 · bcd · recovery_bcd

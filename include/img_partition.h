@@ -63,6 +63,7 @@ typedef enum {
 
 typedef struct {
     bool     used;
+    bool     logical;        /* ★ true = 扩展分区里的逻辑分区（MBR/EBR 链）；读表时自动跟随 EBR 补全 */
     uint64_t first_lba;      /* 含 */
     uint64_t last_lba;       /* 含 */
     uint32_t sectors_hi;     /* (GPT) 保留给 >2^32 */
@@ -116,6 +117,17 @@ int img_parttable_free_regions(const img_parttable_t *t, uint64_t total_sectors,
 int img_parttable_write(img_qcow2 *q, img_parttable_t *t);
 
 /* ---------- 增删改 ---------- */
+/* ★ 扩展分区/逻辑分区（MBR 专属，2026-10-16 补齐）
+ *   规则（与 Windows/diskpart 一致）：
+ *     · 扩展分区 = 4 个主分区之一，类型 0x05 或 0x0F（我们用 0x0F LBA 形式）
+ *     · 每个逻辑分区【前 2048 扇区(1MiB)】处放它的 EBR（扩展引导记录）：
+ *         entry0 = 本段逻辑分区（相对 EBR 的偏移/大小）
+ *         entry1 = 下一段 EBR 的相对偏移（最后一段为 0）
+ *     · 因此【扩展主分区的起点必须 = 第一个逻辑分区起点 - 2048】
+ *   用法：先 img_partition_add(..., IMG_MBR_EXTENDED_L, ...) 建扩展主分区，
+ *         再 img_partition_add_logical(...) 逐个加逻辑分区。 */
+int img_partition_add_logical(img_parttable_t *t, uint64_t first_lba, uint64_t sectors,
+                              img_mbr_type_t type, const char *name);
 /* 新建分区（first=0 表示自动选合适空位）。返回其在 parts 中的下标。 */
 int img_partition_add(img_parttable_t *t, uint64_t first_lba, uint64_t sectors,
                       img_mbr_type_t mbr_type, const char *gpt_type_guid,

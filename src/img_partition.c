@@ -155,6 +155,35 @@ static int read_mbr(img_qcow2 *q, img_parttable_t *t, bool *is_gpt){
         if(p->type == 0xee) gpt = true;
         if(p->used) t->count = i+1;
     }
+    /* ★ 跟随扩展分区的 EBR 链，把逻辑分区补进 parts[]（标记 logical）。
+     *   规则：EBR 里 entry0=本段逻辑分区（相对偏移），entry1=下一段 EBR（相对偏移）。
+     *   任何一处 55AA 缺失 = 链尾/损坏 → 停止（不崩、不无限循环：guard 上限）。*/
+    for(int i=0;i<4;i++){
+        img_partition_t *ext=&t->parts[i];
+        if(!ext->used || (ext->type!=IMG_MBR_EXTENDED && ext->type!=IMG_MBR_EXTENDED_L)) continue;
+        uint64_t ebr=ext->first_lba, ext_end=ext->last_lba;
+        int slot=4, guard=0;
+        while(ebr && ebr<=ext_end && guard++<256 && slot<IMG_MAX_PARTITIONS){
+            uint8_t e[512];
+            int er=img_qcow2_read_full(q, ebr*512ULL, e, 512);
+            if(er!=IMG_OK) return er;
+            if(e[510]!=0x55 || e[511]!=0xaa) break;          /* 链尾或损坏 → 停 */
+            const uint8_t *g0=e+446, *g1=e+446+16;
+            uint32_t rel=le32(g0+8), sz=le32(g0+12);
+            if(g0[4]!=0 && sz!=0){
+                img_partition_t *L=&t->parts[slot++];
+                memset(L,0,sizeof *L);
+                L->used=true; L->logical=true;
+                L->type=g0[4];
+                L->first_lba=ebr+rel;
+                L->last_lba=L->first_lba+sz-1;
+                if(slot>t->count) t->count=slot;
+            }
+            uint32_t nrel=le32(g1+8);
+            if(g1[4]!=0 && nrel!=0) ebr=ebr+nrel;             /* 下一段 EBR（相对） */
+            else break;
+        }
+    }
     t->table = IMG_TABLE_MBR;
     *is_gpt = gpt;
     return IMG_OK;
@@ -335,7 +364,54 @@ static int write_mbr(img_qcow2 *q, img_parttable_t *t){
     /* ★ MBR 最多 4 个主分区，多了要报错（不能静默丢） */
     if(slot==0) return IMG_ESTATE;
     s[510]=0x55; s[511]=0xaa;
-    return img_qcow2_write(q, 0, s, 512);
+    int rc = img_qcow2_write(q, 0, s, 512);   /* 先写 MBR，再写 EBR 链 */
+    if(rc!=IMG_OK) return rc;
+
+    /* ★ EBR 链：给每个逻辑分区写它前 2048 扇区处的 EBR
+     *   entry0 = 本段逻辑分区（相对偏移 2048）
+     *   entry1 = 下一段 EBR 的相对偏移（最后一段 0，段大小覆盖到本段末尾） */
+    {
+        int nlog=0; int idx[IMG_MAX_PARTITIONS];
+        for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+            if(t->parts[i].used && t->parts[i].logical && nlog<IMG_MAX_PARTITIONS) idx[nlog++]=i;
+        /* 按 first_lba 排序（EBR 链必须顺序） */
+        for(int a=1;a<nlog;a++) for(int b=a;b>0 &&
+                t->parts[idx[b]].first_lba < t->parts[idx[b-1]].first_lba; b--){
+            int tmp=idx[b]; idx[b]=idx[b-1]; idx[b-1]=tmp;
+        }
+        for(int k=0;k<nlog;k++){
+            uint64_t lba=t->parts[idx[k]].first_lba;
+            if(lba<2048) return IMG_EINVAL;              /* 前面要有 EBR 的位置 */
+            uint64_t ebr=lba-2048;
+            uint8_t eb[512]; memset(eb,0,sizeof eb);
+            /* entry0：逻辑分区本身（相对本 EBR） */
+            uint8_t e0[16];
+            img_partition_t lp=t->parts[idx[k]];
+            build_mbr_entry(&lp, e0);
+            wle32(e0+8, 2048);                            /* 相对偏移 = 2048 */
+            memcpy(eb+446, e0, 16);
+            /* entry1：下一段 EBR（相对偏移） */
+            if(k+1<nlog){
+                uint64_t next=t->parts[idx[k+1]].first_lba-2048;
+                uint8_t e1[16]; memset(e1,0,16);
+                e1[4]=IMG_MBR_EXTENDED_L;
+                wle32(e1+8, (uint32_t)(next-ebr));
+                wle32(e1+12, (uint32_t)(next-ebr));
+                memcpy(eb+446+16, e1, 16);
+            } else {
+                /* 最后一段：段大小覆盖到本段逻辑分区结束 */
+                uint8_t e1[16]; memset(e1,0,16);
+                e1[4]=IMG_MBR_EXTENDED_L;
+                wle32(e1+8, (uint32_t)(lp.last_lba-ebr+1));
+                wle32(e1+12, (uint32_t)(lp.last_lba-ebr+1));
+                memcpy(eb+446+16, e1, 16);
+            }
+            eb[510]=0x55; eb[511]=0xaa;
+            rc=img_qcow2_write(q, ebr*512ULL, eb, 512);
+            if(rc!=IMG_OK) return rc;
+        }
+    }
+    return IMG_OK;
 }
 
 static int write_gpt(img_qcow2 *q, img_parttable_t *t){
@@ -476,6 +552,36 @@ int img_parttable_write(img_qcow2 *q, img_parttable_t *t){
 static int first_free_slot(const img_parttable_t *t){
     for(int i=0;i<IMG_MAX_PARTITIONS;i++) if(!t->parts[i].used) return i;
     return -1;
+}
+
+int img_partition_add_logical(img_parttable_t *t, uint64_t first_lba, uint64_t sectors,
+                              img_mbr_type_t type, const char *name){
+    if(!t || t->table!=IMG_TABLE_MBR) return IMG_EINVAL;      /* 逻辑分区是 MBR 专属 */
+    if(!first_lba || !sectors) return IMG_EINVAL;
+    /* 必须先有扩展主分区，且逻辑分区落在它范围内 */
+    int ex=-1;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++){
+        const img_partition_t *p=&t->parts[i];
+        if(p->used && (p->type==IMG_MBR_EXTENDED || p->type==IMG_MBR_EXTENDED_L)){
+            ex=i;
+            if(first_lba<=p->first_lba || first_lba+sectors-1 > p->last_lba)
+                return IMG_ERANGE;                         /* 超出扩展分区范围 */
+            break;
+        }
+    }
+    if(ex<0) return IMG_ESTATE;                            /* 还没建扩展分区 */
+    if(first_lba<2048) return IMG_EINVAL;
+    int slot=-1;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++) if(!t->parts[i].used){ slot=i; break; }
+    if(slot<0) return IMG_EFULL;
+    img_partition_t *p=&t->parts[slot];
+    memset(p,0,sizeof *p);
+    p->used=true; p->logical=true;
+    p->first_lba=first_lba; p->last_lba=first_lba+sectors-1;
+    p->type=(uint8_t)type;
+    if(name) snprintf(p->name,sizeof p->name,"%s",name);
+    if(slot>=t->count) t->count=slot+1;
+    return slot;
 }
 
 int img_partition_add(img_parttable_t *t, uint64_t first_lba, uint64_t sectors,
