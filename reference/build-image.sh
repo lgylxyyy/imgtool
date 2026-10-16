@@ -154,7 +154,7 @@ echo "════ ⑦ WinRE 出厂自动启用（SetupComplete.cmd → 首次�
 #   所以不离线写死 GLOBALROOT 路径（换机分区号会变）→ 让 Windows 首次开机自己跑。
 "$T/imgcmd" winre.auto --img="$OUT" --lba="$OSLBA" --progress=bar
 
-echo "════ ⑦ bccheck ════"
+echo "════ ⑧ bccheck ════"
 $T/imgbc "$OUT" --uefi 2>/dev/null | tail -1 | sed 's/^/  /'
 echo
 echo "  ✅ 产出: $OUT  ($(du -h "$OUT"|cut -f1))"
