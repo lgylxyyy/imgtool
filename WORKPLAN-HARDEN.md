@@ -98,6 +98,21 @@ tests/wim-apply-test.sh        # 或 WITH_WIM=1 tests/run_all.sh
       ★ 不离线写 ReAgent.xml：里面是 `GLOBALROOT\...\partition**N**` 写死的分区号，换机会失效；
         让官方工具在目标机器上自己探测+写才跨机器安全。参考流水线已加 ⑦ 步。
 
+### 库缺失降级（硬缺口 #3，2026-10-16 完成）
+之前：缺库只发 warning，照样编译/链接 → **直接构建失败**（那不是降级）。
+现在：`IMG_WITH_WIM` / `IMG_WITH_NTFS3G` 开关 + 自动探测；缺库 = 关功能、命令仍在表里
+**明确报 `FEATURE-UNAVAILABLE`（rc=-5 + at=缺哪个库 + 建议）**，App 可先看 `--list` 的
+`features:{wimlib,ntfs3g,zlib,mkntfs}` 提前灰按钮。
+验收（两个独立构建目录实测）：
+  - `-DIMG_WITH_WIM=OFF`：features.wimlib=false；wim.*→FEATURE-UNAVAILABLE；fat/ntfs 正常
+  - `-DIMG_WITH_NTFS3G=OFF`：ntfs3g=false；ntfs.*/winre.auto/wim.*→FEATURE-UNAVAILABLE；fat 正常
+顺带修掉 5 个**先就存在的地雷**（fresh 构建必炸/链接失败）：
+  1. 通用管道（ctx_activate/device_ops/probe）被错放在 mkntfs 专属文件 → 新拆 `src/img_ntfs_ops.c`
+  2. img_bootcheck.c 错绑 mkntfs 开关 → 默认配置 imgbc 链接失败 → 挪进 NTFS3G 分支
+  3. `HIVEX_LIB` 主 CMake 从未 find（老缓存掩盖）→ 补探测 + imggenbcd 门
+  4. imgcmd 曾被"整块门"误吞 → 入口命令独立出块（任何配置必须有）
+  5. imgntfsfs/imgntfscp 链 mkntfs 对象 → 门从 NTFS3G 改挂 NTFS
+
 ### 回归入口（改完代码先跑它）
 ```bash
 tests/run_all.sh      # 7 套：cmd_test 27 条 · corrupt-chain · fd 15 条 · thread 4 组 · cancel 7 条 · bcd · recovery_bcd

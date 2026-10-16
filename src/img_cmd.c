@@ -1,6 +1,18 @@
 #define _POSIX_C_SOURCE 200809L
 /* img_cmd.c — 命令表骨架：参数校验 / 结果信封 / 上下文 / 分发 */
 #include "img_cmd.h"
+#ifndef IMG_WITH_WIM
+#define IMG_WITH_WIM 0
+#endif
+#ifndef IMG_WITH_NTFS3G
+#define IMG_WITH_NTFS3G 0
+#endif
+#ifndef IMG_WITH_ZLIB
+#define IMG_WITH_ZLIB 0
+#endif
+#ifndef IMG_WITH_NTFS
+#define IMG_WITH_NTFS 0
+#endif
 #include "img_io.h"
 #include "img_event.h"
 #include "img_lock.h"
@@ -339,6 +351,14 @@ int img_cmd_list_json(char *buf,int cap){
     if(!buf||cap<32) return IMG_EINVAL;
     W w={buf+1,buf+1,buf+cap-1};
     buf[0]='{'; wraw(&w,"version","1");
+    /* 本构建带了哪些可选库 —— App 据此把不可用命令【提前灰掉】，不是让用户点了才报错（硬缺口 #3）*/
+    {   char feat[160];
+        snprintf(feat,sizeof feat,
+            "{\"wimlib\":%s,\"ntfs3g\":%s,\"zlib\":%s,\"mkntfs\":%s}",
+            IMG_WITH_WIM?"true":"false", IMG_WITH_NTFS3G?"true":"false",
+            IMG_WITH_ZLIB?"true":"false", IMG_WITH_NTFS?"true":"false");
+        wraw(&w,"features",feat);       /* 走 writer：逗号/引号由它管 */
+    }
     wkey(&w,"cmds"); if(w.p<w.end)*w.p++='[';
     for(int i=0;i<IMG_CMD_COUNT;i++){
         const img_cmd *c=&IMG_CMD_TABLE[i];

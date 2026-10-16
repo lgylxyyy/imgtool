@@ -10,6 +10,20 @@
 #include "img_fat32_fs.h"
 #include "img_event.h"
 #include "img_wim_apply.h"
+/* ---- 功能开关（CMake 降级判定；缺库时对应 =0，命令仍列在表里但明确报不可用）---- */
+#ifndef IMG_WITH_WIM
+#define IMG_WITH_WIM 0
+#endif
+#ifndef IMG_WITH_NTFS3G
+#define IMG_WITH_NTFS3G 0
+#endif
+/* ★ 硬缺口 #3 的落点：库缺失【不许悄悄失败/不许构建失败】，必须给出稳定错误码 + 可执行建议 */
+static int feat_unavail(img_result *out, const char *feat, const char *howto){
+    img_result_fail(out, IMG_ENOTSUP, "FEATURE-UNAVAILABLE", feat,
+                    "这个构建没带该功能依赖的系统库", howto);
+    return IMG_ENOTSUP;
+}
+
 #include "img_ntfs_fmt.h"
  #include "img_clone.h"
 #include "img_ntfs_fs.h"   /* part.scan / ntfs.list / ntfs.rename */
@@ -240,6 +254,9 @@ static const img_arg A_WIMSIZE[] = {
     {"index", IMG_A_U64, false, "1",  "镜像索引（见 --list 用 imgwimls 查）", NULL},
 };
 static int cmd_wim_size(img_ctx *ctx, const img_args *in, img_result *out){
+    if(!IMG_WITH_WIM) return feat_unavail(out,"wimlib（WIM/ESD 尺寸估算）","重新编译时开启该功能并安装对应系统库");
+#if IMG_WITH_WIM
+
     (void)ctx;
     const char *wim=img_args_get(in,"wim");
     int idx=(int)img_args_u64(in,"index",1);
@@ -261,6 +278,9 @@ static int cmd_wim_size(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_u64(out,"est_ntfs_mb",sz.est_ntfs_bytes/1048576);
     /* ★ 工具只给数字；"够不够 / 分区开多大"由 App 决定（政策不在工具里）*/
     return IMG_OK;
+#else
+    (void)ctx; (void)in; (void)out; return IMG_ENOTSUP;   /* 不可达：上一行已返回 */
+#endif
 }
 
 /* ================= 命令 5b：wim.apply（灌入 WIM/ESD，可先格式化目标分区）====================
@@ -283,6 +303,9 @@ static const img_arg A_WIMAPPLY[] = {
     {"wimboot", IMG_A_BOOL,false, "false",   "wimboot 模式（文件指针化）", NULL},
 };
 static int cmd_wim_apply_cmd(img_ctx *ctx, const img_args *in, img_result *out){
+    if(!IMG_WITH_WIM) return feat_unavail(out,"wimlib（WIM/ESD 直灌）","重新编译时开启该功能并安装对应系统库");
+#if IMG_WITH_WIM
+
     uint64_t lba=img_args_u64(in,"lba",0);
     const char *wim=img_args_get(in,"wim");
     int idx=(int)img_args_u64(in,"index",1);
@@ -336,6 +359,9 @@ static int cmd_wim_apply_cmd(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_u64(out,"index",(uint64_t)idx);
     img_result_bool(out,"formatted",do_fmt);
     return IMG_OK;
+#else
+    (void)ctx; (void)in; (void)out; return IMG_ENOTSUP;   /* 不可达：上一行已返回 */
+#endif
 }
 
 /* ================= 命令 6b：part.scan（分区扫描 —— App 判断"有没有数据"的依据）====================
@@ -387,6 +413,10 @@ static int cmd_part_scan(img_ctx *ctx, const img_args *in, img_result *out){
         return IMG_OK;
     }
     scan_acc_t acc={0,false};
+    if(is_ntfs && !IMG_WITH_NTFS3G){
+        return feat_unavail(out,"libntfs-3g（该分区是 NTFS，需要它才能判口径）",
+                            "重新编译时开启 IMG_WITH_NTFS3G 并安装 libntfs-3g-dev");
+    }
     if(is_ntfs){
         img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
         if(!fs){ img_result_str(out,"fs","unknown"); img_result_i64(out,"level",-1);
@@ -450,6 +480,9 @@ static void list_json_cb(void *ud, const char *name, bool is_dir, uint64_t size)
     else a->truncated=true;
 }
 static int cmd_ntfs_list(img_ctx *ctx, const img_args *in, img_result *out){
+    if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 目录枚举）","重新编译时开启该功能并安装对应系统库");
+#if IMG_WITH_NTFS3G
+
     uint64_t lba=img_args_u64(in,"lba",0);
     const char *path=img_args_get(in,"path"); if(!path||!*path) path="/";
     img_qcow2 *q=img_ctx_qcow2(ctx);
@@ -479,6 +512,9 @@ static int cmd_ntfs_list(img_ctx *ctx, const img_args *in, img_result *out){
     }
     img_result_raw(out,"names",jbuf);
     return IMG_OK;
+#else
+    (void)ctx; (void)in; (void)out; return IMG_ENOTSUP;   /* 不可达：上一行已返回 */
+#endif
 }
 
 /* ================= 命令 6d：ntfs.rename（搬移原语 —— 把【给定名单】移进目标目录）====================
@@ -492,6 +528,9 @@ static const img_arg A_NTFSREN[] = {
     {"names", IMG_A_STR, true, NULL, "要搬动的顶层名，逗号分隔（如 Windows,Program Files,Users）", NULL},
 };
 static int cmd_ntfs_rename(img_ctx *ctx, const img_args *in, img_result *out){
+    if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 搬移）","重新编译时开启该功能并安装对应系统库");
+#if IMG_WITH_NTFS3G
+
     uint64_t lba=img_args_u64(in,"lba",0);
     const char *dst=img_args_get(in,"dst"), *names=img_args_get(in,"names");
     if(!dst||!dst[0]||dst[0]!='/'){ /* 允许给裸名，补成根路径 */
@@ -556,6 +595,9 @@ static int cmd_ntfs_rename(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_u64(out,"requested",(uint64_t)nn);
     img_result_str(out,"dir_used",final);
     return IMG_OK;
+#else
+    (void)ctx; (void)in; (void)out; return IMG_ENOTSUP;   /* 不可达：上一行已返回 */
+#endif
 }
 
 /* ================= 命令 6e：img.clone（克隆保留分区到新盘 —— 换系统的主路径）====================
@@ -722,6 +764,9 @@ static const char WINRE_SCRIPT[] =
     "reagentc /info > \"%SystemRoot%\\Temp\\winre-enable.log\" 2>&1\r\n"
     "exit /b 0\r\n";
 static int cmd_winre_auto(img_ctx *ctx, const img_args *in, img_result *out){
+    if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（WinRE 自启用脚本）","重新编译时开启该功能并安装对应系统库");
+#if IMG_WITH_NTFS3G
+
     uint64_t lba=img_args_u64(in,"lba",0);
     bool enable = img_args_bool(in,"enable",true);
     img_qcow2 *q=img_ctx_qcow2(ctx);
@@ -757,6 +802,73 @@ static int cmd_winre_auto(img_ctx *ctx, const img_args *in, img_result *out){
         img_result_bool(out,"removed",true);
     }
     img_ntfs_umount(fs);
+    return IMG_OK;
+#else
+    (void)ctx; (void)in; (void)out; return IMG_ENOTSUP;   /* 不可达：上一行已返回 */
+#endif
+}
+
+/* ================= 命令 6g：ntfs.exists / fat.exists（断点续跑的探测原语）====================
+ * 背景（用户选了"步骤级续跑"）：App 断电重启后要判断"这一步做完没有"——
+ *   例：WIM 灌完了吗？→ 看 \Windows\System32\ntoskrnl.exe 在不在
+ *       ESP 写完了吗？→ 看 \EFI\Boot\bootx64.efi 在不在
+ * ★ 层归属：只给"在不在"的事实；判定规则（哪一步看哪个路径）是 App 的编排知识。
+ * ★ 提醒：exists=true 只说明"入口在"，不代表该步骤 100% 完整（如 WIM 灌到一半断电，
+ *   ntoskrnl.exe 可能还没写到）。要更强保证用 img_bootcheck 自检 或 看日志最后一行。*/
+static const img_arg A_NTFSEXISTS[] = {
+    {"img", IMG_A_STR, true,  NULL, "镜像路径（qcow2）", NULL},
+    {"lba", IMG_A_U64, true,  NULL, "NTFS 分区起始 LBA", chk_lba},
+    {"path",IMG_A_STR, true,  NULL, "要查的绝对路径（如 /Windows/System32/ntoskrnl.exe）", NULL},
+};
+static int cmd_ntfs_exists(img_ctx *ctx, const img_args *in, img_result *out){
+    if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 存在性探测）","重新编译时开启该功能并安装对应系统库");
+#if IMG_WITH_NTFS3G
+
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *path=img_args_get(in,"path");
+    if(!path||path[0]!='/'){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","必须是以 / 开头的绝对路径",NULL); return IMG_EINVAL; }
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){
+            pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+    img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL",path,"不是合法 NTFS（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
+    bool ex=img_ntfs_path_exists(fs,path);
+    uint64_t sz=0; bool has_sz = ex && img_ntfs_file_size(fs,path,&sz)==IMG_OK;
+    img_ntfs_umount(fs);
+    img_result_str(out,"path",path);
+    img_result_bool(out,"exists",ex);
+    if(has_sz) img_result_u64(out,"size_bytes",sz);   /* 文件大小：比"在不在"更强一步的判据 */
+    return IMG_OK;
+#else
+    (void)ctx; (void)in; (void)out; return IMG_ENOTSUP;   /* 不可达：上一行已返回 */
+#endif
+}
+static const img_arg A_FATEXISTS[] = {
+    {"img", IMG_A_STR, true,  NULL, "镜像路径（qcow2）", NULL},
+    {"lba", IMG_A_U64, true,  NULL, "FAT32 分区起始 LBA", chk_lba},
+    {"path",IMG_A_STR, true,  NULL, "要查的绝对路径（如 /EFI/Boot/bootx64.efi）", NULL},
+};
+static int cmd_fat_exists(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *path=img_args_get(in,"path");
+    if(!path||path[0]!='/'){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","必须是以 / 开头的绝对路径",NULL); return IMG_EINVAL; }
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    img_fat32_fs *fs=img_fat32_mount(q,lba,false);      /* 只读：探测不该改盘 */
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL",path,"不是合法 FAT32（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
+    bool ex=img_fat32_path_exists(fs,path);
+    uint64_t sz=0;
+    bool has_sz = ex && img_fat32_file_size(fs,path,&sz)==IMG_OK;
+    img_fat32_unmount(fs);
+    img_result_str(out,"path",path);
+    img_result_bool(out,"exists",ex);
+    if(has_sz) img_result_u64(out,"size_bytes",sz);
     return IMG_OK;
 }
 
@@ -807,6 +919,10 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_IMGCLONE,(int)(sizeof A_IMGCLONE/sizeof A_IMGCLONE[0]), cmd_img_clone},
     {"winre.auto","1.0", "写入/删除【首次开机自动启用 WinRE】脚本（SetupComplete.cmd，官方 reagentc 机制）",
         A_WINRE_AUTO,(int)(sizeof A_WINRE_AUTO/sizeof A_WINRE_AUTO[0]), cmd_winre_auto},
+    {"ntfs.exists","1.0", "查 NTFS 路径是否存在（断点续跑探测原语：App 判定步骤做完没）",
+        A_NTFSEXISTS,(int)(sizeof A_NTFSEXISTS/sizeof A_NTFSEXISTS[0]), cmd_ntfs_exists},
+    {"fat.exists", "1.0", "查 FAT32 路径是否存在（断点续跑探测原语）",
+        A_FATEXISTS,(int)(sizeof A_FATEXISTS/sizeof A_FATEXISTS[0]), cmd_fat_exists},
     {"ctl.cancel","1.0", "请求取消正在执行的操作（另一线程调用；协作式，下一个检查点生效）",
         NULL, 0, cmd_ctl_cancel},
     {"cmd.list",  "1.0", "导出命令表（名字/参数规格/帮助）——App 可据此自动生成界面",

@@ -78,6 +78,8 @@ static const ETX E_TEXT[] = {                      /* 错误码 → 原因 / 建
                  "检查旧镜像与宿主磁盘（qemu-img check / 空间 / 权限）","Check the old image and host disk (qemu-img check / space / permission)"},
     {"CLONE-VERIFY-FAIL","克隆后校验不通过（已回滚：旧镜像恢复原名）","Clone verification failed (rolled back; the old image was renamed back)",
                  "旧镜像可能损坏；先单独检查它再重试","The old image may be corrupt; check it first, then retry"},
+    {"FEATURE-UNAVAILABLE","这个功能在这个构建里不可用（缺一个系统库）","This feature is not available in this build (missing a system library)",
+                 "重新编译时开启对应开关并安装库（见 --list 的 features 字段）","Rebuild with the feature switch on and the library installed (see features in --list)"},
     {"CMD-CANCELLED","操作已取消（用户点了停止）","Operation cancelled by the user",
                  "目标分区/文件可能停在半写状态，请重做该步骤","The target may be half-written; redo this step"},
     {NULL,NULL,NULL,NULL,NULL}

@@ -152,7 +152,9 @@ App 传 check_size=on  → 事前"需要 vs 剩余"，不够就提前拒（无�
 | `part.scan` | 扫描分区（App 弹不弹提示的依据）| `img` `lba` 必填 → 返回 level(0/1/2)/fs/label/cluster_bytes/entries_root/used_bytes/free_bytes/looks_like_windows |
 | `ntfs.list` | 列 NTFS 目录（给 App 名单）| `img` `lba` 必填；`path=/` 可选 → count/names(JSON 数组) |
 | `ntfs.rename` | 搬移原语：把【给定名单】移进目标目录 | `img` `lba` `dst` `names` 必填 → moved/dir_used（冲突自动 .001）|
-| `winre.auto` | 写/删 WinRE 出厂自动启用脚本（SetupComplete.cmd）| `img` `lba`(系统分区) 必填；`enable=true` 可选 → written/bytes 或 removed |
+| `ntfs.exists` | 查 NTFS 路径存在（断点续跑探测）| `img` `lba` `path` 必填 → exists/size_bytes |
+| `fat.exists` | 查 FAT32 路径存在（断点续跑探测）| 同上（只读挂载，不改盘）|
+| `winre.auto` | 写/删 WinRE 出厂自动启用脚本（SetupComplete.cmd）| `img` `lba`(系统分区) 必填；`enable` **由 App 显式传**（勾选框默认值是 App 的 UI 决策；不传时兜底 true）→ written/bytes 或 removed |
 | `img.clone` | 克隆保留分区到新盘（换系统主路径）| `img` `keep` 必填；`guid=random` `keep_old=false` `old_name` 可选 → bytes_written/parts_copied/old_kept |
 | `wim.apply` | 灌入 WIM/ESD 到分区（**默认先格式化**防残留；`--format=off` 保留原分区） | `img` `lba` `wim` 必填；`index=1` `format=on` `label=Windows` `no_acls` `no_attrs` `wimboot` 可选 |
 | `wim.size` | 空间估算 | `wim` 必填；`index=1` 可选（命令见 §五） |
@@ -239,5 +241,22 @@ void img_out_set_text(img_text_cb cb, void *ud);   /* 库发事件 → 回调由
 - App：App 自己的语言资源文件（与库无关）
 - **库一行都不用改**
 
+
+## 十、断点续跑配方（用户选了"步骤级续跑"这层）
+**分工**：App 记状态 + 定判定规则；工具只供"幂等 + 探测"的事实原语。
+```
+App 侧记一份 <镜像>.state.json：{ "steps": [ {"name":"esp","done":true,"at":...}, ... ],
+                                    "image_fingerprint": {...} }
+断电重启后：
+  ① 指纹不匹配 → 说明不是同一张盘 → 全部重来
+  ② 逐步骤判定：
+       格式化类     → part.scan level==1（空卷）才算干净完成
+       文件写入类   → fat.exists / ntfs.exists（建议再比 size_bytes）
+       WIM 灌入类   → ntfs.exists /Windows/System32/ntoskrnl.exe（入口在=大概率完成）
+       最终确认     → img_bootcheck 自检（17 项，最强判据）
+  ③ 判定"半写"的步骤 → 该步幂等重做（格式化类重跑安全；WIM 灌入=格式化+重灌）
+```
+**工具侧的幂等性承诺**：重跑安全（不会因重跑而坏数据）；唯一不幂等的是"WIM 灌入"，
+它必须以"格式化+重灌"整段重做（wimlib 无断点接口，不做假断点）。
 
 ## 九、落地进度

@@ -1,6 +1,9 @@
 /* imgbc <image.qcow2> [--uefi|--bios|--auto]   引导链自检
  * 输出：每项一行 JSON + 一行汇总；退出码 = 未通过的必需项数 */
 #include "img_bootcheck.h"
+#ifndef IMG_WITH_NTFS3G
+#define IMG_WITH_NTFS3G 0
+#endif
 #include "img_event.h"
 #include <stdio.h>
 #include <string.h>
@@ -25,6 +28,11 @@ int main(int argc,char**argv){
     if(!q){ fprintf(stderr,"❌ 不是 qcow2\n"); return 1; }
     if(img_qcow2_write_init(q)!=IMG_OK){ fprintf(stderr,"❌ init\n"); return 1; }
 
+#if !IMG_WITH_NTFS3G
+    (void)mode;
+    fprintf(stderr,"⚠ 本构建没带 libntfs-3g → 17 项启动自检不可用（重编译开启 IMG_WITH_NTFS3G）\n");
+    return 1;
+#else
     img_bootcheck_result_t r;
     img_span sp;
     img_span_prep(&sp,"bc","check","引导链自检（17 项）");
@@ -42,4 +50,5 @@ int main(int argc,char**argv){
     img_bootcheck_summary(&r, sum, sizeof sum);
     printf("%s\n", sum);
     return r.n_required_fail;   /* 退出码 = 必需项未通过数 */
+#endif /* IMG_WITH_NTFS3G */
 }

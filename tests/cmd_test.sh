@@ -187,6 +187,17 @@ $T/imgntfsfs "$W/winre.qcow2" $WE exists /Windows/Setup/Scripts/SetupComplete.cm
 $T/imgntfsfs "$W/winre.qcow2" $WE exists /Windows/Setup/Scripts/SetupComplete.cmd 2>&1 | grep -q "是" && \
   ok "再写回幂等" || ng "重写失败"
 
+echo "════ 4e. ntfs.exists / fat.exists（断点续跑探测原语）════"
+j=$("$T/imgcmd" ntfs.exists --img="$W/winre.qcow2" --lba=$WE --path=/Windows/Setup/Scripts/SetupComplete.cmd)
+ex=$(echo "$j" | jq_ "d['data']['exists']")
+sz=$(echo "$j" | jq_ "d['data']['size_bytes']")
+[ "$ex" = "True" ] && [ "$sz" = "274" ] && ok "ntfs.exists 存在且大小=274（断点判定可用）" || ng "exists=$ex size=$sz"
+j=$("$T/imgcmd" ntfs.exists --img="$W/winre.qcow2" --lba=$WE --path=/Windows/System32/ntoskrnl.exe)
+ex=$(echo "$j" | jq_ "d['data']['exists']")
+[ "$ex" = "False" ] && ok "ntfs.exists 不存在（没灌过的分区）" || ng "误报存在"
+check_err "ntfs.exists 路径不带 /" "CMD-ARG-BAD" \
+  "$T/imgcmd" ntfs.exists --img="$W/winre.qcow2" --lba=$WE --path=Windows --progress=bar
+
 echo "════ 5. 日志（--log）：里程碑 + 错误都落盘，且逐行可解析 ════"
 $T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src="$W/blob.bin" --dst=/EFI/blob2.bin \
     --log="$W/run.log" --log-level=info >/dev/null 2>&1

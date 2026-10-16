@@ -1,3 +1,10 @@
+if(NOT DEFINED IMG_WITH_WIM)
+  set(IMG_WITH_WIM ON)
+endif()
+if(NOT DEFINED IMG_WITH_NTFS3G)
+  set(IMG_WITH_NTFS3G ON)
+endif()
+
 # NTFS 设备后端验证（需要系统 libntfs-3g-dev；缺失时自动跳过）
 find_path(NTFS_INC ntfs-3g/volume.h)
 find_library(NTFS_LIB ntfs-3g)
@@ -39,13 +46,19 @@ target_link_libraries(thread_test PRIVATE imgtool)
 add_executable(cancel_test cancel_test.c)
 target_link_libraries(cancel_test PRIVATE imgtool)
 
-add_executable(wim_apply_test wim_apply_test.c)
+if(IMG_WITH_WIM)
+  add_executable(wim_apply_test wim_apply_test.c)
+endif()
+
 target_link_libraries(wim_apply_test PRIVATE imgtool)
 
 add_executable(fatput fatput.c)
 target_link_libraries(fatput PRIVATE imgtool)
 
-add_executable(ntfs_probe ntfs_probe.c)
+if(IMG_WITH_NTFS3G)
+  add_executable(ntfs_probe ntfs_probe.c)
+endif()
+
 target_link_libraries(ntfs_probe PRIVATE imgtool)
 target_include_directories(ntfs_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
