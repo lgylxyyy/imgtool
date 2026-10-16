@@ -38,8 +38,8 @@ const char *img_strerror(int err);
 typedef struct {
     bool     ok;
     int      code;              /* img_err_t */
-    char     reason[256];       /* 人类可读原因（前端直接显示） */
-    char     suggestion[256];   /* 修复建议 */
+    char     reason[256];       /* 【中文备注】开发期/CLI 用；App 请用 code 做 i18n 查表，不要直接显示本字段 */
+    char     suggestion[256];   /* 【中文备注】同上：App 按 code 查自己的语言表 */
 } img_check_result_t;
 
 
@@ -102,7 +102,7 @@ typedef struct {
     uint64_t    cur_bytes;      /* 已处理字节 */
     uint64_t    total_bytes;    /* 总字节（0=未知） */
     const char *item;           /* ★ 当前处理对象（如文件路径） */
-    const char *msg;            /* 人类可读的当前操作说明 */
+    const char *msg;            /* 【中文备注】开发期日志/CLI 用；App 渲染进度请用 phase/op 枚举 + cur/total/pct/item（语言中立）*/
     int         pct;            /* 0~100，可为 -1（不明确） */
     int         eta_s;          /* 预计剩余秒，-1=未知 */
     int         elapsed_s;      /* 已用秒 */

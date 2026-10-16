@@ -129,8 +129,8 @@ typedef struct {
     char code[48];       /* 稳定错误码，如 FAT-ENOSPC（★ App 本地化查表的键）*/
     int  rc;             /* img_err_t */
     char at[256];        /* 失败位置（路径/分区/LBA）*/
-    char what[256];      /* 干到哪一步（"写入 NTFS"）*/
-    char status[256];    /* 当前状态："已完成 / 失败 / 该分区处于半写状态" */
+    char what[256];      /* 【中文备注】干到哪一步；App 请用 code/at（语言中立）*/
+    char status[256];    /* 【中文备注】当前状态；App 按 code 自己渲染（如 CMD-CANCELLED→"该分区需重做"）*/
     char img[512];       /* 镜像路径 */
     char ctx[256];       /* 命令与参数 */
     char log[560];       /* 日志文件路径（App 可提示用户一并发）*/
