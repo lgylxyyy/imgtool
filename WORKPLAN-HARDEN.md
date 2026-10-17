@@ -179,7 +179,16 @@ VBR 用 img_fixboot）→ 官方 winre.wim/boot.sdi 放 0x27 分区 + BIOS 恢�
 与 diskB（Windows 认的盘）**逐字节相同**（LBA2048→磁头32/扇区33/柱面0；末扇区→柱面6/磁头127/扇区57）。
 **未解决的下一环**：bootmgr→winload 仍 0xc000000e（CHS 不是它的原因）。
 排除清单：Windows 内容/文件 md5/偏移/签名/BCD绝对偏移/扩展分区/主备启动扇区/克隆完整性 —— 全部一致。
-下一步：等用户手动 `bcdboot C:\Windows /s S: /f BIOS` 修好 → 逐字节 diff 出真差异 → 写进工具。
+**最终根因（用户手动修复后确认）**：`bootmgr` 无罪（md5 与 Win11 PCAT 副本相同）——
+**唯一差异是 BCD**：我借用了 diskB 的 **Windows 10 时代 BCD**，而目标系统是 **Windows 11**。
+用户在 Windows 里跑 bcdboot 重建后 → 盘成功启动到 Windows 徽标（我截屏实证）。
+**修复资产**：从用户修好的盘提取 `reference/bcd-reference-bios-win11.bin`（32768 字节，
+bcdboot 生成的 Win11 BIOS BCD）——替换 diskB 的 Win10 BCD 作为参考件。
+**两个学习点**：
+  1. 用户重建 MBR 后系统分区表项 = 50GB（= NTFS 卷的真实大小），不是我塞的 64GB
+     ——Windows 的"搜索分区"按【卷边界】建表项；克隆 50GB 卷进 64GB 分区会让它困惑。
+     → 流水线规则：克隆时要么让卷=分区大小，要么表项=卷大小。
+  2. bootrec 会重新生成磁盘签名（用户的 be5e933d）——签名本来就不该沿用。
 
 ### 回归入口（改完代码先跑它）
 ```bash
