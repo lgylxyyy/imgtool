@@ -413,16 +413,16 @@ static int write_mbr(img_qcow2 *q, img_parttable_t *t){
                 e1[4]=IMG_MBR_EXTENDED_L;
                 wle32(e1+8, (uint32_t)(next-ebr));
                 wle32(e1+12, (uint32_t)(next-ebr));
+                lba_to_chs(0xFFFFFFFFull, e1+1); lba_to_chs(0xFFFFFFFFull, e1+5);  /* 越界哨兵 fe ff ff（★不能全零，S=0 非法）*/
                 memcpy(eb+446+16, e1, 16);
-                lba_to_chs(0, e1+1); lba_to_chs(0, e1+5);   /* CHS 哨兵（越界 → fe ff ff；★不能全零）*/
             } else {
                 /* 最后一段：段大小覆盖到本段逻辑分区结束 */
                 uint8_t e1[16]; memset(e1,0,16);
                 e1[4]=IMG_MBR_EXTENDED_L;
                 wle32(e1+8, (uint32_t)(lp.last_lba-ebr+1));
                 wle32(e1+12, (uint32_t)(lp.last_lba-ebr+1));
+                lba_to_chs(0xFFFFFFFFull, e1+1); lba_to_chs(0xFFFFFFFFull, e1+5);
                 memcpy(eb+446+16, e1, 16);
-                lba_to_chs(0, e1+1); lba_to_chs(0, e1+5);   /* CHS 哨兵（越界 → fe ff ff；★不能全零）*/
             }
             eb[510]=0x55; eb[511]=0xaa;
             rc=img_qcow2_write(q, ebr*512ULL, eb, 512);
