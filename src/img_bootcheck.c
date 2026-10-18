@@ -304,6 +304,21 @@ int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *ou
         for(int i=0;i<4;i++) if(t.parts[i].used && is_ntfs_like(&t.parts[i])) has07=true;
         add(out,"mbr.ntfs","存在 NTFS 分区(类型0x07)",IMG_CK_REQUIRED,has07,
             has07?"有":"引导分区不是 0x07");
+    {   /* ★ mbr.chs —— Windows 的硬规则：起始 CHS 扇区号 1-based，0 是非法值
+         * （2026-10-16 用户 PE 实测：全零 CHS → Windows 判分区表损坏 →
+         *  "磁盘管理：没有初始化/未分配"、"搜索分区只认出两个"；sfdisk 却认 —— 两套标准）
+         * 合法形态：真实 CHS（与 LBA 对应）或哨兵 fe ff ff（越界，段=63≥1）*/
+        uint8_t mb[512]; int chsbad=0;
+        if(img_qcow2_read_full(q,0,mb,512)==IMG_OK){
+            for(int e=0;e<4;e++){
+                const uint8_t *en=mb+446+e*16;
+                if(en[4]==0) continue;                        /* 空项跳过 */
+                if((en[2] & 0x3F)==0) chsbad++;               /* ★ 扇区号=0 → 非法（Windows 拒）*/
+            }
+            add(out,"mbr.chs","MBR 分区项 CHS 合法性(Windows:扇区号1-based)",IMG_CK_REQUIRED, chsbad==0,
+                chsbad? "起始CHS扇区号=0 — Windows 判分区表损坏(磁盘管理显示未初始化/只认部分分区)" : "全部合法(真实CHS或fe ff ff哨兵)");
+        }
+    }
     }
 
     /* ── ② NTFS 层 ── */
