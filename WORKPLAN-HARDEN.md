@@ -203,6 +203,17 @@ bcdboot 生成的 Win11 BIOS BCD）——替换 diskB 的 Win10 BCD 作为参考
 → 蓝屏元凶收窄到【恢复分区里的 winre.wim/boot.sdi 内容 + BCD 残留 recoverysequence 的组合】
 待办第4步：格式化恢复分区并放入官方件 + RunOnce 脚本 → 若蓝屏复现即锁定元凶 → 拆 recoverysequence 解决
 
+### 定论实验：Win10 引导项(BCD) 在 Win11 系统上不能用（2026-10-18 用户要求的单变量实验）
+用修好全部 bug 的工具从零做盘（布局/CHS/EBR/几何/bootmgr=Win11 PCAT/签名 全套与能启动的
+BUILD-FULL 一致），【唯一变量】= BCD 换回 Win10 时代参考件(bcd-reference-bios.bin,20480B)，
+且盘签名特意对齐其内嵌值 2b93cd4c（BCD 设备对象带签名，6 处）。
+结果：SeaBIOS 报错屏 —— Status **0xc000000d（无效参数）**
+  （修工具前是 0xc000000e 找不到设备 → 修完 CHS 后错误码变了，说明工具修复真实生效；
+   但 Win10 BCD 仍无法引导 Win11）
+结论：**"Win10 引导项配 Win11"不兼容是真实的，不是工具 bug 的掩盖**。
+工具侧规则（固化）：BCD 必须与目标系统同代 —— Win11 用 bcdboot 真值参考件(你手修盘提取) ✓ 能启动。
+实验盘已删（一条命令可再生）。
+
 ### 回归入口（改完代码先跑它）
 ```bash
 tests/run_all.sh      # 7 套：cmd_test 27 条 · corrupt-chain · fd 15 条 · thread 4 组 · cancel 7 条 · bcd · recovery_bcd
