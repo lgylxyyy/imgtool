@@ -1004,8 +1004,9 @@ static const img_arg A_PARTLAYOUT[] = {
     {"img",       IMG_A_STR,  true,  NULL,  "镜像路径（qcow2，会被建/重写分区表）", NULL},
     {"sr-mb",     IMG_A_U64,  false, "100", "系统保留分区大小（MiB，活动）", NULL},
     {"sys-gb",    IMG_A_U64,  true,  NULL,  "系统分区大小（GiB）", NULL},
-    {"rec-gb",    IMG_A_U64,  true,  NULL,  "恢复分区大小（GiB，类型 0x27，紧随系统之后）", NULL},
+    {"rec-gb",    IMG_A_U64,  false, "0",   "恢复分区大小（GiB，0=最小布局：只建 系统保留+系统（实验用）", NULL},
     {"logical-name", IMG_A_STR, false, "Data", "扩展分区内逻辑分区的卷标", NULL},
+    {"single", IMG_A_BOOL, false, "false", "单分区模式：整盘一个活动系统分区（bootmgr/BCD 放它里面）", NULL},
 };
 static int cmd_part_layout(img_ctx *ctx, const img_args *in, img_result *out){
     img_qcow2 *q=img_ctx_qcow2(ctx);
@@ -1013,37 +1014,56 @@ static int cmd_part_layout(img_ctx *ctx, const img_args *in, img_result *out){
     uint64_t disk_sectors = img_qcow2_size(q)/512u;
     uint64_t sr_mb=img_args_u64(in,"sr-mb",100), sys_gb=img_args_u64(in,"sys-gb",0),
              rec_gb=img_args_u64(in,"rec-gb",0);
-    if(!sys_gb||!rec_gb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","sys-gb","系统/恢复大小必填",NULL); return IMG_EINVAL; }
+    if(!sys_gb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","sys-gb","系统分区大小必填",NULL); return IMG_EINVAL; }
     const uint64_t MiB=1024u*1024u, GiB=1024u*1024u*1024u, align=2048;
     uint64_t sr_sec=sr_mb*MiB/512, sys_sec=sys_gb*GiB/512, rec_sec=rec_gb*GiB/512;
     img_parttable_t t; memset(&t,0,sizeof t);
     t.table=IMG_TABLE_MBR; t.disk_sectors=disk_sectors;
     uint64_t off=align; int idx, rc;
+    if(img_args_bool(in,"single",false)){
+        /* ★ 单分区（最小化实验）：整个盘一个活动 NTFS 分区，bootmgr/BCD 放它里面 */
+        if(disk_sectors<=align*2) return img_result_fail(out,IMG_EFULL,"CMD-ARG-BAD","img","盘太小",NULL), IMG_EFULL;
+        if((rc=img_partition_add(&t,align,disk_sectors-align,IMG_MBR_NTFS_EXFAT,NULL,"Windows",true,&idx))!=IMG_OK)
+            return img_result_fail(out,rc,"CMD-ARG-BAD","img","单分区建不了",NULL), rc;
+        { uint32_t sig=0; FILE *ur=fopen("/dev/urandom","rb"); if(ur){ if(fread(&sig,1,4,ur)!=4) sig=0; fclose(ur);} if(!sig) sig=0x22334455;
+          t.disk_signature=sig; }
+        rc=img_parttable_write(q,&t);
+        if(rc){ img_result_fail(out,rc,"PART-READ-FAIL",NULL,"写分区表失败",NULL); return rc; }
+        img_result_u64(out,"parts_total",1);
+        img_result_str(out,"mode","single");
+        return IMG_OK;
+    }
     if((rc=img_partition_add(&t,off,sr_sec,IMG_MBR_NTFS_EXFAT,NULL,"System Reserved",true,&idx))!=IMG_OK)
         return img_result_fail(out,rc,"CMD-ARG-BAD","sr-mb","系统保留分区建不了（太小/越界）",NULL), rc;
     off+=sr_sec;
     if((rc=img_partition_add(&t,off,sys_sec,IMG_MBR_NTFS_EXFAT,NULL,"Windows",false,&idx))!=IMG_OK)
         return img_result_fail(out,rc,"CMD-ARG-BAD","sys-gb","系统分区建不了",NULL), rc;
     off+=sys_sec;
-    if((rc=img_partition_add(&t,off,rec_sec,IMG_MBR_RECOVERY,NULL,"Recovery",false,&idx))!=IMG_OK)
-        return img_result_fail(out,rc,"CMD-ARG-BAD","rec-gb","恢复分区建不了",NULL), rc;
-    off+=rec_sec;
-    /* 扩展分区：吃掉剩余（EBR 占扩展区头 2048 扇区，逻辑分区从 +2048 起）*/
-    uint64_t ext_start=(off+align-1)/align*align;
-    if(disk_sectors<=ext_start+align*2) return img_result_fail(out,IMG_EFULL,"CMD-ARG-BAD","img","剩余空间不够建扩展分区",NULL), IMG_EFULL;
-    if((rc=img_partition_add(&t,ext_start,disk_sectors-ext_start,IMG_MBR_EXTENDED_L,NULL,"Extended",false,&idx))!=IMG_OK)
-        return img_result_fail(out,rc,"CMD-ARG-BAD","img","扩展分区建不了",NULL), rc;
-    const char *lname=img_args_get(in,"logical-name"); if(!lname||!lname[0]) lname="Data";
-    int lidx=img_partition_add_logical(&t, ext_start+align, disk_sectors-ext_start-align,
-                                       IMG_MBR_NTFS_EXFAT, lname);
-    if(lidx<0){ img_result_fail(out,(img_err_t)lidx,"CMD-ARG-BAD","img","逻辑分区建不了",NULL); return lidx; }
+    uint64_t parts_total=3;
+    if(rec_gb){
+        if((rc=img_partition_add(&t,off,rec_sec,IMG_MBR_RECOVERY,NULL,"Recovery",false,&idx))!=IMG_OK)
+            return img_result_fail(out,rc,"CMD-ARG-BAD","rec-gb","恢复分区建不了",NULL), rc;
+        off+=rec_sec;
+    }
+    /* ★ 最小模式（rec-gb=0）：到此为止 = 只有 系统保留+系统（用户要求"一个一个试"的第 0 步）*/
+    if(rec_gb){      /* 有恢复分区时，剩余空间才建扩展+逻辑（同样可关）*/
+        uint64_t ext_start=(off+align-1)/align*align;
+        if(disk_sectors<=ext_start+align*2) return img_result_fail(out,IMG_EFULL,"CMD-ARG-BAD","img","剩余空间不够建扩展分区",NULL), IMG_EFULL;
+        if((rc=img_partition_add(&t,ext_start,disk_sectors-ext_start,IMG_MBR_EXTENDED_L,NULL,"Extended",false,&idx))!=IMG_OK)
+            return img_result_fail(out,rc,"CMD-ARG-BAD","img","扩展分区建不了",NULL), rc;
+        const char *lname=img_args_get(in,"logical-name"); if(!lname||!lname[0]) lname="Data";
+        int lidx=img_partition_add_logical(&t, ext_start+align, disk_sectors-ext_start-align,
+                                           IMG_MBR_NTFS_EXFAT, lname);
+        if(lidx<0){ img_result_fail(out,(img_err_t)lidx,"CMD-ARG-BAD","img","逻辑分区建不了",NULL); return lidx; }
+        parts_total=5;
+    }
     /* 随机磁盘签名（★ 换新盘不该沿用源盘签名）*/
     uint32_t sig=0; { FILE *ur=fopen("/dev/urandom","rb"); if(ur){ if(fread(&sig,1,4,ur)!=4) sig=0; fclose(ur);} if(!sig) sig=0x22334455; }
     t.disk_signature=sig;
     rc=img_parttable_write(q,&t);
     if(rc){ img_result_fail(out,rc,"PART-READ-FAIL",NULL,"写分区表失败",NULL); return rc; }
     img_result_u64(out,"disk_signature",sig);
-    img_result_u64(out,"parts_total",5);      /* 3 主 + 1 扩展 + 1 逻辑 */
+    img_result_u64(out,"parts_total",parts_total);
     return IMG_OK;
 }
 

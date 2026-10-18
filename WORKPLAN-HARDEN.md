@@ -190,6 +190,13 @@ bcdboot 生成的 Win11 BIOS BCD）——替换 diskB 的 Win10 BCD 作为参考
      → 流水线规则：克隆时要么让卷=分区大小，要么表项=卷大小。
   2. bootrec 会重新生成磁盘签名（用户的 be5e933d）——签名本来就不该沿用。
 
+### GPT→MBR 单变量实验：✅ 最小盘能启动（2026-10-18）
+`reference/build-bios-min.sh` —— 128GB MBR 只有【系统保留100M(活动)+系统50G(=源卷)】两分区，
+无恢复、无扩展，其余未分配。**SeaBIOS 60s/120s 截图均为 Windows 徽标**（自检 8/8 必需、0 警告）。
+→ 证明：**GPT→MBR 跨格式纯克隆迁移这条路是通的**（bootmgr/BCD/几何/CHS/签名 全套配齐）。
+→ 之前的蓝屏/彩条 = 恢复分区与 BCD 里残留的 recoverysequence 交互（下一步逐个加回变量定位）。
+待办顺序：加回扩展分区 → 加回恢复分区(0x27) → 定位蓝屏元凶 → 完整 4 段式盘。
+
 ### 回归入口（改完代码先跑它）
 ```bash
 tests/run_all.sh      # 7 套：cmd_test 27 条 · corrupt-chain · fd 15 条 · thread 4 组 · cancel 7 条 · bcd · recovery_bcd

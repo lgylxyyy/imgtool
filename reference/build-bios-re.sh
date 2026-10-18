@@ -14,7 +14,7 @@ DISK=$((128*1024*1024*1024))
 echo "════ ① 建 128GB MBR 布局（SR100M + 系统64G + 恢复1G + 扩展分区）════"
 rm -f "$OUT"
 $T/imglayout mk "$OUT" $DISK mbr >/dev/null
-$T/imgcmd part.layout --img="$OUT" --sr-mb=100 --sys-gb=64 --rec-gb=1 --logical-name=Data --progress=bar
+$T/imgcmd part.layout --img="$OUT" --sr-mb=100 --sys-gb=50 --rec-gb=1   # ★表项=源卷大小（50GB），不塞 64GB --logical-name=Data --progress=bar
 SR=$(  $T/imgpart show "$OUT" | python3 -c "import sys,json;d=json.load(sys.stdin);print([p['first'] for p in d['parts'] if p.get('active')][0])")
 SYS=$( $T/imgpart show "$OUT" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['parts'][1]['first'])")
 REC=$( $T/imgpart show "$OUT" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['parts'][2]['first'])")
@@ -22,7 +22,7 @@ LOG=$( $T/imgpart show "$OUT" | python3 -c "import sys,json;d=json.load(sys.stdi
 echo "  SR=$SR SYS=$SYS REC=$REC LOG=$LOG"
 
 echo "════ ② 写 MBR 引导码（没有它 BIOS 报找不到操作系统）════"
-$T/imgcmd part.mbrboot --img="$OUT" --code=$REF/mbr-code-bios.bin --progress=bar
+$T/imgcmd part.mbrboot --img="$OUT" --code=$REF/mbr-code-bios.bin --sig=3d935ebe --progress=bar  # 签名与 Win11 BCD 内嵌值对齐
 
 echo "════ ③ 格式化 SR / 恢复 / 逻辑分区（系统分区不格式化，直接搬内容）════"
 $T/imgntfsfs "$OUT" $SR   format SYSTEM  >/dev/null
@@ -38,11 +38,12 @@ echo "════ ⑤ BIOS 引导文件 → 系统保留分区 ════"
 $T/imgntfsfs "$OUT" $SYS export /Windows/Boot/PCAT/bootmgr $W/bootmgr >/dev/null
 $T/imgntfsfs "$OUT" $SR  put $W/bootmgr /bootmgr >/dev/null
 echo "  bootmgr → /bootmgr"
-# ⑤b BCD：用 diskB（能启动的 BIOS 盘）的 \Boot\BCD 当模板（BIOS BCD 设备路径是 partition(N)，
-#     我们的布局 SR=1/系统=2 与它一致；恢复条目交给首启的 reagentc 自建）
-$T/imgntfsfs "/workspace/images/diskB-Windows-BIOS.qcow2" 2048 export /Boot/BCD $W/BCD >/dev/null
+# ⑤b BCD：★ 必须用【目标 Windows 版本】的 BIOS BCD —— 用用户修好并实测能启动的盘里
+#     bcdboot 生成的 Win11 BCD 当参考件（SR=1/系统=2 与本布局一致；恢复条目由首启 reagentc 自建）
+#     （教训：借用 diskB 的 Win10 BCD → winload 0xc000000e，BCD 不能跨版本混用）
+cp $ROOT/reference/bcd-reference-bios-win11.bin $W/BCD
 $T/imgntfsfs "$OUT" $SR put $W/BCD /Boot/BCD >/dev/null
-echo "  BCD → /Boot/BCD（diskB 真值模板）"
+echo "  BCD → /Boot/BCD（Win11 bcdboot 真值参考件）"
 # ⑤c BCD 字体（bootmgr 菜单显示需要）
 $T/imgntfsfs "/workspace/images/diskB-Windows-BIOS.qcow2" 2048 export /Boot/fonts/fonts.ttf $W/fonts.ttf >/dev/null 2>&1 || true
 if [ -s $W/fonts.ttf ]; then $T/imgntfsfs "$OUT" $SR put $W/fonts.ttf /Boot/fonts/fonts.ttf >/dev/null; echo "  fonts.ttf → /Boot/fonts/"; fi
