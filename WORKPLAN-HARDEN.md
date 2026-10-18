@@ -229,6 +229,20 @@ Win11 BCD 参考件实测：磁盘签名 `be5e933d` 出现【5 处】（非 6）
   分区号不同的布局再补改号字段。参考实现：garloff/Fix_BCD 的"读 BCD → 对账签名/分区 → 修正"算法。
 Dism++ 源码挖掘（Chuyu-Team/Dism++）：下一轮用 gh 只读扒其引导修复实现。
 
+### ★ 铁律（用户2026-10-18定）：卡住就上网搜，不要空想
+遇到解决不了的问题 → 评估后【立刻联网搜索】（API 已配好，不用=浪费）。
+证据：本轮"Windows 不认分区"和"BCD 命门"两个关键突破，都是联网搜出来的
+（MS 文档的 CHS 规则、rakhesh 的 BCD 设备结构、BCD-SYS 的做法）——自己空想既慢又错。
+工具优先级：手头工具（搜索/抓源码/gh）> 闭门推演。
+
+### 任务清单（2026-10-18 用户定的顺序）
+1. ⭐ imggenbcd 定制化：改签名(全部出现处) + 分区字节偏移(loader/各条目) —— BIOS修复最后一块
+2. imggenbcd 多条目：克隆 loader 对象(新GUID+各自偏移+描述) + 写进 displayorder → 同盘双系统
+3. BIOS 双系统盘：SR + Win10分区(源Windows 10 UEFI.qcow2 LBA239616) + Win11分区(LBA296960)
+   + BCD双条目 → QEMU 实测两条目都能进系统
+4. EFI 双系统盘：同样两个系统 + GPT/ESP + bootmgfw.efi + UEFI BCD(GUID版双条目) → OVMF 实测
+5. 两个盘一起交付
+
 ### 回归入口（改完代码先跑它）
 ```bash
 tests/run_all.sh      # 7 套：cmd_test 27 条 · corrupt-chain · fd 15 条 · thread 4 组 · cancel 7 条 · bcd · recovery_bcd
