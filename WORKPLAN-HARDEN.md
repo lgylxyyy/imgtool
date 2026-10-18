@@ -198,7 +198,10 @@ bcdboot 生成的 Win11 BIOS BCD）——替换 diskB 的 Win10 BCD 作为参考
 **第2步已完成（2026-10-18）**：在能启动的最小盘上【只加扩展分区+逻辑分区】（--extended=true，
 不动恢复、不动克隆数据）→ sfdisk 认（W95 Ext'd + 逻辑）→ **SeaBIOS 60s/120s 仍为 Windows 徽标** ✅
 → 扩展分区【无罪】。
-待办：第3步加回恢复分区(0x27) + 处理 BCD 残留 recoverysequence → 定位蓝屏元凶 → 完整 4 段式盘。
+**第3步已完成**：+恢复分区(0x27，未格式化) → **SeaBIOS 120s 仍为 Windows 徽标** ✅（60s 是启动过渡黑屏）
+→ 三个变量逐个加回全部无罪：扩展✗无罪、恢复分区✗无罪、最小盘✗无罪
+→ 蓝屏元凶收窄到【恢复分区里的 winre.wim/boot.sdi 内容 + BCD 残留 recoverysequence 的组合】
+待办第4步：格式化恢复分区并放入官方件 + RunOnce 脚本 → 若蓝屏复现即锁定元凶 → 拆 recoverysequence 解决
 
 ### 回归入口（改完代码先跑它）
 ```bash
