@@ -1006,6 +1006,7 @@ static const img_arg A_PARTLAYOUT[] = {
     {"sys-gb",    IMG_A_U64,  true,  NULL,  "系统分区大小（GiB）", NULL},
     {"rec-gb",    IMG_A_U64,  false, "0",   "恢复分区大小（GiB，0=最小布局：只建 系统保留+系统（实验用）", NULL},
     {"logical-name", IMG_A_STR, false, "Data", "扩展分区内逻辑分区的卷标", NULL},
+    {"extended", IMG_A_BOOL, false, "false", "没有恢复分区时也建扩展+逻辑分区（单变量实验用）", NULL},
     {"single", IMG_A_BOOL, false, "false", "单分区模式：整盘一个活动系统分区（bootmgr/BCD 放它里面）", NULL},
 };
 static int cmd_part_layout(img_ctx *ctx, const img_args *in, img_result *out){
@@ -1046,7 +1047,7 @@ static int cmd_part_layout(img_ctx *ctx, const img_args *in, img_result *out){
         off+=rec_sec;
     }
     /* ★ 最小模式（rec-gb=0）：到此为止 = 只有 系统保留+系统（用户要求"一个一个试"的第 0 步）*/
-    if(rec_gb){      /* 有恢复分区时，剩余空间才建扩展+逻辑（同样可关）*/
+    if(rec_gb || img_args_bool(in,"extended",false)){   /* 有恢复 或 显式 --extended=true（单变量实验第2步）*/
         uint64_t ext_start=(off+align-1)/align*align;
         if(disk_sectors<=ext_start+align*2) return img_result_fail(out,IMG_EFULL,"CMD-ARG-BAD","img","剩余空间不够建扩展分区",NULL), IMG_EFULL;
         if((rc=img_partition_add(&t,ext_start,disk_sectors-ext_start,IMG_MBR_EXTENDED_L,NULL,"Extended",false,&idx))!=IMG_OK)
