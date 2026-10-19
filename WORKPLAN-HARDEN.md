@@ -251,7 +251,7 @@ Dism++ 源码挖掘（Chuyu-Team/Dism++）：下一轮用 gh 只读扒其引导�
 ### 剩余待办（都需要用户明确发话才动）
 | # | 事项 | 状态/门槛 |
 |---|---|---|
-| 1 | App 侧 JNI 封装 + 文案表（boot.repair/winre.auto/GUID） | 未开始；属 App 层职责（`app/` 目前只有 README） |
+| 1 | App 侧 JNI 封装 + 文案表（boot.repair/winre.auto/GUID） | ✅ 2026-10-19 完成，见 `../app/`：C 桥 + JNI + 中英文案表 + 主机回归（C 9 条 / JNI 9 条） |
 | 2 | WinRE 新方案真机验证（装盘后 `reagentc /info` 应 Enabled） | 需用户实测；沙箱无法验证 Windows 运行时行为 |
 | 3 | 32 位（armhf）NTFS 路径实测 | 未做；需从 `third_party/ntfs-3g` 交叉编译（noble 源没有 armhf 的 libntfs-3g-dev） |
 | 4 | ESP 写入性能（512B 簇 → 连续簇批量写，预计 30~70MB/s） | 用户定"只记录不优化"，需明确指令 |

@@ -122,6 +122,13 @@ endif()
 # ---- 共享库（Android .so）----
 add_library(imgtool_shared SHARED ${IMG_SOURCES})
 set_target_properties(imgtool_shared PROPERTIES OUTPUT_NAME "imgtool")
+if(HIVEX_LIB)
+  # ★ 静态库有 img_bcd.c，共享库曾漏掉它 → 任何链接 .so 的消费者
+  #   调 boot.repair/imggenbcd 都会 "undefined symbol: img_bcd_*"。
+  target_sources(imgtool_shared PRIVATE src/img_bcd.c)
+  target_include_directories(imgtool_shared PRIVATE ${HIVEX_INC})
+  target_link_libraries(imgtool_shared PUBLIC ${HIVEX_LIB})
+endif()
 if(IMG_WITH_NTFS3G)
   target_include_directories(imgtool_shared PRIVATE ${NTFS3G_INC})
   target_link_libraries(imgtool_shared PUBLIC ${NTFS3G_LIB})
