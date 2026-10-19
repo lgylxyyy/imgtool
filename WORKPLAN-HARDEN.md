@@ -235,17 +235,34 @@ Dism++ 源码挖掘（Chuyu-Team/Dism++）：下一轮用 gh 只读扒其引导�
 （MS 文档的 CHS 规则、rakhesh 的 BCD 设备结构、BCD-SYS 的做法）——自己空想既慢又错。
 工具优先级：手头工具（搜索/抓源码/gh）> 闭门推演。
 
-### 任务清单（2026-10-18 用户定的顺序）
-1. ⭐ imggenbcd 定制化：改签名(全部出现处) + 分区字节偏移(loader/各条目) —— BIOS修复最后一块
-2. imggenbcd 多条目：克隆 loader 对象(新GUID+各自偏移+描述) + 写进 displayorder → 同盘双系统
-3. BIOS 双系统盘：SR + Win10分区(源Windows 10 UEFI.qcow2 LBA239616) + Win11分区(LBA296960)
-   + BCD双条目 → QEMU 实测两条目都能进系统
-4. EFI 双系统盘：同样两个系统 + GPT/ESP + bootmgfw.efi + UEFI BCD(GUID版双条目) → OVMF 实测
-5. 两个盘一起交付
+### 任务清单（2026-10-18 定；2026-10-19 更新状态）
+1. ✅ **imggenbcd 定制化（2026-10-19 完成）** —— BIOS/UEFI 修复的最后一块：
+   - UEFI：按【旧 GUID → 新 GUID】全对象映射（参考件实测系统 3 处 / ESP 2 处 / 磁盘 5 处）；
+     4 参模式（只给系统分区的 GUID）也会修 resume 对象，不再只改两个加载器。
+   - BIOS：`boot.repair` 改为按 hive 结构遍历全部 type=6 设备对象，
+     改【磁盘签名 + 分区字节偏移】，不再在整个文件里裸替换 4 字节签名
+     （旧实现会漏掉 memtest/resume，还可能误伤恰好等于签名的数据）。
+   - 回归：`mbr_bcd_test`（单元，含"其它字节未动/幂等/落盘重读"）
+     + `boot-repair-test.sh`（集成 19 条）+ `genbcd-test.sh`（11 条）。
+2~5. ⛔ **冻结（双盘）**：用户 2026-10-19 明确叫停。代码/档案在
+   `backup/dual-disk-2026-10-19` 分支 + `DUAL-DISK-ARCHIVE.md`；
+   **master 永久保持无双盘内容**，除非用户再次明确指令，否则不做。
+
+### 剩余待办（都需要用户明确发话才动）
+| # | 事项 | 状态/门槛 |
+|---|---|---|
+| 1 | App 侧 JNI 封装 + 文案表（boot.repair/winre.auto/GUID） | 未开始；属 App 层职责（`app/` 目前只有 README） |
+| 2 | WinRE 新方案真机验证（装盘后 `reagentc /info` 应 Enabled） | 需用户实测；沙箱无法验证 Windows 运行时行为 |
+| 3 | 32 位（armhf）NTFS 路径实测 | 未做；需从 `third_party/ntfs-3g` 交叉编译（noble 源没有 armhf 的 libntfs-3g-dev） |
+| 4 | ESP 写入性能（512B 簇 → 连续簇批量写，预计 30~70MB/s） | 用户定"只记录不优化"，需明确指令 |
+| 5 | `recovery_bcd_test` 长期跳过（缺 `../build/w128/iso/bcd`） | 需从官方 ISO 重新提取该参考件，或改为自带参考件 |
+| 6 | 双盘/多条目（BIOS+UEFI） | ⛔ 冻结，见上 |
 
 ### 回归入口（改完代码先跑它）
 ```bash
-tests/run_all.sh      # 7 套：cmd_test 27 条 · corrupt-chain · fd 15 条 · thread 4 组 · cancel 7 条 · bcd · recovery_bcd
+tests/run_all.sh      # 11 套：cmd · corrupt-chain · timeout · fd · thread · cancel ·
+                      #   bcd · mbr_bcd · boot-repair(19) · genbcd(11) · recovery_bcd
+                      #   wim-apply 为重型可选档（WITH_WIM=1）
 ```
 
 ### 0c 实测（人话行 + 失败卡片）

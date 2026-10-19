@@ -160,7 +160,8 @@ img_result_fail(out, rc, "FAT-ENOSPC", dst, NULL, NULL);
 #    · 坏数据：环状 FAT、损坏 hive、非 WIM 文件、不存在的镜像
 #    · 取消：中途取消 → 返回 IMG_ECANCELLED、无半成品、剩余空间回基线
 # 3) 全部收口
-bash tests/run_all.sh      # 7 套：cmd / corrupt-chain / fd / thread / cancel / bcd / recovery
+bash tests/run_all.sh      # 默认 10 套：cmd / corrupt-chain / timeout / fd / thread / cancel /
+                           #   bcd / mbr_bcd / boot-repair / genbcd（recovery、wim 为可选档）
 ```
 **要求**：新功能至少补 1 条反用例；反用例必须走 `timeout`（死循环类）或检查"剩余空间/文件存在性"（半成品类）。
 
