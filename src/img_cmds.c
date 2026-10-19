@@ -1205,26 +1205,39 @@ static int cmd_boot_repair(img_ctx *ctx, const img_args *in, img_result *out){
         fclose(bf);
         img_bcd *b2=img_bcd_open_mem(bb,(size_t)bn); free(bb);
         if(!b2){ img_result_fail(out,IMG_EFORMAT,"BCD-REF-BAD",bref,NULL,NULL); return IMG_EFORMAT; }
-        char ld[64]=""; char g[40]="";
+        char ld[80]=""; char g[72]="";
         if(img_bcd_get_display_order_first(b2,ld,sizeof ld)==IMG_OK){
             char *p=ld; if(p[0]=='{') p++;
             snprintf(g,sizeof g,"%s",p); char *c=strchr(g,'}'); if(c)*c=0;
         }
-        uint32_t oldsig=0; uint64_t dummy=0;
-        if(!g[0]||img_bcd_get_mbr_binding(b2,g,"21000001",&oldsig,&dummy)!=IMG_OK){
+        /* 参考件里的旧值（改之前先记下：改完就读不到了） */
+        uint32_t oldsig=0; uint64_t old_os_off=0;
+        if(!g[0] || (img_bcd_get_mbr_binding(b2,g,"21000001",&oldsig,&old_os_off)!=IMG_OK &&
+                     img_bcd_get_mbr_binding(b2,g,"11000001",&oldsig,&old_os_off)!=IMG_OK)){
             img_bcd_close(b2);
             img_result_fail(out,IMG_EFORMAT,"BCD-REF-BAD",bref,"不是 BIOS BCD",NULL); return IMG_EFORMAT; }
+        uint32_t old_sig_bm=0; uint64_t old_sr_off=0;
+        img_bcd_get_mbr_binding(b2,IMG_BCD_GUID_BOOTMGR,"11000001",&old_sig_bm,&old_sr_off);
         uint32_t newsig=oldsig; if(sig_s) newsig=(uint32_t)strtoul(sig_s,NULL,16);
-        img_bcd_set_mbr_binding(b2,g,"21000001",newsig,sys_lba*512u);
-        img_bcd_set_mbr_binding(b2,g,"22000002",newsig,sys_lba*512u);
-        if(sr_lba) img_bcd_set_mbr_binding(b2,IMG_BCD_GUID_BOOTMGR,"11000001",newsig,sr_lba*512u);
+        uint64_t sys_off=sys_lba*512u, sr_off=sr_lba?sr_lba*512u:0;
+        /* ① 全对象扫描：bootmgr/memtest→SR，resume/OSLoader/OSDevice→系统分区，
+         *    按【旧偏移→新偏移 + 旧签名→新签名】一次改完（不再文件级裸替换字节） */
+        img_bcd_off_map maps[2]; int nmaps=0;
+        if(old_os_off && old_os_off!=sys_off){
+            maps[nmaps].old_off=old_os_off; maps[nmaps].new_off=sys_off; nmaps++; }
+        if(old_sr_off && old_sr_off!=old_os_off && old_sr_off!=sys_off && sr_off){
+            maps[nmaps].old_off=old_sr_off; maps[nmaps].new_off=sr_off; nmaps++; }
+        int swept=0;
+        int prc=img_bcd_patch_all_mbr_bindings(b2,oldsig,newsig,maps,(size_t)nmaps,&swept);
+        if(prc!=IMG_OK){ img_bcd_close(b2); img_result_fail(out,prc,"BCD-PATCH-FAIL",bref,NULL,NULL); return prc; }
+        /* ② 兜底：即使参考件缺 bootmgr 等元素，语义已知的三处也确保指对（幂等） */
+        img_bcd_set_mbr_binding(b2,g,"21000001",newsig,sys_off);
+        img_bcd_set_mbr_binding(b2,g,"11000001",newsig,sys_off);
+        if(sr_off) img_bcd_set_mbr_binding(b2,IMG_BCD_GUID_BOOTMGR,"11000001",newsig,sr_off);
+        img_result_u64(out,"bcd.bindings_patched",(uint64_t)swept);
         void *outb=NULL; size_t outn=0;
         if(img_bcd_save_mem(b2,&outb,&outn)!=IMG_OK){ img_bcd_close(b2); return IMG_EIO; }
         img_bcd_close(b2);
-        if(oldsig!=newsig&&outb&&outn){   /* 文件级全量替换散落签名 */
-            unsigned char ob[4],nb[4]; memcpy(ob,&oldsig,4); memcpy(nb,&newsig,4);
-            unsigned char*cb=outb; for(size_t i=0;i+4<=outn;i++) if(!memcmp(cb+i,ob,4)) memcpy(cb+i,nb,4);
-        }
         if(!sr_lba||!sr_b){ free(outb); img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","sr-lba","BCD 需要 SR 分区",NULL); return IMG_EINVAL; }
         img_ntfs_fs *fs=img_ntfs_mount_rw(q,sr_lba,sr_b);
         if(!fs){ free(outb); img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",NULL,"SR 不是 NTFS",NULL); return IMG_ESTATE; }

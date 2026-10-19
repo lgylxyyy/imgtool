@@ -652,6 +652,109 @@ int img_bcd_set_mbr_binding(img_bcd *b,const char*guid,const char*eid,
     return rc==0?IMG_OK:IMG_EIO;
 }
 
+/* ---------- 全对象扫描（见 img_bcd.h 注释） ----------
+ * 为什么按 hive 结构扫、而不是在整个文件里裸替换 4 字节签名：
+ *   ① 裸替换会误伤恰好等于签名的其它数据（概率低但不是零）；
+ *   ② 参考件里通常有 5 个 type=6 设备（bootmgr/memtest→SR，
+ *      resume/OSLoader/OSDevice→系统分区），只改已知三处会漏网；
+ *   ③ hivex 重写会把旧 cell 留在空闲区，裸替换会把"垃圾副本"也改掉。
+ * 这里只认 88 字节分区设备结构（offset 16 = 6），只改 [32..39]/[56..59]。 */
+typedef int (*mbr_scan_cb)(void *ud, const char *obj_guid, const char *eid,
+                           hive_node_h el, const char *vkey,
+                           char *blob, size_t len);
+static int scan_mbr_devices(img_bcd *b, mbr_scan_cb cb, void *ud){
+    if(!b||!cb) return IMG_EINVAL;
+    hive_node_h objs=hivex_node_get_child(b->h, hivex_root(b->h), "Objects");
+    if(!objs) return IMG_ENOENT;
+    hive_node_h *oc=hivex_node_children(b->h, objs);
+    if(!oc) return IMG_EIO;
+    int rc=IMG_OK;
+    for(size_t i=0; oc[i] && rc==IMG_OK; i++){
+        char *nm=hivex_node_name(b->h, oc[i]);
+        if(!nm) continue;
+        hive_node_h els=hivex_node_get_child(b->h, oc[i], "Elements");
+        hive_node_h *ec=els?hivex_node_children(b->h, els):NULL;
+        if(ec){
+            for(size_t j=0; ec[j] && rc==IMG_OK; j++){
+                char *eid=hivex_node_name(b->h, ec[j]);
+                if(!eid) continue;
+                hive_value_h *vs=hivex_node_values(b->h, ec[j]);
+                if(vs && vs[0]){
+                    hive_type t; size_t len=0;
+                    char *d=hivex_value_value(b->h, vs[0], &t, &len);
+                    char *vk=hivex_value_key(b->h, vs[0]);
+                    if(d && vk && t==hive_t_binary && len>=64){
+                        unsigned ty; memcpy(&ty, d+16, 4);
+                        if(ty==6){
+                            char g[64]; snprintf(g,sizeof g,"%s",nm);
+                            char *p=g; if(p[0]=='{') p++;
+                            char *c=strchr(p,'}'); if(c) *c=0;
+                            rc=cb(ud, p, eid, ec[j], vk, d, len);
+                        }
+                    }
+                    free(vk); free(d);
+                }
+                free(vs);
+                free(eid);
+            }
+            free(ec);
+        }
+        free(nm);
+    }
+    free(oc);
+    return rc;
+}
+typedef struct {
+    uint32_t old_sig, new_sig;
+    const img_bcd_off_map *maps; size_t n_maps;
+    img_bcd *b; int patched;
+} mbr_patch_ud;
+static int mbr_patch_cb(void *ud, const char *obj_guid, const char *eid,
+                        hive_node_h el, const char *vkey, char *blob, size_t len){
+    (void)obj_guid; (void)eid;
+    mbr_patch_ud *p=(mbr_patch_ud*)ud;
+    uint32_t sig; uint64_t off;
+    memcpy(&off, blob+MBR_OFF, 8);
+    memcpy(&sig, blob+MBR_SIG, 4);
+    uint32_t nsig=sig; uint64_t noff=off;
+    if(p->new_sig && (p->old_sig==0 || sig==p->old_sig)) nsig=p->new_sig;
+    for(size_t i=0;i<p->n_maps;i++)
+        if(off==p->maps[i].old_off){ noff=p->maps[i].new_off; break; }
+    if(nsig==sig && noff==off) return IMG_OK;   /* 已经是目标值：不重写 */
+    memcpy(blob+MBR_SIG, &nsig, 4);
+    memcpy(blob+MBR_OFF, &noff, 8);
+    hive_set_value sv={ .key=(char*)vkey, .t=hive_t_binary, .len=len, .value=blob };
+    if(hivex_node_set_value(p->b->h, el, &sv, 0)!=0) return IMG_EIO;
+    p->patched++;
+    return IMG_OK;
+}
+int img_bcd_patch_all_mbr_bindings(img_bcd *b,
+        uint32_t old_sig, uint32_t new_sig,
+        const img_bcd_off_map *maps, size_t n_maps, int *patched){
+    if(!b) return IMG_EINVAL;
+    if(n_maps && !maps) return IMG_EINVAL;
+    mbr_patch_ud ud={ .old_sig=old_sig, .new_sig=new_sig,
+                      .maps=maps, .n_maps=n_maps, .b=b, .patched=0 };
+    int rc=scan_mbr_devices(b, mbr_patch_cb, &ud);
+    if(patched) *patched=ud.patched;
+    return rc;
+}
+typedef struct { img_bcd_mbr_visit_fn fn; void *ud; } mbr_visit_ud;
+static int mbr_visit_cb(void *ud, const char *obj_guid, const char *eid,
+                        hive_node_h el, const char *vkey, char *blob, size_t len){
+    (void)el; (void)vkey; (void)len;
+    mbr_visit_ud *v=(mbr_visit_ud*)ud;
+    uint32_t sig; uint64_t off;
+    memcpy(&off, blob+MBR_OFF, 8);
+    memcpy(&sig, blob+MBR_SIG, 4);
+    return v->fn(v->ud, obj_guid, eid, sig, off);
+}
+int img_bcd_foreach_mbr_binding(img_bcd *b, img_bcd_mbr_visit_fn fn, void *ud){
+    if(!b||!fn) return IMG_EINVAL;
+    mbr_visit_ud v={ .fn=fn, .ud=ud };
+    return scan_mbr_devices(b, mbr_visit_cb, &v);
+}
+
 
 /* 内存 GUID 布局 → 文本（guid_text_to_bytes 的逆运算） */
 static void guid_bytes_to_text(const uint8_t *b, char *out /* ≥37 字节 */){

@@ -124,6 +124,26 @@ int img_bcd_get_mbr_binding(img_bcd *b,const char*obj_guid,const char*eid,
 int img_bcd_set_mbr_binding(img_bcd *b,const char*obj_guid,const char*eid,
                             uint32_t sig,uint64_t off);
 
+/* ---- 全对象扫描：MBR/BIOS 设备对象（type=6）批量改命门 ----
+ * 一张 BIOS BCD 里通常不止三处设备（实测 Win11 参考件 5 处：
+ *   bootmgr/memtest → 系统保留分区，resume/OSLoader/OSDevice → 系统分区）。
+ * 只改已知三处会漏掉 memtest/resume；而在整个文件里裸替换签名字节又可能
+ * 误伤恰好等于签名的其它数据。本函数按【hive 结构】遍历所有 type=6 设备：
+ *   签名：sig==old_sig 时改成 new_sig（old_sig=0 表示全部改成 new_sig）
+ *   偏移：命中 maps[i].old_off 时改成 maps[i].new_off；未命中保持原值
+ * 只改 blob 的 [32..39]（偏移）与 [56..59]（签名），其它字节原样。
+ * patched 返回实际改动的元素个数（可为 NULL）。 */
+typedef struct { uint64_t old_off, new_off; } img_bcd_off_map;
+int img_bcd_patch_all_mbr_bindings(img_bcd *b,
+        uint32_t old_sig, uint32_t new_sig,
+        const img_bcd_off_map *maps, size_t n_maps, int *patched);
+
+/* 只读遍历所有 MBR/BIOS 设备对象（测试/诊断用）。
+ * obj_guid 不带花括号。回调返回非 0 → 中止遍历并原样返回该值。 */
+typedef int (*img_bcd_mbr_visit_fn)(void *ud, const char *obj_guid, const char *eid,
+                                    uint32_t sig, uint64_t off);
+int img_bcd_foreach_mbr_binding(img_bcd *b, img_bcd_mbr_visit_fn fn, void *ud);
+
 /* 读 device 元素里的【分区 GUID】【磁盘 GUID】（文本形式，out 各需 ≥37 字节）。
  * 元素不是「分区设备」(type=6) 时返回 IMG_EFORMAT —— 换盘重建时用来分辨
  * 哪些 device 指向哪个分区（bootmgr 指 ESP、OS 加载器指系统分区）。 */

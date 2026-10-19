@@ -34,6 +34,11 @@ if(HIVEX_INC AND HIVEX_LIB)
   add_executable(recovery_bcd_test recovery_bcd_test.c ../src/img_bcd.c)
   target_include_directories(recovery_bcd_test PRIVATE ${HIVEX_INC})
   target_link_libraries(recovery_bcd_test PRIVATE imgtool ${HIVEX_LIB})
+
+  # MBR/BIOS BCD 设备命门批量改写（boot.repair 依赖；也是 --list 探针）
+  add_executable(mbr_bcd_test mbr_bcd_test.c)
+  target_include_directories(mbr_bcd_test PRIVATE ${HIVEX_INC})
+  target_link_libraries(mbr_bcd_test PRIVATE imgtool ${HIVEX_LIB})
 endif()
 
 # ---- 健壮性验证 ----
