@@ -50,7 +50,7 @@ endif()
 
 
 if(HIVEX_LIB)
-  add_executable(imggenbcd imggenbcd.c ../src/img_bcd.c)
+  add_executable(imggenbcd imggenbcd.c)
   target_include_directories(imggenbcd PRIVATE ${HIVEX_INC})
   target_link_libraries(imggenbcd PRIVATE imgtool ${HIVEX_LIB})
 endif()

@@ -6,6 +6,10 @@
 #include "img_ntfs_fs.h"
 #include "img_event.h"
 #include "ntfs_bridge.h"
+#include <ntfs-3g/attrib.h>
+#include <ntfs-3g/index.h>
+#include <ntfs-3g/inode.h>
+#include <ntfs-3g/unistr.h>
 #include "img_ntfs_fmt.h"
 #include "img_ntfs_dev.h"
 #include <stdio.h>
@@ -40,6 +44,20 @@ img_ntfs_fs *img_ntfs_mount_rw(img_qcow2 *q, uint64_t part_lba, uint64_t part_by
 
     ntfs_volume *vol = ntfs_device_mount(dev, 0);   /* 0 = 读写 */
     if(!vol){
+        /* ★ 休眠卷（Fast Startup）自动重试：IGNORE_HIBERFILE 只忽略检查，
+           读操作安全；要清休眠请用 rm /hiberfil.sys（见 WORKPLAN 休眠节）*/
+        /* 第一次失败可能把全局桥上下文清掉了 → 重试要【整套重建】ctx+dev */
+        ntfs_device_free(dev);
+        img_ntfs_ctx_deactivate();
+        img_ntfs_ctx_free(ctx);
+        ctx = img_ntfs_ctx_new(q, part_lba, part_bytes);
+        if(ctx){ img_ntfs_ctx_activate(q, part_lba, part_bytes); }
+        dev = ntfs_device_alloc("imgtool-dev", 0, img_ntfs_device_ops(), NULL);
+        if(dev && ctx){
+            vol = ntfs_device_mount(dev, 0x04000000UL);   /* 内部MS_RECOVER(实证) */
+        }
+    }
+    if(!vol){
         ntfs_device_free(dev);
         img_ntfs_ctx_deactivate();
         img_ntfs_ctx_free(ctx);
@@ -56,8 +74,11 @@ ntfs_volume *img_ntfs_probe_vol(img_ntfs_fs *fs){ return fs?fs->vol:NULL; }   /*
 void img_ntfs_umount(img_ntfs_fs *fs){
     if(!fs) return;
     if(fs->mounted && fs->vol){
-        /* ★ ntfs_umount 内部已 ntfs_device_free()，这里绝不能再调一次 */
-        ntfs_umount(fs->vol, false);
+        /* ★ ntfs_umount 内部已 ntfs_device_free()，这里绝不能再调一次
+         * ★★ 2026-10-18：force 必须 true —— false 时若卷带任何错误标志，
+         *   ntfs_umount 会【跳过清理】直接返回 → 卷留脏 → bootmgr 偶发读 BCD
+         *   踩到脏结构 triple-fault 重启（双系统盘间歇崩溃的真凶，5连测已证）。*/
+        ntfs_umount(fs->vol, true);
         fs->mounted=false;
     }
     img_ntfs_ctx_deactivate();
@@ -627,3 +648,5 @@ int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
     if(moved>0) return IMG_OK;
     return first_err?first_err:IMG_ESTATE;
 }
+
+

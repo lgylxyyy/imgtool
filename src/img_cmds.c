@@ -5,6 +5,8 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "img_cmd.h"
+#include "img_fixboot.h"
+#include "img_bcd.h"
 #include "img_io.h"
 #include "img_fat32.h"
 #include "img_fat32_fs.h"
@@ -1008,7 +1010,10 @@ static const img_arg A_PARTLAYOUT[] = {
     {"logical-name", IMG_A_STR, false, "Data", "扩展分区内逻辑分区的卷标", NULL},
     {"extended", IMG_A_BOOL, false, "false", "没有恢复分区时也建扩展+逻辑分区（单变量实验用）", NULL},
     {"single", IMG_A_BOOL, false, "false", "单分区模式：整盘一个活动系统分区（bootmgr/BCD 放它里面）", NULL},
+{"part-guid", IMG_A_STR, false, NULL, "自定义分区唯一GUID：序号:GUID[,序号:GUID]（1起；非法→GUID-INVALID-BAD）", NULL},
+    {"disk-guid", IMG_A_STR, false, NULL, "自定义 GPT 盘 GUID（非法→GUID-INVALID-BAD）", NULL},
 };
+static int apply_custom_guids(const img_args *in, img_parttable_t *t);
 static int cmd_part_layout(img_ctx *ctx, const img_args *in, img_result *out){
     img_qcow2 *q=img_ctx_qcow2(ctx);
     if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
@@ -1028,6 +1033,7 @@ static int cmd_part_layout(img_ctx *ctx, const img_args *in, img_result *out){
             return img_result_fail(out,rc,"CMD-ARG-BAD","img","单分区建不了",NULL), rc;
         { uint32_t sig=0; FILE *ur=fopen("/dev/urandom","rb"); if(ur){ if(fread(&sig,1,4,ur)!=4) sig=0; fclose(ur);} if(!sig) sig=0x22334455;
           t.disk_signature=sig; }
+    if(apply_custom_guids(in,&t)!=IMG_OK){ img_result_fail(out,IMG_EINVAL,"GUID-INVALID-BAD","part-guid/disk-guid","GUID 非法或序号越界",NULL); return IMG_EINVAL; }
         rc=img_parttable_write(q,&t);
         if(rc){ img_result_fail(out,rc,"PART-READ-FAIL",NULL,"写分区表失败",NULL); return rc; }
         img_result_u64(out,"parts_total",1);
@@ -1061,6 +1067,7 @@ static int cmd_part_layout(img_ctx *ctx, const img_args *in, img_result *out){
     /* 随机磁盘签名（★ 换新盘不该沿用源盘签名）*/
     uint32_t sig=0; { FILE *ur=fopen("/dev/urandom","rb"); if(ur){ if(fread(&sig,1,4,ur)!=4) sig=0; fclose(ur);} if(!sig) sig=0x22334455; }
     t.disk_signature=sig;
+    if(apply_custom_guids(in,&t)!=IMG_OK){ img_result_fail(out,IMG_EINVAL,"GUID-INVALID-BAD","part-guid/disk-guid","GUID 非法或序号越界",NULL); return IMG_EINVAL; }
     rc=img_parttable_write(q,&t);
     if(rc){ img_result_fail(out,rc,"PART-READ-FAIL",NULL,"写分区表失败",NULL); return rc; }
     img_result_u64(out,"disk_signature",sig);
@@ -1092,6 +1099,159 @@ static int cmd_cmd_list(img_ctx *ctx, const img_args *in, img_result *out){
 }
 
 /* ================= 表 ================= */
+/* boot.repair —— BIOS 引导一键修复（诊断→按需重写→复验） */
+static const img_arg A_BOOTREPAIR[]={
+    {"img", IMG_A_STR, true, NULL, "目标镜像", NULL},
+    {"sys-lba", IMG_A_U64, true, NULL, "系统分区起始 LBA", NULL},
+    {"sr-lba", IMG_A_U64, false, NULL, "系统保留分区 LBA（缺省=活动分区）", NULL},
+    {"sig", IMG_A_STR, false, NULL, "磁盘签名 HEX（缺省=保持现值）", NULL},
+    {"mbr-code", IMG_A_STR, false, NULL, "MBR 引导码文件（≥440字节；缺省不动 MBR）", NULL},
+    {"vbr-tpl", IMG_A_STR, false, NULL, "VBR 模板 镜像:lba（缺省不动 VBR）", NULL},
+    {"bcd-ref", IMG_A_STR, false, NULL, "参考 BCD 文件（缺省不动 BCD）", NULL},
+};
+static int apply_custom_guids(const img_args *in, img_parttable_t *t){
+    const char *dg=img_args_get(in,"disk-guid");
+    if(dg&&dg[0]){
+        if(img_partition_guid_valid(dg)!=IMG_OK) return IMG_EINVAL;
+        snprintf(t->disk_guid,sizeof t->disk_guid,"%s",dg);
+    }
+    const char *pg=img_args_get(in,"part-guid");
+    if(pg&&pg[0]){
+        char buf[512]; snprintf(buf,sizeof buf,"%s",pg);
+        for(char *tok=strtok(buf,",");tok;tok=strtok(NULL,",")){
+            char *cl=strchr(tok,':'); if(!cl) return IMG_EINVAL;
+            *cl=0; int idx=atoi(tok); const char *g=cl+1;
+            if(idx<1||idx>IMG_MAX_PARTITIONS||!t->parts[idx-1].used) return IMG_EINVAL;
+            if(img_partition_guid_valid(g)!=IMG_OK) return IMG_EINVAL;
+            snprintf(t->parts[idx-1].part_guid,sizeof t->parts[idx-1].part_guid,"%s",g);
+        }
+    }
+    return IMG_OK;
+}
+static int cmd_boot_repair(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx;
+    const char *imgp=img_args_get(in,"img");
+    uint64_t sys_lba=img_args_u64(in,"sys-lba",0);
+    uint64_t sr_lba =img_args_u64(in,"sr-lba",0);
+    const char *sig_s=img_args_get(in,"sig");
+    const char *mcode=img_args_get(in,"mbr-code");
+    const char *vtpl =img_args_get(in,"vbr-tpl");
+    const char *bref =img_args_get(in,"bcd-ref");
+    if(!imgp||!sys_lba){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","img/sys-lba","需要 --img 与 --sys-lba",NULL); return IMG_EINVAL; }
+    img_io_opts_t io={0}; io.writable=true;
+    img_io*f=img_io_open_path(imgp,&io);
+    if(!f){ img_result_fail(out,IMG_ENOENT,"HOST-OPEN-FAIL",imgp,NULL,NULL); return IMG_ENOENT; }
+    img_qcow2_opts_t qo={0}; img_qcow2*q=img_qcow2_open(f,&qo);
+    if(!q||img_qcow2_write_init(q)!=IMG_OK){ img_result_fail(out,IMG_EFORMAT,"IMG-FORMAT",imgp,NULL,NULL); return IMG_EFORMAT; }
+    img_parttable_t t; memset(&t,0,sizeof t);
+    if(img_parttable_read(q,&t,0)!=IMG_OK){ img_result_fail(out,IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL); return IMG_ESTATE; }
+    uint64_t sys_b=0,sr_b=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++){
+        if(!t.parts[i].used) continue;
+        uint64_t b=(t.parts[i].last_lba-t.parts[i].first_lba+1)*512u;
+        if(t.parts[i].first_lba==sys_lba) sys_b=b;
+        if(t.parts[i].first_lba==sr_lba)  sr_b=b;
+        if(!sr_lba && (t.parts[i].status&0x80)){ sr_lba=t.parts[i].first_lba; sr_b=b; }
+    }
+    if(!sr_lba && t.parts[0].used){ sr_lba=t.parts[0].first_lba; sr_b=(t.parts[0].last_lba-t.parts[0].first_lba+1)*512u; }
+    if(!sys_b){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","sys-lba","LBA 不在分区表里",NULL); return IMG_EINVAL; }
+    /* ① 诊断 */
+    unsigned char z[512]; int mbr_sig_ok=0,mbr_code_ok=0,vbr_ok=0,bcd_ok=0;
+    if(img_qcow2_read(q,0,z,512)==IMG_OK){
+        mbr_sig_ok=(z[510]==0x55&&z[511]==0xAA);
+        for(int i=0;i<440;i++) if(z[i]){ mbr_code_ok=1; break; }
+    }
+    if(img_qcow2_read(q,sys_lba*512u,z,512)==IMG_OK) vbr_ok=(!memcmp(z+3,"NTFS    ",8));
+    if(sr_lba&&sr_b){
+        img_ntfs_fs *fs=img_ntfs_mount_rw(q,sr_lba,sr_b);
+        if(fs){ void *b=NULL; size_t n=0;
+                if(img_ntfs_read_file(fs,"/Boot/BCD",&b,&n)==IMG_OK&&n){ bcd_ok=1; free(b); }
+                img_ntfs_umount(fs); }
+    }
+    img_result_bool(out,"diag.mbr_sig_ok",mbr_sig_ok);
+    img_result_bool(out,"diag.mbr_code_ok",mbr_code_ok);
+    img_result_bool(out,"diag.vbr_ntfs_ok",vbr_ok);
+    img_result_bool(out,"diag.bcd_ok",bcd_ok);
+    int fixed=0;
+    /* ②-1 MBR：写码+55AA+签名（保持表项不动） */
+    if(mcode){
+        FILE*mf=fopen(mcode,"rb");
+        if(!mf){ img_result_fail(out,IMG_ENOENT,"HOST-OPEN-FAIL",mcode,NULL,NULL); return IMG_ENOENT; }
+        unsigned char sec[512]={0}; size_t got=fread(sec,1,440,mf); fclose(mf);
+        if(got<440){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","mbr-code","码文件不足440字节",NULL); return IMG_EINVAL; }
+        if(img_qcow2_read(q,0,z,512)!=IMG_OK){ img_result_fail(out,IMG_EIO,"PART-READ-FAIL",NULL,NULL,NULL); return IMG_EIO; }
+        if(sig_s){ uint32_t sg=(uint32_t)strtoul(sig_s,NULL,16); memcpy(z+440,&sg,4); }
+        memcpy(z,sec,440); z[510]=0x55; z[511]=0xAA;
+        if(img_qcow2_write(q,0,z,512)!=IMG_OK){ img_result_fail(out,IMG_EIO,"PART-WRITE-FAIL",NULL,NULL,NULL); return IMG_EIO; }
+        fixed++;
+    }
+    /* ②-2 VBR：模板引导码（保留自己的 BPB） */
+    if(vtpl){
+        char buf[512]; snprintf(buf,sizeof buf,"%s",vtpl);
+        char *cl=strrchr(buf,':'); if(!cl){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","vbr-tpl","格式 镜像:lba",NULL); return IMG_EINVAL; }
+        *cl=0; uint64_t tl=strtoull(cl+1,NULL,0);
+        img_io_opts_t io2={0}; img_io*f2=img_io_open_path(buf,&io2);
+        img_qcow2_opts_t qo2={0}; img_qcow2*q2=f2?img_qcow2_open(f2,&qo2):NULL;
+        if(!q2){ img_result_fail(out,IMG_ENOENT,"HOST-OPEN-FAIL",buf,NULL,NULL); return IMG_ENOENT; }
+        int rc=img_fixboot(q,sys_lba,q2,tl,NULL);
+        if(rc!=IMG_OK){ img_result_fail(out,rc,"BOOT-VBR-WRITE-FAIL",NULL,NULL,NULL); return rc; }
+        fixed++;
+    }
+    /* ②-3 BCD：参考件 → 改命门（签名+分区字节偏移）→ 写回 SR */
+    if(bref){
+        FILE*bf=fopen(bref,"rb"); if(!bf){ img_result_fail(out,IMG_ENOENT,"HOST-OPEN-FAIL",bref,NULL,NULL); return IMG_ENOENT; }
+        fseek(bf,0,SEEK_END); long bn=ftell(bf); fseek(bf,0,SEEK_SET);
+        void *bb=malloc(bn); if(!bb||fread(bb,1,bn,bf)!=(size_t)bn){ fclose(bf); free(bb); return IMG_EIO; }
+        fclose(bf);
+        img_bcd *b2=img_bcd_open_mem(bb,(size_t)bn); free(bb);
+        if(!b2){ img_result_fail(out,IMG_EFORMAT,"BCD-REF-BAD",bref,NULL,NULL); return IMG_EFORMAT; }
+        char ld[64]=""; char g[40]="";
+        if(img_bcd_get_display_order_first(b2,ld,sizeof ld)==IMG_OK){
+            char *p=ld; if(p[0]=='{') p++;
+            snprintf(g,sizeof g,"%s",p); char *c=strchr(g,'}'); if(c)*c=0;
+        }
+        uint32_t oldsig=0; uint64_t dummy=0;
+        if(!g[0]||img_bcd_get_mbr_binding(b2,g,"21000001",&oldsig,&dummy)!=IMG_OK){
+            img_bcd_close(b2);
+            img_result_fail(out,IMG_EFORMAT,"BCD-REF-BAD",bref,"不是 BIOS BCD",NULL); return IMG_EFORMAT; }
+        uint32_t newsig=oldsig; if(sig_s) newsig=(uint32_t)strtoul(sig_s,NULL,16);
+        img_bcd_set_mbr_binding(b2,g,"21000001",newsig,sys_lba*512u);
+        img_bcd_set_mbr_binding(b2,g,"22000002",newsig,sys_lba*512u);
+        if(sr_lba) img_bcd_set_mbr_binding(b2,IMG_BCD_GUID_BOOTMGR,"11000001",newsig,sr_lba*512u);
+        void *outb=NULL; size_t outn=0;
+        if(img_bcd_save_mem(b2,&outb,&outn)!=IMG_OK){ img_bcd_close(b2); return IMG_EIO; }
+        img_bcd_close(b2);
+        if(oldsig!=newsig&&outb&&outn){   /* 文件级全量替换散落签名 */
+            unsigned char ob[4],nb[4]; memcpy(ob,&oldsig,4); memcpy(nb,&newsig,4);
+            unsigned char*cb=outb; for(size_t i=0;i+4<=outn;i++) if(!memcmp(cb+i,ob,4)) memcpy(cb+i,nb,4);
+        }
+        if(!sr_lba||!sr_b){ free(outb); img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","sr-lba","BCD 需要 SR 分区",NULL); return IMG_EINVAL; }
+        img_ntfs_fs *fs=img_ntfs_mount_rw(q,sr_lba,sr_b);
+        if(!fs){ free(outb); img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",NULL,"SR 不是 NTFS",NULL); return IMG_ESTATE; }
+        img_ntfs_mkdir_p(fs,"/Boot");
+        int rc=img_ntfs_put_file_mem(fs,outb,outn,"/Boot/BCD");
+        img_ntfs_umount(fs); free(outb);
+        if(rc!=IMG_OK){ img_result_fail(out,rc,"BCD-WRITE-FAIL",NULL,NULL,NULL); return rc; }
+        fixed++;
+    }
+    /* ③ 复验 */
+    int v_sig=0,v_code=0,v_vbr=0,v_bcd=0;
+    if(img_qcow2_read(q,0,z,512)==IMG_OK){ v_sig=(z[510]==0x55&&z[511]==0xAA);
+        for(int i=0;i<440;i++) if(z[i]){ v_code=1; break; } }
+    if(img_qcow2_read(q,sys_lba*512u,z,512)==IMG_OK) v_vbr=(!memcmp(z+3,"NTFS    ",8));
+    if(sr_lba&&sr_b){ img_ntfs_fs *fs=img_ntfs_mount_rw(q,sr_lba,sr_b);
+        if(fs){ void *b=NULL; size_t n=0;
+                if(img_ntfs_read_file(fs,"/Boot/BCD",&b,&n)==IMG_OK&&n){ v_bcd=1; free(b); }
+                img_ntfs_umount(fs); } }
+    img_result_bool(out,"verify.mbr_sig_ok",v_sig);
+    img_result_bool(out,"verify.mbr_code_ok",v_code);
+    img_result_bool(out,"verify.vbr_ntfs_ok",v_vbr);
+    img_result_bool(out,"verify.bcd_ok",v_bcd);
+    img_result_u64(out,"fixed_count",(uint64_t)fixed);
+    img_result_bool(out,"ok", v_sig&&v_code&&v_vbr&&v_bcd);
+    return IMG_OK;
+}
+
 const img_cmd IMG_CMD_TABLE[] = {
     {"img.info",  "1.0", "显示镜像基本信息（大小/分区表/分区数）",
         A_INFO,   (int)(sizeof A_INFO  /sizeof A_INFO[0]),   cmd_img_info},
@@ -1123,6 +1283,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_MBRBOOT,(int)(sizeof A_MBRBOOT/sizeof A_MBRBOOT[0]), cmd_mbrboot},
     {"part.layout","1.0", "BIOS/MBR 标准布局生成器（系统保留+系统+恢复0x27+扩展分区含逻辑分区）",
         A_PARTLAYOUT,(int)(sizeof A_PARTLAYOUT/sizeof A_PARTLAYOUT[0]), cmd_part_layout},
+    {"boot.repair","1.0","BIOS 引导一键修复（诊断→按需重写→复验→JSON）",
+        A_BOOTREPAIR,(int)(sizeof A_BOOTREPAIR/sizeof A_BOOTREPAIR[0]), cmd_boot_repair},
     {"fat.exists", "1.0", "查 FAT32 路径是否存在（断点续跑探测原语）",
         A_FATEXISTS,(int)(sizeof A_FATEXISTS/sizeof A_FATEXISTS[0]), cmd_fat_exists},
     {"ctl.cancel","1.0", "请求取消正在执行的操作（另一线程调用；协作式，下一个检查点生效）",

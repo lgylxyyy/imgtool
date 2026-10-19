@@ -45,8 +45,23 @@ int main(int argc, char **argv){
     }
     const char *img=argv[1];
     uint64_t lba = strtoull(argv[2],NULL,0);
-    const char *src=argv[3], *dst=argv[4];
-    const char *valname = (argc>5 && argv[5][0]) ? argv[5] : "imgtool-one-shot";
+    /* ★ --winre-auto 模式（2026-10-19 用户定的新 WinRE 方案）：
+       winre.wim+boot.sdi 放进系统分区 \Windows\System32\Recovery\（Windows 原生
+       机制：reagentc /enable 找不到 RE 分区时默认从这里取），RunOnce 跑
+       reagentc /enable —— 不依赖恢复分区检测（旧方案 RE 分区系统认不到）。
+       用法: imgrunonce <qcow2> <系统分区lba> --winre-auto [--winre-from=<qcow2>:<RE分区lba>] */
+    int winre_auto = (argc>3 && !strcmp(argv[3],"--winre-auto"));
+    const char *src=NULL, *dst="/Windows/System32/imgtool/winre-once.cmd";
+    const char *valname="WinRE-Enable";
+    const char *wr_from=NULL;
+    if(winre_auto){
+        for(int i=4;i<argc;i++)
+            if(!strncmp(argv[i],"--winre-from=",13)) wr_from=argv[i]+13;
+    } else {
+        if(argc<5){ fprintf(stderr,"用法见文件头\n"); return 2; }
+        src=argv[3]; dst=argv[4];
+        valname = (argc>5 && argv[5][0]) ? argv[5] : "imgtool-one-shot";
+    }
 
     /* 打开镜像 + 挂载 NTFS */
     img_io_opts_t io={0}; io.writable=true;
@@ -64,8 +79,80 @@ int main(int argc, char **argv){
     img_ntfs_fs *fs = img_ntfs_mount_rw(q,lba,pb);
     if(!fs) die("系统分区不是合法 NTFS", IMG_ESTATE);
 
+    if(winre_auto){
+        if(wr_from){
+            /* 源 RE 分区 → 系统分区 Recovery 文件夹（内存直搬，无宿主临时文件）*/
+            char wf[512]; snprintf(wf,sizeof wf,"%s",wr_from);
+            char *colon=strrchr(wf,':');
+            if(!colon){ img_ntfs_umount(fs); die("--winre-from 要写成 镜像:lba", IMG_EINVAL); }
+            *colon=0; uint64_t slba=strtoull(colon+1,NULL,0);
+            img_io_opts_t io2={0};
+            img_io *f2=img_io_open_path(wf,&io2);
+            img_qcow2_opts_t qo2={0};
+            img_qcow2 *q2=f2?img_qcow2_open(f2,&qo2):NULL;
+            img_parttable_t t2; uint64_t pb2=0;
+            if(!q2||img_parttable_read(q2,&t2,0)!=IMG_OK){ img_ntfs_umount(fs); die("源盘/表", IMG_ESTATE); }
+            for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+                if(t2.parts[i].used&&t2.parts[i].first_lba==slba){ pb2=(t2.parts[i].last_lba-t2.parts[i].first_lba+1)*512u; break; }
+            img_ntfs_fs *fs2=pb2?img_ntfs_mount_rw(q2,slba,pb2):NULL;
+            if(!fs2){ img_ntfs_umount(fs); die("源 RE 分区不是 NTFS", IMG_ESTATE); }
+            /* ★ 阶段1：源卷【只读不写】——桥的当前卷是全局的，两卷交替挂会串台
+               （写目标时 ctx 还指着源卷 → EIO，2026-10-19 实测抓到）。先全读进内存。*/
+            static const char *CAND[][2]={
+                {"/Recovery/WindowsRE/Winre.wim","/Windows/System32/Recovery/Winre.wim"},
+                {"/Recovery/WindowsRE/winre.wim","/Windows/System32/Recovery/Winre.wim"},
+                {"/Recovery/WindowsRE/boot.sdi","/Windows/System32/Recovery/boot.sdi"},
+                {"/boot.sdi","/Windows/System32/Recovery/boot.sdi"}};
+            void *bufs[4]={0}; size_t lens[4]={0}; int slots[4]={-1,-1,-1,-1};
+            for(int k=0;k<4;k++){
+                void *b=NULL; size_t n=0;
+                if(img_ntfs_read_file(fs2,CAND[k][0],&b,&n)==IMG_OK&&n){
+                    int slot=(k<2)?0:2;   /* wim 槽 / sdi 槽（同槽后者覆盖前者）*/
+                    if(k>=2) slot=2;
+                    if(k==1) slot=1;
+                    if(bufs[slot]) free(bufs[slot]);
+                    bufs[slot]=b; lens[slot]=n; slots[slot]=slot;
+                    fprintf(stderr,"  读入 %s (%zu 字节)\n", CAND[k][0], n);
+                    if(k==0||k==2) break_unique: (void)0;
+                }
+            }
+            /* 简化槽位：0=wim(取第一个命中的) 2=sdi(取第一个命中的) */
+            img_ntfs_umount(fs2);
+            /* ★ 全局 ctx 被源卷顶掉后不会自动归还 → 目标卷【重挂】换新句柄+激活 ctx
+               （2026-10-19 实测：仅卸源卷不够，写目标仍 EIO）*/
+            fs = img_ntfs_mount_rw(q, lba, pb);
+            if(!fs) die("目标卷重挂失败", IMG_ESTATE);
+            img_ntfs_mkdir_p(fs,"/Windows/System32/Recovery");
+            int got=0;
+            static const int USE[2]={0,2};
+            for(int u=0;u<2;u++){
+                int sl=USE[u];
+                if(!bufs[sl]) continue;
+                char tmpn[]="/tmp/winreXXXXXX"; int tfd=mkstemp(tmpn);
+                int rc=IMG_EIO;
+                if(tfd>=0){
+                    if(write(tfd,bufs[sl],lens[sl])==(ssize_t)lens[sl]){ close(tfd);
+                        rc=img_ntfs_put_file(fs,tmpn,CAND[sl==0?0:2][1],NULL);
+                    } else close(tfd);
+                    unlink(tmpn);
+                }
+                fprintf(stderr,"  %s → %s (%zu 字节)%s\n",
+                        rc==IMG_OK?"✅":"❌", CAND[sl==0?0:2][1], lens[sl],
+                        rc==IMG_OK?"":img_strerror(rc));
+                if(rc==IMG_OK) got++;
+                free(bufs[sl]); bufs[sl]=NULL;
+            }
+            if(!got){ img_ntfs_umount(fs); die("源分区里找不到 winre.wim", IMG_ENOENT); }
+            fprintf(stderr,"  ⚠ 未给 --winre-from：只写启用脚本（假定 Recovery 文件夹已有 Winre.wim）\n");
+        }
+        static const char SCRIPT[]="@echo off\r\nreagentc /enable\r\ndel \"%~f0\"\r\n";
+        img_ntfs_mkdir_p(fs,"/Windows/System32/imgtool");
+        int rc=img_ntfs_put_file_mem(fs,SCRIPT,sizeof SCRIPT-1,dst);
+        if(rc!=IMG_OK){ img_ntfs_umount(fs); die("启用脚本写入", rc); }
+        fprintf(stderr,"  ✅ 启用脚本 → %s（RunOnce: %s）\n", dst, valname);
+    }
     /* ① 脚本写进 NTFS（自动建目录） */
-    {
+    if(src){
         char dir[512]; snprintf(dir,sizeof dir,"%s",dst);
         char *slash=strrchr(dir,'/');
         if(slash && slash!=dir){ *slash=0; img_ntfs_mkdir_p(fs,dir); }

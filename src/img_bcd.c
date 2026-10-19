@@ -594,6 +594,65 @@ int img_bcd_patch_device_guids(img_bcd *b, const char *obj_guid, const char *eid
     return rc==0 ? IMG_OK : IMG_EIO;
 }
 
+/* ★ MBR/BIOS 设备对象的命门字节（2026-10-18 字节级实测：Win11 BCD @13560 区）
+ *   blob[0..3]   = 0
+ *   blob[4..11]  = 分区【字节偏移】LE64（= LBA × 512；bootmgr 找分区靠它）
+ *   blob[24..27] = 类型标记 01 00 00 00
+ *   blob[28..31] = 磁盘签名 LE32（MBR @0x1B8 的 4 字节；bootmgr 找盘靠它）
+ * 与 BCD-SYS update_device.sh 改的两个字段完全对应（它是 Linux 版 bcdboot 的做法）。
+ * GPT/UEFI 版设备对象是另一布局（88 字节 GUID 版），见 patch_device_guids。 */
+/* ★ 修正（2026-10-18 实测 blob 后）：MBR 设备对象【复用 GPT 的 88 字节 type-6 布局】：
+ *   [16..19] = 6（类型标记，与 GPT 分区设备相同）
+ *   [32..39] = 分区【字节偏移】LE64（GPT 的"分区GUID槽"前8字节放偏移）
+ *   [56..59] = 磁盘签名 LE32     （GPT 的"磁盘GUID槽"前4字节放签名）
+ * 与 BCD-SYS update_device.sh 改的两个字段完全对应。 */
+#define MBR_OFF 32
+#define MBR_SIG 56
+static int mbr_el_node(img_bcd *b,const char*guid,const char*eid,hive_node_h*el_out){
+    if(!b||!guid||!eid||!el_out) return IMG_EINVAL;
+    hive_node_h o=find_object(b,guid); if(!o) return IMG_ENOENT;
+    hive_node_h els=hivex_node_get_child(b->h,o,"Elements");
+    hive_node_h el =els?hivex_node_get_child(b->h,els,eid):0;
+    if(!el||hivex_node_nr_values(b->h,el)==0) return IMG_ENOENT;
+    *el_out=el; return IMG_OK;
+}
+int img_bcd_get_mbr_binding(img_bcd *b,const char*guid,const char*eid,
+                            uint32_t *sig_out,uint64_t *off_out){
+    hive_node_h el; int rc=mbr_el_node(b,guid,eid,&el); if(rc) return rc;
+    hive_value_h *vs=hivex_node_values(b->h,el);
+    hive_type t; size_t len=0;
+    char *d=hivex_value_value(b->h,vs[0],&t,&len); free(vs);
+    if(!d) return IMG_EIO;
+    if(t!=hive_t_binary||len<32){ free(d); return IMG_EFORMAT; }
+    unsigned ty; memcpy(&ty,d+16,4);
+    if(ty!=6){ free(d); return IMG_EFORMAT; }   /* 不是「分区设备」 */
+    uint64_t off; uint32_t sig;
+    memcpy(&off, d+MBR_OFF, 8);
+    memcpy(&sig, d+MBR_SIG, 4);
+    free(d);
+    if(off_out) *off_out=off;
+    if(sig_out) *sig_out=sig;
+    return IMG_OK;
+}
+int img_bcd_set_mbr_binding(img_bcd *b,const char*guid,const char*eid,
+                            uint32_t sig,uint64_t off){
+    hive_node_h el; int rc=mbr_el_node(b,guid,eid,&el); if(rc) return rc;
+    hive_value_h *vs=hivex_node_values(b->h,el);
+    hive_type t; size_t len=0;
+    char *d=hivex_value_value(b->h,vs[0],&t,&len); free(vs);
+    if(!d) return IMG_EIO;
+    if(t!=hive_t_binary||len<32){ free(d); return IMG_EFORMAT; }
+    unsigned ty2; memcpy(&ty2,d+16,4);
+    if(ty2!=6){ free(d); return IMG_EFORMAT; }
+    memcpy(d+MBR_OFF, &off, 8);
+    memcpy(d+MBR_SIG, &sig, 4);
+    hive_set_value sv={ .key=(char*)"element", .t=hive_t_binary, .len=len, .value=d };
+    rc=hivex_node_set_value(b->h, el, &sv, 0);
+    free(d);
+    return rc==0?IMG_OK:IMG_EIO;
+}
+
+
 /* 内存 GUID 布局 → 文本（guid_text_to_bytes 的逆运算） */
 static void guid_bytes_to_text(const uint8_t *b, char *out /* ≥37 字节 */){
     snprintf(out, 37,

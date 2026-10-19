@@ -118,6 +118,11 @@ int img_bcd_get_element_binary(img_bcd *b, const char *guid, const char *eid,
 /* 把 device 对象里的分区 GUID / 磁盘 GUID 换成新盘的值（换盘重建后必做） */
 int img_bcd_patch_device_guids(img_bcd *b, const char *obj_guid, const char *eid,
                                const char *part_guid, const char *disk_guid);
+/* MBR/BIOS 设备命门：读/写【磁盘签名 + 分区字节偏移】（见 img_bcd.c 布局注释） */
+int img_bcd_get_mbr_binding(img_bcd *b,const char*obj_guid,const char*eid,
+                            uint32_t *sig_out,uint64_t *off_out);
+int img_bcd_set_mbr_binding(img_bcd *b,const char*obj_guid,const char*eid,
+                            uint32_t sig,uint64_t off);
 
 /* 读 device 元素里的【分区 GUID】【磁盘 GUID】（文本形式，out 各需 ≥37 字节）。
  * 元素不是「分区设备」(type=6) 时返回 IMG_EFORMAT —— 换盘重建时用来分辨
