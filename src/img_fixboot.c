@@ -30,6 +30,11 @@ int img_fixboot(img_qcow2 *dst, uint64_t dst_lba, img_qcow2 *tpl,
               img_prog_op(prog, IMG_OP_WRITE); img_prog_count(prog,0,10); }
 
     /* ① 扇区0 = 自己的 [0x00..0x53] + 模板的 [0x54..0x1FD] + 模板签名 */
+    /* ★ BPB 几何字段：mkntfs 留 0，Windows 引导代码靠它算 CHS；
+     *   不补 → SeaBIOS "A disk read error occurred"（实测 2026-10-20）。 */
+    dsec[0x18] = 63;               /* sectors per track */
+    dsec[0x1A] = 255;              /* heads */
+    { uint32_t hid=(uint32_t)dst_lba; memcpy(dsec+0x1C, &hid, 4); }
     memcpy(dsec + CODE_START, tsec + CODE_START, CODE_END - CODE_START);
     dsec[510] = 0x55; dsec[511] = 0xAA;
     rc = img_qcow2_write(dst, dst_lba*512ULL, dsec, 512);
@@ -44,6 +49,18 @@ int img_fixboot(img_qcow2 *dst, uint64_t dst_lba, img_qcow2 *tpl,
     }
     if(prog) img_prog_done(prog, "NTFS 引导代码写入完成");
     return IMG_OK;
+}
+
+int img_ntfs_fix_geometry(img_qcow2 *q, uint64_t lba){
+    if(!q) return IMG_EINVAL;
+    uint8_t s[512];
+    int rc = img_qcow2_read_full(q, lba*512ULL, s, sizeof s);
+    if(rc) return rc;
+    if(memcmp(s+3, "NTFS    ", 8)!=0) return IMG_EFORMAT;
+    s[0x18] = 63;
+    s[0x1A] = 255;
+    { uint32_t hid=(uint32_t)lba; memcpy(s+0x1C, &hid, 4); }
+    return img_qcow2_write(q, lba*512ULL, s, sizeof s);
 }
 
 int img_fixboot_verify(img_qcow2 *dst, uint64_t dst_lba, img_qcow2 *tpl,

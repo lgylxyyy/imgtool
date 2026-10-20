@@ -37,6 +37,11 @@ int img_fixboot_verify(img_qcow2 *dst, uint64_t dst_lba,
                        img_qcow2 *tpl, uint64_t tpl_lba,
                        char *out_detail, int detail_cap);
 
+/* 修补 NTFS BPB 的 BIOS 几何字段（SPT=63 / heads=255 / hidden=lba）。
+ * mkntfs 留 0 → Windows 引导代码算 CHS 失败 → "A disk read error occurred"。
+ * 只改主引导扇区的 BPB 字段，不动文件系统其它内容。 */
+int img_ntfs_fix_geometry(img_qcow2 *q, uint64_t lba);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1109,6 +1109,7 @@ static const img_arg A_BOOTREPAIR[]={
     {"sig", IMG_A_STR, false, NULL, "磁盘签名 HEX（缺省=保持现值）", NULL},
     {"mbr-code", IMG_A_STR, false, NULL, "MBR 引导码文件（≥440字节；缺省不动 MBR）", NULL},
     {"vbr-tpl", IMG_A_STR, false, NULL, "VBR 模板 镜像:lba（缺省不动 VBR）", NULL},
+    {"vbr-lba", IMG_A_U64, false, NULL, "要写 VBR 的分区 LBA（缺省=活动/SR 分区；BIOS 引导码在活动分区）", NULL},
     {"bcd-ref", IMG_A_STR, false, NULL, "参考 BCD 文件（缺省不动 BCD）", NULL},
 };
 static int apply_custom_guids(const img_args *in, img_parttable_t *t){
@@ -1135,6 +1136,7 @@ static int cmd_boot_repair(img_ctx *ctx, const img_args *in, img_result *out){
     const char *imgp=img_args_get(in,"img");
     uint64_t sys_lba=img_args_u64(in,"sys-lba",0);
     uint64_t sr_lba =img_args_u64(in,"sr-lba",0);
+    uint64_t vbr_lba=img_args_u64(in,"vbr-lba",0);
     const char *sig_s=img_args_get(in,"sig");
     const char *mcode=img_args_get(in,"mbr-code");
     const char *vtpl =img_args_get(in,"vbr-tpl");
@@ -1157,13 +1159,16 @@ static int cmd_boot_repair(img_ctx *ctx, const img_args *in, img_result *out){
     }
     if(!sr_lba && t.parts[0].used){ sr_lba=t.parts[0].first_lba; sr_b=(t.parts[0].last_lba-t.parts[0].first_lba+1)*512u; }
     if(!sys_b){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","sys-lba","LBA 不在分区表里",NULL); return IMG_EINVAL; }
+    /* BIOS 的 VBR 引导码在【活动/系统保留】分区（bootmgr 所在），不是 OS 分区。
+     * 缺省用 sr_lba；显式 --vbr-lba 可覆盖。*/
+    if(!vbr_lba) vbr_lba = sr_lba ? sr_lba : sys_lba;
     /* ① 诊断 */
     unsigned char z[512]; int mbr_sig_ok=0,mbr_code_ok=0,vbr_ok=0,bcd_ok=0;
     if(img_qcow2_read(q,0,z,512)==IMG_OK){
         mbr_sig_ok=(z[510]==0x55&&z[511]==0xAA);
         for(int i=0;i<440;i++) if(z[i]){ mbr_code_ok=1; break; }
     }
-    if(img_qcow2_read(q,sys_lba*512u,z,512)==IMG_OK) vbr_ok=(!memcmp(z+3,"NTFS    ",8));
+    if(img_qcow2_read(q,vbr_lba*512u,z,512)==IMG_OK) vbr_ok=(!memcmp(z+3,"NTFS    ",8));
     if(sr_lba&&sr_b){
         img_ntfs_fs *fs=img_ntfs_mount_rw(q,sr_lba,sr_b);
         if(fs){ void *b=NULL; size_t n=0;
@@ -1195,7 +1200,14 @@ static int cmd_boot_repair(img_ctx *ctx, const img_args *in, img_result *out){
         img_io_opts_t io2={0}; img_io*f2=img_io_open_path(buf,&io2);
         img_qcow2_opts_t qo2={0}; img_qcow2*q2=f2?img_qcow2_open(f2,&qo2):NULL;
         if(!q2){ img_result_fail(out,IMG_ENOENT,"HOST-OPEN-FAIL",buf,NULL,NULL); return IMG_ENOENT; }
-        int rc=img_fixboot(q,sys_lba,q2,tl,NULL);
+        /* ★ mkntfs 的 BPB 几何字段是 0；不补，Windows 引导代码算 CHS 会失败
+         *   → SeaBIOS "A disk read error occurred"（实测 2026-10-20）。
+         *   VBR 分区和 OS 分区都要补（bootmgr 读 OS 也用它）。*/
+        int gp=0;
+        if(img_ntfs_fix_geometry(q,sys_lba)==IMG_OK) gp++;
+        if(vbr_lba!=sys_lba && img_ntfs_fix_geometry(q,vbr_lba)==IMG_OK) gp++;
+        img_result_u64(out,"geometry_patched",(uint64_t)gp);
+        int rc=img_fixboot(q,vbr_lba,q2,tl,NULL);
         if(rc!=IMG_OK){ img_result_fail(out,rc,"BOOT-VBR-WRITE-FAIL",NULL,NULL,NULL); return rc; }
         fixed++;
     }
@@ -1207,7 +1219,7 @@ static int cmd_boot_repair(img_ctx *ctx, const img_args *in, img_result *out){
         fclose(bf);
         img_bcd *b2=img_bcd_open_mem(bb,(size_t)bn); free(bb);
         if(!b2){ img_result_fail(out,IMG_EFORMAT,"BCD-REF-BAD",bref,NULL,NULL); return IMG_EFORMAT; }
-        char ld[80]=""; char g[72]="";
+        char ld[96]=""; char g[96]="";
         if(img_bcd_get_display_order_first(b2,ld,sizeof ld)==IMG_OK){
             char *p=ld; if(p[0]=='{') p++;
             snprintf(g,sizeof g,"%s",p); char *c=strchr(g,'}'); if(c)*c=0;
@@ -1253,7 +1265,7 @@ static int cmd_boot_repair(img_ctx *ctx, const img_args *in, img_result *out){
     int v_sig=0,v_code=0,v_vbr=0,v_bcd=0;
     if(img_qcow2_read(q,0,z,512)==IMG_OK){ v_sig=(z[510]==0x55&&z[511]==0xAA);
         for(int i=0;i<440;i++) if(z[i]){ v_code=1; break; } }
-    if(img_qcow2_read(q,sys_lba*512u,z,512)==IMG_OK) v_vbr=(!memcmp(z+3,"NTFS    ",8));
+    if(img_qcow2_read(q,vbr_lba*512u,z,512)==IMG_OK) v_vbr=(!memcmp(z+3,"NTFS    ",8));
     if(sr_lba&&sr_b){ img_ntfs_fs *fs=img_ntfs_mount_rw(q,sr_lba,sr_b);
         if(fs){ void *b=NULL; size_t n=0;
                 if(img_ntfs_read_file(fs,"/Boot/BCD",&b,&n)==IMG_OK&&n){ v_bcd=1; free(b); }
@@ -1263,6 +1275,7 @@ static int cmd_boot_repair(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_bool(out,"verify.vbr_ntfs_ok",v_vbr);
     img_result_bool(out,"verify.bcd_ok",v_bcd);
     img_result_u64(out,"fixed_count",(uint64_t)fixed);
+    img_result_u64(out,"vbr_lba",vbr_lba);
     img_result_bool(out,"ok", v_sig&&v_code&&v_vbr&&v_bcd);
     return IMG_OK;
 }

@@ -344,6 +344,33 @@ $T/imgmkfs $W/tpl.qcow2 --mkfs $LBA TEST
 ⬜ 内存峰值：img_fat32_put_file 整文件进内存（P1-4）
 ```
 
+### BIOS Win10/Win11 实测（2026-10-20，含扩展/逻辑分区）
+
+布局：SR 100MB(活动) + 系统 20/30GB + 扩展(0x0F) + 逻辑 NTFS ~4GB
+（`part.layout --rec-gb=0 --extended=true`；全程只用工具施工）。
+
+| 镜像 | 结果 | 证据 |
+|---|---|---|
+| Win10 BIOS（LTSC 19044） | ✅ SeaBIOS 到 Windows 徽标/点状转圈 | `build/bios-test/bd-04.png` |
+| Win11 BIOS（ESD 28000） | ✅ SeaBIOS 到 Windows 徽标/圆弧转圈 | `build/bios-test/be-04.png` |
+| 扩展分区 | ✅ MBR 0x0F → EBR 0x07 → 逻辑 NTFS 8MiB md5 一致 | 原始 MBR/EBR 解析 + `imgntfsfs export` |
+
+**工具修复（本次，已提交）：**
+1. `boot.repair` 的 VBR 必须写【活动/SR】分区，不是 OS 分区。
+   原来写 OS → `imgbc` 报 `ntfs.code` 红；SeaBIOS 报 `A disk read error occurred`。
+   新增 `--vbr-lba`（缺省=活动/SR）；结果带 `vbr_lba`。
+2. `img_fixboot` / `boot.repair` 补 NTFS BPB 几何：
+   `SPT=63 / heads=255 / hidden=lba`。mkntfs 留 0 → Windows 引导代码算 CHS 失败
+   → SeaBIOS `A disk read error occurred`。结果带 `geometry_patched`。
+3. Win10 必须用与 OS 同代的 `bootmgr`：LTSC `install.wim` 的
+   `\Windows\Boot\PCAT\bootmgr` 可启动；Xlite 的 bootmgr 会卡在
+   `Booting from Hard Disk...`（不是 MBR/VBR 问题）。
+4. WinRE 按 BIOS 规则放系统分区 `\Windows\System32\Recovery`（不建独立恢复分区）；
+   `SetupComplete.cmd` 开机 `reagentc /enable` 后自删。默认关策略不变。
+
+产物（构建目录，不入库）：
+`build/bios-test/Win10-BIOS.qcow2` / `Win11-BIOS.qcow2`。
+
 ### P2-5 · 已知性能点（用户决定：**只记录，不优化**）
 
 | 场景 | 实测 | 说明 |

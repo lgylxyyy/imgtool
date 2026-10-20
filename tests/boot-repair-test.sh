@@ -50,6 +50,9 @@ rc=$?
 [ $rc -eq 0 ] && ok "命令退出码 0" || ng "退出码 $rc"
 [ "$(jq_ "d['ok']" < "$W/fix.json")" = "True" ] && ok "ok=true" || ng "ok 不是 true"
 [ "$(jq_ "d['data']['fixed_count']" < "$W/fix.json")" = "3" ] && ok "fixed_count=3（MBR/VBR/BCD）" || ng "fixed_count=$(jq_ "d['data']['fixed_count']" < "$W/fix.json")"
+[ "$(jq_ "d['data']['vbr_lba']" < "$W/fix.json")" = "$SR" ] && ok "VBR 写在活动/SR 分区（LBA $SR），不是 OS 分区" || ng "vbr_lba=$(jq_ "d['data']['vbr_lba']" < "$W/fix.json")"
+geo=$(jq_ "d['data']['geometry_patched']" < "$W/fix.json")
+[ "${geo:-0}" -ge 1 ] && ok "BPB 几何字段已补（$geo 个分区）" || ng "geometry_patched=$geo"
 for k in mbr_sig_ok mbr_code_ok vbr_ntfs_ok bcd_ok; do
   v=$(jq_ "d['data']['verify.$k']" < "$W/fix.json")
   [ "$v" = "True" ] && ok "verify.$k=true" || ng "verify.$k=$v"
@@ -57,6 +60,17 @@ done
 [ "$(jq_ "d['data']['bcd.bindings_patched']" < "$W/fix.json")" = "5" ] \
   && ok "BCD 批量改写 5 处（含 memtest/resume，不只 3 处）" \
   || ng "bcd.bindings_patched=$(jq_ "d['data']['bcd.bindings_patched']" < "$W/fix.json")"
+
+echo "════ 2b. 独立验证：SR 的 BPB 几何（Windows 引导代码靠它读盘）════"
+$T/imgdump "$IMG" $((SR*512)) 512 > "$W/sr.bpb" 2>/dev/null
+python3 - "$W/sr.bpb" "$SR" <<'PY'
+import struct,sys
+d=open(sys.argv[1],'rb').read(); lba=int(sys.argv[2])
+spt=struct.unpack_from('<H',d,0x18)[0]; heads=struct.unpack_from('<H',d,0x1A)[0]; hid=struct.unpack_from('<I',d,0x1C)[0]
+print(f"BPB spt={spt} heads={heads} hidden={hid} (expect 63/255/{lba})")
+sys.exit(0 if (spt==63 and heads==255 and hid==lba) else 1)
+PY
+[ $? -eq 0 ] && ok "SR BPB = 63/255/$SR（否则 SeaBIOS 报 disk read error）" || ng "SR BPB 几何不对"
 
 echo "════ 3. 独立验证：MBR 签名真的在盘上 ════"
 sig=$($T/imgdump "$IMG" 440 4 | od -An -tx1 | tr -d ' \n')
