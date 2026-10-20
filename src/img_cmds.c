@@ -79,7 +79,9 @@ static int cmd_img_info(img_ctx *ctx, const img_args *in, img_result *out){
 static const img_arg A_PTSHOW[] = {
     {"img", IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
 };
-static char g_pt_json[8192];        /* 单线程；handler 产出后立即渲染 */
+/* GPT 最多 128 个分区项，一条上限约 300 字节 → 48 KiB；取 64 KiB 留余量。
+ * img_parttable_json() 装不下会返回 0（不再静默截断），这里据此报 PART-JSON-FAIL。 */
+static char g_pt_json[64*1024];
 static int cmd_part_show(img_ctx *ctx, const img_args *in, img_result *out){
     (void)in;
     img_parttable_t *pt=NULL;
@@ -298,7 +300,7 @@ static const img_arg A_WIMAPPLY[] = {
     {"lba",    IMG_A_U64,  true,  NULL,      "目标分区起始 LBA",  chk_lba},
     {"wim",    IMG_A_STR,  true,  NULL,      "WIM/ESD 文件路径",  NULL},
     {"index",  IMG_A_U64,  false, "1",       "WIM 内的映像索引",  NULL},
-    {"format", IMG_A_ENUM, false, "off",      "灌入前是否格式化目标分区（on|off）", NULL},
+    {"format", IMG_A_ENUM, false, "on",       "灌入前是否格式化目标分区（on|off）；★不传=on（会毁目标分区数据）", NULL},
     {"label",  IMG_A_STR,  false, "Windows", "（format=on）卷标", NULL},
     {"no_acls", IMG_A_BOOL,false, "false",   "不要 ACL（跨平台/不需要时开）", NULL},
     {"no_attrs",IMG_A_BOOL,false, "false",   "不要扩展属性", NULL},
@@ -499,7 +501,7 @@ static int cmd_ntfs_list(img_ctx *ctx, const img_args *in, img_result *out){
             pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
     if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
     img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
-    if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL",path,"不是合法 NTFS（未格式化或 LBA 不对）",NULL);
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",path,"不是合法 NTFS（未格式化或 LBA 不对）",NULL);
              return IMG_ESTATE; }
     static char jbuf[256*1024];
     list_buf_t acc={jbuf,sizeof jbuf,0,0,false};
@@ -555,7 +557,7 @@ static int cmd_ntfs_rename(img_ctx *ctx, const img_args *in, img_result *out){
             pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
     if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
     img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
-    if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL",dst,"不是合法 NTFS（未格式化或 LBA 不对）",NULL);
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",dst,"不是合法 NTFS（未格式化或 LBA 不对）",NULL);
              return IMG_ESTATE; }
     /* 预检：名单里的顶层名必须存在 —— 否则给专属错误码（"名字不存在"≠"搬移失败"，
      * 之前混在一起，排查时分不出"打错字"和"卷坏了"）*/
@@ -787,7 +789,7 @@ static int cmd_winre_auto(img_ctx *ctx, const img_args *in, img_result *out){
             pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
     if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
     img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
-    if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL","/Windows","系统分区不是合法 NTFS",NULL); return IMG_ESTATE; }
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD","/Windows","系统分区不是合法 NTFS",NULL); return IMG_ESTATE; }
     const char *path="/Windows/Setup/Scripts/SetupComplete.cmd";
     if(enable){
         img_span sp;
@@ -845,7 +847,7 @@ static int cmd_ntfs_exists(img_ctx *ctx, const img_args *in, img_result *out){
             pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
     if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
     img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
-    if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL",path,"不是合法 NTFS（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",path,"不是合法 NTFS（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
     bool ex=img_ntfs_path_exists(fs,path);
     uint64_t sz=0; bool has_sz = ex && img_ntfs_file_size(fs,path,&sz)==IMG_OK;
     img_ntfs_umount(fs);
@@ -994,7 +996,7 @@ static int cmd_mbrboot(img_ctx *ctx, const img_args *in, img_result *out){
     img_qcow2 *q=img_ctx_qcow2(ctx);
     if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
     rc=img_parttable_write(q,t);
-    if(rc){ img_result_fail(out,rc,"PART-READ-FAIL",NULL,"写回分区表失败",NULL); return rc; }
+    if(rc){ img_result_fail(out,rc,"PART-WRITE-FAIL",NULL,"写回分区表失败",NULL); return rc; }
     img_result_u64(out,"disk_signature",sig);
     img_result_bool(out,"written",true);
     return IMG_OK;
@@ -1037,7 +1039,7 @@ static int cmd_part_layout(img_ctx *ctx, const img_args *in, img_result *out){
           t.disk_signature=sig; }
     if(apply_custom_guids(in,&t)!=IMG_OK){ img_result_fail(out,IMG_EINVAL,"GUID-INVALID-BAD","part-guid/disk-guid","GUID 非法或序号越界",NULL); return IMG_EINVAL; }
         rc=img_parttable_write(q,&t);
-        if(rc){ img_result_fail(out,rc,"PART-READ-FAIL",NULL,"写分区表失败",NULL); return rc; }
+        if(rc){ img_result_fail(out,rc,"PART-WRITE-FAIL",NULL,"写分区表失败",NULL); return rc; }
         img_result_u64(out,"parts_total",1);
         img_result_str(out,"mode","single");
         return IMG_OK;
@@ -1048,7 +1050,6 @@ static int cmd_part_layout(img_ctx *ctx, const img_args *in, img_result *out){
     if((rc=img_partition_add(&t,off,sys_sec,IMG_MBR_NTFS_EXFAT,NULL,"Windows",false,&idx))!=IMG_OK)
         return img_result_fail(out,rc,"CMD-ARG-BAD","sys-gb","系统分区建不了",NULL), rc;
     off+=sys_sec;
-    uint64_t parts_total=3;
     if(rec_gb){
         if((rc=img_partition_add(&t,off,rec_sec,IMG_MBR_RECOVERY,NULL,"Recovery",false,&idx))!=IMG_OK)
             return img_result_fail(out,rc,"CMD-ARG-BAD","rec-gb","恢复分区建不了",NULL), rc;
@@ -1064,14 +1065,16 @@ static int cmd_part_layout(img_ctx *ctx, const img_args *in, img_result *out){
         int lidx=img_partition_add_logical(&t, ext_start+align, disk_sectors-ext_start-align,
                                            IMG_MBR_NTFS_EXFAT, lname);
         if(lidx<0){ img_result_fail(out,(img_err_t)lidx,"CMD-ARG-BAD","img","逻辑分区建不了",NULL); return lidx; }
-        parts_total=5;
     }
     /* 随机磁盘签名（★ 换新盘不该沿用源盘签名）*/
     uint32_t sig=0; { FILE *ur=fopen("/dev/urandom","rb"); if(ur){ if(fread(&sig,1,4,ur)!=4) sig=0; fclose(ur);} if(!sig) sig=0x22334455; }
     t.disk_signature=sig;
     if(apply_custom_guids(in,&t)!=IMG_OK){ img_result_fail(out,IMG_EINVAL,"GUID-INVALID-BAD","part-guid/disk-guid","GUID 非法或序号越界",NULL); return IMG_EINVAL; }
     rc=img_parttable_write(q,&t);
-    if(rc){ img_result_fail(out,rc,"PART-READ-FAIL",NULL,"写分区表失败",NULL); return rc; }
+    if(rc){ img_result_fail(out,rc,"PART-WRITE-FAIL",NULL,"写分区表失败",NULL); return rc; }
+    /* ★ parts_total 从表里真数（旧版硬编码 3/5：rec-gb=0 + extended 时会谎报 5 个分区）*/
+    uint64_t parts_total=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++) if(t.parts[i].used) parts_total++;
     img_result_u64(out,"disk_signature",sig);
     img_result_u64(out,"parts_total",parts_total);
     return IMG_OK;
@@ -1142,9 +1145,9 @@ static int cmd_boot_repair(img_ctx *ctx, const img_args *in, img_result *out){
     const char *vtpl =img_args_get(in,"vbr-tpl");
     const char *bref =img_args_get(in,"bcd-ref");
     if(!imgp||!sys_lba){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","img/sys-lba","需要 --img 与 --sys-lba",NULL); return IMG_EINVAL; }
-    img_io_opts_t io={0}; io.writable=true;
-    img_io*f=img_io_open_path(imgp,&io);
-    if(!f){ img_result_fail(out,IMG_ENOENT,"HOST-OPEN-FAIL",imgp,NULL,NULL); return IMG_ENOENT; }
+    /* ★ 同 img_ctx_open：boot.repair 自己开的镜像也必须"已存在"，不许创建空文件 */
+    img_io*f=img_io_open_existing(imgp,true);
+    if(!f){ img_result_fail(out,IMG_ENOENT,"HOST-OPEN-FAIL",imgp,"镜像不存在或不是普通文件（本命令不会创建镜像）",NULL); return IMG_ENOENT; }
     img_qcow2_opts_t qo={0}; img_qcow2*q=img_qcow2_open(f,&qo);
     if(!q||img_qcow2_write_init(q)!=IMG_OK){ img_result_fail(out,IMG_EFORMAT,"IMG-FORMAT",imgp,NULL,NULL); return IMG_EFORMAT; }
     img_parttable_t t; memset(&t,0,sizeof t);
