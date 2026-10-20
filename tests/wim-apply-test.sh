@@ -8,9 +8,10 @@
 #
 # 用法: tests/wim-apply-test.sh [ESD路径] [索引]
 #
-# ⚠ 资源：要写一张 20 GiB 盘、解压 6.9 GB 的 ESD，**峰值内存 > 4 GB**。
-#   本工作区沙箱只有 ~3.4 GB 可用 → 会在阶段①中途被系统杀掉（无报错、qcow2 停住）。
-#   要在内存 ≥8 GB 的机器上跑；或先把 ESD 换成小镜像（boot.wim）。
+# ⚠ 资源（2026-10-20 实测更正）：**内存不是瓶颈** —— 灌 6.86 GB 的 ESD，
+#   峰值 RSS 只有 ~170 MB（wimlib 是流式解压直写，不预解压）。整条用例约 2~3 分钟，
+#   需要约 7 GB 空闲磁盘（20 GiB 稀疏盘 + 19 GiB 数据分区）。
+#   早先"中途被系统杀"是【后台进程被环境回收】的假象，不是 OOM。
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T="$ROOT/build/tools"
@@ -60,7 +61,7 @@ if [ -s "$W/k.exe" ]; then
 else
   ng "抽回失败"
 fi
-echo "  ── 格式化后的 $Boot 仍在（说明 mkntfs 的卷没被破坏）──"
+echo "  ── 格式化后的 \$Boot 仍在（说明 mkntfs 的卷没被破坏）──"
 $T/imgdump "$W/d.qcow2" $((LBA*512)) 16 > "$W/bs.bin" 2>/dev/null
 python3 -c "d=open('$W/bs.bin','rb').read(); import sys; sys.exit(0 if d[3:11]==b'NTFS    ' else 1)" \
   && ok "\$Boot 魔数 NTFS 仍在" || ng "\$Boot 不对"
