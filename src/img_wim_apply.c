@@ -23,11 +23,16 @@
 struct cb_ctx { img_prog *p; };
 static enum wimlib_progress_status on_progress(enum wimlib_progress_msg msg,
                                                union wimlib_progress_info *info, void *ctx){
-    /* ★ 第一件事：喂看门狗。解压阶段可能几十秒不产生任何一次 qcow2 写
-     *  （6.86 GB 的 ESD 实测连续 260 秒没有完成过 I/O），I/O 看门狗会把它
-     *  判成"卡死"并取消 —— 实测报错是 IO-TIMEOUT(gap=260886ms) 紧跟
-     *  CMD-CANCELLED，整盘灌不完。wimlib 的进度回调本身就是"还活着"的证据，
-     *  这里 touch 之后，看门狗才真正等价于"完全没有任何进展"。*/
+    /* ★ 第一件事：喂看门狗。
+     * 澄清（2026-10-20）：灌入是【随读随写】—— WIMLIB_EXTRACT_FLAG_NTFS 让 wimlib
+     * 经 libntfs-3g 直写进分区，**不落任何临时文件、不整盘先解压**，ACL/属性默认保留。
+     * 空窗的真正原因是【解压】：这张 ESD 是 LZMS 压缩（1.87 GB → 6.86 GB，3.7×），
+     * wimlib 解某个固实 resource 的那段时间是纯 CPU 活，**期间不产生任何一次 qcow2 写**
+     * ——实测连续 260 秒。而 I/O 看门狗按"完成过一次读写"计时，于是把"在解压"
+     * 误判成"卡死"，发出 IO-TIMEOUT(gap=260886ms) 并取消（rc=-13 CMD-CANCELLED），
+     * 6.86 GB 的盘根本灌不完。
+     * 进度回调本身就是"还活着"的证据：这里 touch 之后，看门狗才真正等价于
+     * "完全没有任何进展"（而不是"这一会儿没写盘"）。*/
     img_io_touch();
     struct cb_ctx *c = ctx;
     if(!c || !c->p) return 0;
