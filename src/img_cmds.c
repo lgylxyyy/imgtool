@@ -952,6 +952,7 @@ static int cmd_part_copy(img_ctx *ctx, const img_args *in, img_result *out){
                             }
                             done+=k;
                             if(pg) img_prog_bytes(pg,done,n);   /* 节流在 img_prog 内部（200ms）*/
+                            img_hb("part","copy","part.copy",done>>20);   /* 心跳（内部 2→60s 退避）*/
                             if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
                         }
                         img_span_end(&sp2,rc);
@@ -1042,6 +1043,13 @@ static int cmd_part_layout(img_ctx *ctx, const img_args *in, img_result *out){
             return img_result_fail(out,rc,"CMD-ARG-BAD","img","单分区建不了",NULL), rc;
         { uint32_t sig=0; FILE *ur=fopen("/dev/urandom","rb"); if(ur){ if(fread(&sig,1,4,ur)!=4) sig=0; fclose(ur);} if(!sig) sig=0x22334455;
           t.disk_signature=sig; }
+    /* ★ 本命令产出的是 MBR 表，没有 GUID 这个概念：以前"校验通过但什么也没写"，
+     *   传了等于白传还不报错。现在直接说清楚（要用 GUID 请 img.create --table=gpt）。*/
+    if(img_args_get(in,"part-guid") || img_args_get(in,"disk-guid")){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","part-guid/disk-guid",
+            "part.layout 产出 MBR 表，没有分区/磁盘 GUID；要 GUID 请用 img.create --table=gpt",NULL);
+        return IMG_EINVAL;
+    }
     if(apply_custom_guids(in,&t)!=IMG_OK){ img_result_fail(out,IMG_EINVAL,"GUID-INVALID-BAD","part-guid/disk-guid","GUID 非法或序号越界",NULL); return IMG_EINVAL; }
         rc=img_parttable_write(q,&t);
         if(rc){ img_result_fail(out,rc,"PART-WRITE-FAIL",NULL,"写分区表失败",NULL); return rc; }
@@ -1385,6 +1393,10 @@ static int cmd_fs_format(img_ctx *ctx, const img_args *in, img_result *out){
     const char *label=img_args_get(in,"label");
     bool ntfs=!strcasecmp(fsn,"ntfs"), fat=!strcasecmp(fsn,"fat32");
     if(!ntfs && !fat){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","fs","只接受 ntfs | fat32",NULL); return IMG_EINVAL; }
+    if(fat && !img_args_bool(in,"quick",true)){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","quick","FAT32 没有【整盘零填】模式（quick 只对 NTFS 有意义）",NULL);
+        return IMG_EINVAL;
+    }
     img_qcow2 *q=img_ctx_qcow2(ctx);
     if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
     img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);

@@ -279,6 +279,7 @@ int img_ntfs_copy_out(img_ntfs_fs *fs, const char *abs_path, const char *dst_pat
         if(fwrite(buf,1,(size_t)got,o)!=(size_t)got){ rc=IMG_EIO; break; }
         done+=got;
         if(prog) img_prog_bytes(prog,(uint64_t)done,(uint64_t)sz);
+                img_hb("ntfs","extract","copy_out",done>>20);
         if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
     }
     free(buf); fclose(o);

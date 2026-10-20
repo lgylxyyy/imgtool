@@ -183,7 +183,7 @@ static void on_event(const img_ev *e, void *ud){
 }
 
 /* ================= 失败卡片（CLI 渲染；App 用自己的表） ================= */
-static void render_card(const img_error_info_t *ei){
+static void render_card(const img_error_info_t *ei, bool to_screen){
     bool en=lang_en();
     char card[8192]; int n=0;
     n+=snprintf(card+n,sizeof card-(size_t)n,"\n%s\n",
@@ -224,7 +224,9 @@ static void render_card(const img_error_info_t *ei){
         en?"===== end of error report =====":"════════ 错误报告结束 ════════");
     if(n<0) n=0;
     if(n>(int)sizeof card) n=(int)sizeof card;
-    wr_all(2,card,(size_t)n);
+    /* ★ 屏幕与文件分开控制：--progress=none/json 时不刷屏，但**仍然落 .error.txt**
+     *   —— 用户要拿它反馈，跟终端是人是机器无关。*/
+    if(to_screen) wr_all(2,card,(size_t)n);
     if(ei->img[0]){                                  /* 落一份：用户直接发这个 */
         char path[600]; snprintf(path,sizeof path,"%s.error.txt",ei->img);
         int fd=open(path,O_WRONLY|O_CREAT|O_TRUNC,0644);
@@ -364,7 +366,7 @@ int main(int argc, char **argv){
             char b[1024]; int n=img_result_json(&r,b,sizeof b);
             if(n>0) fwrite(b,1,(size_t)n,stdout);
             img_error_info_t ei; img_error_info(&ei);
-            if(ei.code[0] && ui.human) render_card(&ei);
+            if(ei.code[0]) render_card(&ei, ui.human);
             img_args_free(args); return 1;
         }
     }
@@ -376,7 +378,7 @@ int main(int argc, char **argv){
     if(n>0) fwrite(out,1,(size_t)n,stdout);
     if(rc!=IMG_OK){
         img_error_info_t ei; img_error_info(&ei);
-        if(ei.code[0] && ui.human) render_card(&ei);
+        if(ei.code[0]) render_card(&ei, ui.human);
     }
     if(ctx) img_ctx_close(ctx);
     img_log_close();

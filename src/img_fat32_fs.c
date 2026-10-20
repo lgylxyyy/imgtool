@@ -706,6 +706,7 @@ int img_fat32_put_file(img_fat32_fs *fs, const char *local_path,
     while(done<len){
         /* ★ 取消检查点：每个 1MiB 查一次。取消时【不写目录项】并释放已分配簇链，
          *   所以不会留下"半成品文件"（见 DESIGN-OUTPUT.md 第四节）*/
+                img_hb("fat32","extract","copy_out",done>>20);
         if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
         size_t want=len-done; if(want>CHUNK) want=CHUNK;
         size_t got=0;
@@ -852,7 +853,11 @@ int img_fat32_list_dir(img_fat32_fs *fs, const char *abs_path, img_fat32_list_cb
             n[j]=0;
             uint32_t clus=((uint32_t)e[20]<<16)|((uint32_t)e[21]<<24)|(uint32_t)e[26]|((uint32_t)e[27]<<8);
             uint32_t sz  =(uint32_t)e[28]|((uint32_t)e[29]<<8)|((uint32_t)e[30]<<16)|((uint32_t)e[31]<<24);
-            cb(ud, (have&&lfn[0])?lfn:n, (e[11]&ATTR_DIR)!=0, sz);
+            const char *nm_out=(have&&lfn[0])?lfn:n;
+            /* ★ 不把 "." / ".." 抛给上层：与 ntfs.list 保持一致，
+             *   否则 App 要给两套目录渲染逻辑（实测 fat.ls 会多出这两行）。*/
+            if(strcmp(nm_out,".") && strcmp(nm_out,".."))
+                cb(ud, nm_out, (e[11]&ATTR_DIR)!=0, sz);
             (void)clus;
             lfn[0]=0; have=false;
         }

@@ -116,8 +116,11 @@ int img_iso_open_io(img_iso **out, img_io *io, char *err, size_t errcap){
     s->part_start=pstart;
 
     /* FSD → 根目录 ICB */
-    if(rd_lb(s,s->fsd_lb,blk,1)!=IMG_OK || g16(blk)!=TAG_FSD){ free(blk); free(s);
-        if(err) snprintf(err,errcap,"读不到 File Set Descriptor"); return IMG_EFORMAT; }
+    if(rd_lb(s,s->fsd_lb,blk,1)!=IMG_OK || g16(blk)!=TAG_FSD){
+        free(blk); free(s);
+        if(err) snprintf(err,errcap,"读不到 File Set Descriptor");
+        return IMG_EFORMAT;
+    }
     s->root_lb=g32(blk+404);            /* root_directory_icb: len@400, loc@404 */
     free(blk);
     *out=s;
@@ -376,6 +379,7 @@ int img_iso_extract(img_iso *s, const char *path, const char *dst,
                 if(fwrite(buf,1,n,o)!=n){ rc=IMG_EIO; break; }
                 off+=n; left-=n; done+=n;
                 if(prog) img_prog_bytes(prog,done,want?want:done);
+                img_hb("iso","extract","copy_out",done>>20);
                 if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
             }
         }
