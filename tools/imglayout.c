@@ -42,7 +42,10 @@ int main(int argc,char**argv){
             const img_role_limits_t *L=img_role_limits((img_part_role_t)r);
             char mn[32],re[32],de[32],mx[32];
             human(mn,sizeof mn,L->min_bytes); human(re,sizeof re,L->rec_bytes);
-            human(de,sizeof de,L->def_bytes); human(mx,sizeof mx,L->max_bytes);
+            /* ★ 0 写成"0(不建)"：恢复分区的默认值就是 0（政策：默认不建）*/
+            if(L->def_bytes) human(de,sizeof de,L->def_bytes);
+            else snprintf(de,sizeof de,"0(不建)");
+            human(mx,sizeof mx,L->max_bytes);
             char tags[64]={0}; int k=0;
             if(L->must_fat32) k+=snprintf(tags+k,sizeof tags-k,"%s必须FAT32",k?",":"");
             if(L->must_ntfs)  k+=snprintf(tags+k,sizeof tags-k,"%s必须NTFS",k?",":"");

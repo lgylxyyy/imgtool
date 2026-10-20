@@ -283,8 +283,10 @@ App 侧记一份 <镜像>.state.json：{ "steps": [ {"name":"esp","done":true,"a
 换一个 App 也不能变（WIM 解析、NTFS 写入、GPT 属性、字节结构）→ 工具。
 
 ### 11.3 工具契约（新增/调整，落地状态见 WORKPLAN-HARDEN 清单）
-> 下面是**目标契约**；`winre.find` / `recovery.populate*` / 默认值调整尚未全部实现，
-> 以 `WORKPLAN-HARDEN.md` 的勾选状态为准（未打勾 = 未实现）。
+> **2026-10-20 更新**：默认值调整已落地（`imglayout --rec` 默认 0、`imgbc --expect-recovery`），
+> 但 `winre.find` / `recovery.populate*` 仍未实现。完整状态见
+> `app/docs/工具能力与App集成手册.md` §15.2（那是给 App 端看的单一入口）。
+> 其余仍以 `WORKPLAN-HARDEN.md` 的勾选状态为准（未打勾 = 未实现）。
 
 #### `winre.find`
 ```json

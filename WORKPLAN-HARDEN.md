@@ -258,6 +258,14 @@ Dism++ 源码挖掘（Chuyu-Team/Dism++）：下一轮用 gh 只读扒其引导�
 | 5 | `recovery_bcd_test` 长期跳过（缺 `../build/w128/iso/bcd`） | 需从官方 ISO 重新提取该参考件，或改为自带参考件 |
 | 6 | 双盘/多条目（BIOS+UEFI） | ⛔ 冻结，见上 |
 
+### 2026-10-20 状态更新（本节以下清单已部分落地）
+已落地：`imglayout --rec` 默认 0、`imgbc --expect-recovery`、
+命令表补 6 条建盘命令 + `iso.ls`/`iso.extract`/`fat.export`（共 28 条）、
+真进度（`img_cmd_set_progress`）、EBR/逻辑分区规范修正、命令表入口不建空镜像、
+失败卡片日志行改成事实、WIM 解压期间喂看门狗。
+仍未做：`winre.find` / `recovery.populate*` / `imgpart attr` 进表 / `img_hb` 打点 /
+`winre.auto` 脚本来源标记。详见 `app/docs/工具能力与App集成手册.md` §18。
+
 ### 恢复分区/WinRE：默认关（2026-10-19 用户定，待实现）
 
 契约见 `DESIGN-OUTPUT.md §十一`，App 流程见 `../app/docs/RECOVERY-FLOW.md`。
