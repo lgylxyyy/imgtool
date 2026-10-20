@@ -403,9 +403,12 @@ int img_cmd_list_json(char *buf,int cap){
         w.p=cw.p;
         if(w.p<w.end)*w.p++='}';
     }
-    if(w.p<w.end)*w.p++=']';
-    if(w.p<w.end)*w.p++='}';
-    if(w.p<w.end)*w.p++='\n';
+    /* ★ 装不下就明确失败：以前会吐半截 JSON（App 解析直接报错，
+     *   用户看到的是"命令表导出失败"这种莫名其妙的东西）。*/
+    if(w.p >= w.end-1) return 0;
+    *w.p++=']';
+    *w.p++='}';
+    *w.p++='\n';
     *w.p=0;
     return (int)(w.p-buf);
 }

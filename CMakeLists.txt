@@ -45,7 +45,8 @@ set(IMG_SOURCES
   src/img_ntfs_fs.c
   src/img_fat32_fs.c
   src/img_wim_apply.c
-  src/img_iso.c          # ISO/UDF 只读（libudfread 后端；抽 install.wim）
+  src/img_iso.c          # ISO/UDF 只读（自研解析；抽 install.wim）
+  src/img_recovery.c     # 恢复分区/WinRE（查/填/设属性）
 )
 
 # ---- zlib（qcow2 压缩簇必需；安卓 NDK 自带或可交叉编译）----

@@ -110,6 +110,10 @@ static const ETX E_TEXT[] = {                      /* 错误码 → 原因 / 建
                  "用 8-4-4-4-12 十六进制（如 1a233c35-12f4-6047-9d59-eafe3bb17577）","Use an 8-4-4-4-12 hex GUID (e.g. 1a233c35-12f4-6047-9d59-eafe3bb17577)"},
     {"LIST-FAIL","列表/命令表渲染失败（内部错误）","Failed to render the listing/command table (internal error)",
                  "重试；仍然失败请把日志发回来","Retry; if it persists, report it with the log"},
+    {"WINRE-NOTFOUND","这个 WIM/ESD 里没有 Winre.wim","No Winre.wim inside this WIM/ESD",
+                 "换一个包含 WinRE 的 ISO/ESD/WIM（精简版常把 WinRE 删掉）","Use an ISO/ESD/WIM that contains WinRE (slimmed builds remove it)"},
+    {"REC-VERIFY-FAIL","恢复分区填充失败","Filling the recovery partition failed",
+                 "确认分区已格式化、空间够；看日志的 at/error_code","Make sure it's formatted with enough space; check at/error_code in the log"},
     {NULL,NULL,NULL,NULL,NULL}
 };
 static const char *txt_act(const char *a){        /* 动作名 */
@@ -303,7 +307,7 @@ int main(int argc, char **argv){
         img_args_set(args,key,val);
     }
 
-    if(list){ static char buf[16384]; if(img_cmd_list_json(buf,sizeof buf)>0) fputs(buf,stdout);
+    if(list){ static char buf[96*1024]; if(img_cmd_list_json(buf,sizeof buf)>0) fputs(buf,stdout);
               img_args_free(args); return 0; }
     if(helpcmd){ print_help(img_cmd_find(helpcmd)); img_args_free(args); return 0; }   /* 先于"缺命令名"判定 */
     if(!cmd){ fprintf(stderr,"用法: imgcmd <命令> [--参数=值 ...] | --list | --help=<命令>\n");

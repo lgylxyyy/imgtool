@@ -10,7 +10,8 @@
 #include "img_bcd.h"
 #include "img_constraints.h"   /* img_layout_build：img.create 用 */
 #include "img_bootcheck.h"
-#include "img_iso.h"      /* boot.check 用 */
+#include "img_iso.h"
+#include "img_recovery.h"      /* boot.check 用 */
 #include "img_io.h"
 #include "img_fat32.h"
 #include "img_fat32_fs.h"
@@ -767,15 +768,6 @@ static const img_arg A_WINRE_AUTO[] = {
 };
 #if IMG_WITH_NTFS3G
 /* 内容必须是 ASCII + CRLF（cmd.exe 按 OEM/ANSI 读取；带 BOM 或 UTF-8 中文会乱） */
-static const char WINRE_SCRIPT[] =
-    "@echo off\r\n"
-    "rem imgtool: auto-enable Windows RE on first boot (official mechanism: reagentc writes\r\n"
-    "rem          ReAgent.xml + BCD recoverysequence for THIS machine's partition layout)\r\n"
-    "reagentc /enable\r\n"
-    "reagentc /info > \"%SystemRoot%\\Temp\\winre-enable.log\" 2>&1\r\n"
-    "rem one-shot: delete this script after it runs (goto aborts the batch first)\r\n"
-    "(goto) 2>nul & del /f /q \"%~f0\"\r\n"
-    "exit /b 0\r\n";
 #endif /* IMG_WITH_NTFS3G */
 static int cmd_winre_auto(img_ctx *ctx, const img_args *in, img_result *out){
     if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（WinRE 自启用脚本）","重新编译时开启该功能并安装对应系统库");
@@ -795,19 +787,23 @@ static int cmd_winre_auto(img_ctx *ctx, const img_args *in, img_result *out){
     img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
     if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD","/Windows","系统分区不是合法 NTFS",NULL); return IMG_ESTATE; }
     const char *path="/Windows/Setup/Scripts/SetupComplete.cmd";
+    img_ntfs_umount(fs);            /* 交给库函数自己挂载/卸载（同一份脚本内容）*/
+    fs=NULL;
     if(enable){
         img_span sp;
         img_span_prep(&sp,"winre","write","写入 WinRE 自启用脚本");
         img_span_kv_str(&sp,"path",path);
         img_span_begin(&sp);
-        img_ntfs_mkdir_p(fs,"/Windows/Setup/Scripts");   /* 目录不存在则建（默认不存在）*/
-        rc=img_ntfs_put_file_mem(fs,WINRE_SCRIPT,sizeof WINRE_SCRIPT-1,path);
+        size_t nb=0;
+        rc=img_winre_write_enable_script(q,lba,pb,&nb);
         img_span_end(&sp,rc);
-        if(rc){ img_ntfs_umount(fs);
-                img_result_fail(out,rc,"FAT-PUT-FAIL",path,"脚本写入失败（卷只读/空间不足）",NULL); return rc; }
+        if(rc){ img_result_fail(out,rc,"FAT-PUT-FAIL",path,"脚本写入失败（卷只读/空间不足）",NULL); return rc; }
         img_result_bool(out,"written",true);
-        img_result_u64(out,"bytes",sizeof WINRE_SCRIPT-1);
+        img_result_u64(out,"bytes",(uint64_t)nb);
     } else {
+        img_ntfs_fs *fs2=img_ntfs_mount_rw(q,lba,pb);
+        if(!fs2){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD","/Windows","系统分区不是合法 NTFS",NULL); return IMG_ESTATE; }
+        fs=fs2;
         if(img_ntfs_path_exists(fs,path)){
             rc=img_ntfs_rm(fs,path);
             if(rc){ img_ntfs_umount(fs);
@@ -815,7 +811,7 @@ static int cmd_winre_auto(img_ctx *ctx, const img_args *in, img_result *out){
         }
         img_result_bool(out,"removed",true);
     }
-    img_ntfs_umount(fs);
+    if(fs) img_ntfs_umount(fs);
     return IMG_OK;
 #else
     (void)ctx; (void)in; (void)out; return IMG_ENOTSUP;   /* 不可达：上一行已返回 */
@@ -1105,7 +1101,7 @@ static int cmd_ctl_cancel(img_ctx *ctx, const img_args *in, img_result *out){
 /* ================= 命令 7：cmd.list（自描述：App 可据此自动生成界面） ================= */
 static int cmd_cmd_list(img_ctx *ctx, const img_args *in, img_result *out){
     (void)ctx; (void)in;
-    static char buf[16384];
+    static char buf[96*1024];       /* 32 条命令 + 帮助文本约 20 KB；留足余量 */
     int n=img_cmd_list_json(buf,sizeof buf);
     if(n<=0){ img_result_fail(out,IMG_EIO,"LIST-FAIL",NULL,"命令表导出失败",NULL); return IMG_EIO; }
     img_result_raw(out,"table",buf);
@@ -1725,6 +1721,131 @@ static int cmd_fat_export(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+
+/* ================= 恢复分区 / WinRE 四件套（2026-10-20，A2）=================
+ * 政策仍是"默认不建"：这些命令只在 App 明确勾选后调用（DESIGN-OUTPUT §十一）。*/
+
+/* ---------- part.attr（设 GPT 分区属性；恢复分区要 0x8000000000000001）---------- */
+static const img_arg A_PARTATTR[] = {
+    {"img",  IMG_A_STR, true, NULL, "镜像路径（qcow2，必须是 GPT）", NULL},
+    {"lba",  IMG_A_U64, true, NULL, "目标分区起始 LBA", chk_lba},
+    {"attr", IMG_A_STR, true, NULL, "属性值（十六进制，如 0x8000000000000001）", NULL},
+};
+static int cmd_part_attr(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *as=img_args_get(in,"attr");
+    if(!as||!*as){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","attr","需要属性值（0x... 或纯十六进制）",NULL); return IMG_EINVAL; }
+    char *end=NULL;
+    uint64_t attr=strtoull(as,&end,0);
+    if(end && *end){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","attr","不是合法十六进制数",NULL); return IMG_EINVAL; }
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    int rc=img_part_set_attributes(q,lba,attr);
+    if(rc==IMG_ENOTSUP){ img_result_fail(out,rc,"CMD-ARG-BAD","img","MBR 分区没有 GPT attributes（只有 GPT 才有）",NULL); return rc; }
+    if(rc!=IMG_OK){ img_result_fail(out,rc,"PART-WRITE-FAIL",NULL,"设属性失败",NULL); return rc; }
+    img_result_u64(out,"lba",lba);
+    img_result_str(out,"attributes",as);
+    return IMG_OK;
+}
+
+/* ---------- winre.find（只读：在 WIM/ESD 里定位 Winre.wim）---------- */
+static const img_arg A_WINREFIND[] = {
+    {"src",   IMG_A_STR, true,  NULL, "WIM/ESD 路径（ISO 由 iso.extract 先抽出来）", NULL},
+    {"index", IMG_A_U64, false, "0",  "映像索引（0=扫全部）", NULL},
+};
+static int cmd_winre_find(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx;
+    if(!IMG_WITH_WIM) return feat_unavail(out,"wimlib（WIM/ESD 解析）","重新编译时开启该功能并安装对应系统库");
+    const char *src=img_args_get(in,"src");
+    int idx=(int)img_args_u64(in,"index",0);
+    img_winre_info_t info;
+    int rc=img_winre_find(src,idx,&info);
+    if(rc!=IMG_OK){ img_result_fail(out,rc,"WIM-NOTFOUND",src,"WIM/ESD 打不开",NULL); return rc; }
+    if(!info.found){
+        img_result_fail(out,IMG_ENOENT,"WINRE-NOTFOUND",src,
+            "这个文件里没有 Winre.wim（请让用户换一个包含 WinRE 的 ISO/ESD/WIM）",NULL);
+        return IMG_ENOENT;
+    }
+    img_result_bool(out,"found",true);
+    img_result_u64(out,"index",(uint64_t)info.index);
+    img_result_str(out,"container",info.container);
+    img_result_str(out,"internal_path",info.internal_path);
+    img_result_u64(out,"size_bytes",info.size_bytes);
+    return IMG_OK;
+}
+
+/* ---------- recovery.populate / recovery.populate-system ---------- */
+static const img_arg A_RECPOP[] = {
+    {"img",        IMG_A_STR, true,  NULL,    "镜像路径（qcow2）", NULL},
+    {"rec-lba",    IMG_A_U64, true,  NULL,    "恢复分区起始 LBA（UEFI：独立恢复分区；BIOS：填系统分区）", chk_lba},
+    {"winre-src",  IMG_A_STR, true,  NULL,    "WinRE 来源 WIM/ESD", NULL},
+    {"winre-index",IMG_A_U64, false, "1",     "WIM/ESD 里的映像索引", NULL},
+    {"winre-path", IMG_A_STR, false, NULL,    "WIM 内路径（缺省按标准两处找）", NULL},
+    {"bootsdi-src",IMG_A_STR, false, NULL,    "boot.sdi 本地路径（可选）", NULL},
+    {"format",     IMG_A_BOOL,false, "false", "先格式化目标分区（★会毁数据）", NULL},
+    {"label",      IMG_A_STR, false, "Recovery","（format=true）卷标", NULL},
+    {"set-gpt-attr",IMG_A_BOOL,false,"true",  "设 GPT 属性 0x8000000000000001", NULL},
+    {"enable-script",IMG_A_BOOL,false,"false","再写【首次开机 reagentc /enable】脚本", NULL},
+    {"os-lba",     IMG_A_U64, false, "0",     "系统分区 LBA（enable-script 用）", NULL},
+};
+static int rec_populate_common(img_ctx *ctx, const img_args *in, img_result *out, bool bios_layout){
+    if(!IMG_WITH_NTFS3G || !IMG_WITH_WIM)
+        return feat_unavail(out,"libntfs-3g + wimlib（恢复分区填充）","重新编译时开启 IMG_WITH_NTFS3G/IMG_WITH_WIM");
+    uint64_t lba=img_args_u64(in,"rec-lba",0);
+    const char *src=img_args_get(in,"winre-src");
+    int idx=(int)img_args_u64(in,"winre-index",1);
+    const char *wpath=img_args_get(in,"winre-path");
+    const char *sdi=img_args_get(in,"bootsdi-src");
+    bool do_fmt=img_args_bool(in,"format",false);
+    const char *label=img_args_get(in,"label");
+    bool set_attr=img_args_bool(in,"set-gpt-attr",true);
+    bool ena=img_args_bool(in,"enable-script",false);
+    uint64_t os_lba=img_args_u64(in,"os-lba",0);
+
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){ pb=(t->parts[i].last_lba-t->parts[i].first_lba+1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","rec-lba","该 LBA 不在分区表里（先 img.create --rec-mb 或 part.layout --rec-gb）",NULL); return IMG_EINVAL; }
+
+    char err[256]=""; uint64_t wb=0;
+    rc=img_recovery_populate(q,lba,pb,src,idx,wpath,sdi,do_fmt,label,bios_layout,
+                             img_cmd_prog(),&wb,err,sizeof err);
+    if(rc!=IMG_OK){ img_result_fail(out,rc,"REC-VERIFY-FAIL",src,err[0]?err:"填充失败",NULL); return rc; }
+
+    bool attr_ok=false;
+    if(set_attr){
+        uint64_t want = 0x8000000000000001ULL;
+        int ar=img_part_set_attributes(q,lba,want);
+        if(ar==IMG_ENOTSUP) attr_ok=false;          /* MBR：没有属性，不算错 */
+        else if(ar==IMG_OK) attr_ok=true;
+    }
+    if(ena){
+        if(!os_lba){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","os-lba","enable-script=true 时必须给系统分区 LBA",NULL); return IMG_EINVAL; }
+        uint64_t osb=0;
+        for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+            if(t->parts[i].used && t->parts[i].first_lba==os_lba){ osb=(t->parts[i].last_lba-t->parts[i].first_lba+1)*512; break; }
+        size_t nb=0;
+        int sr=img_winre_write_enable_script(q,os_lba,osb,&nb);
+        if(sr!=IMG_OK){ img_result_fail(out,sr,"FAT-PUT-FAIL","/Windows/Setup/Scripts","脚本写入失败",NULL); return sr; }
+        img_result_u64(out,"script_bytes",(uint64_t)nb);
+    }
+    img_result_u64(out,"rec_lba",lba);
+    img_result_u64(out,"winre_bytes",wb);
+    img_result_bool(out,"gpt_attr_set",attr_ok);
+    img_result_str(out,"layout",bios_layout?"system":"dedicated");
+    return IMG_OK;
+}
+static int cmd_recovery_populate(img_ctx *ctx, const img_args *in, img_result *out){
+    return rec_populate_common(ctx,in,out,false);     /* 独立恢复分区（UEFI）*/
+}
+static int cmd_recovery_populate_system(img_ctx *ctx, const img_args *in, img_result *out){
+    return rec_populate_common(ctx,in,out,true);      /* 系统分区内（BIOS）*/
+}
+
 const img_cmd IMG_CMD_TABLE[] = {
     {"img.info",  "1.0", "显示镜像基本信息（大小/分区表/分区数）",
         A_INFO,   (int)(sizeof A_INFO  /sizeof A_INFO[0]),   cmd_img_info},
@@ -1777,6 +1898,14 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_BCDGEN,(int)(sizeof A_BCDGEN/sizeof A_BCDGEN[0]), cmd_bcd_gen_uefi},
     {"boot.check","1.0", "引导链自检（= imgbc）：返回逐项结果 + 必需项失败数",
         A_BOOTCHECK,(int)(sizeof A_BOOTCHECK/sizeof A_BOOTCHECK[0]), cmd_boot_check},
+    {"part.attr","1.0", "设 GPT 分区属性（恢复分区官方要求 0x8000000000000001）",
+        A_PARTATTR,(int)(sizeof A_PARTATTR/sizeof A_PARTATTR[0]), cmd_part_attr},
+    {"winre.find","1.0", "在 WIM/ESD 里定位 Winre.wim（只读；找不到报 WINRE-NOTFOUND）",
+        A_WINREFIND,(int)(sizeof A_WINREFIND/sizeof A_WINREFIND[0]), cmd_winre_find},
+    {"recovery.populate","1.0", "把 WinRE 填进【独立恢复分区】（UEFI）",
+        A_RECPOP,(int)(sizeof A_RECPOP/sizeof A_RECPOP[0]), cmd_recovery_populate},
+    {"recovery.populate-system","1.0", "把 WinRE 填进系统分区的 Windows\\System32\\Recovery（BIOS）",
+        A_RECPOP,(int)(sizeof A_RECPOP/sizeof A_RECPOP[0]), cmd_recovery_populate_system},
     {"iso.ls","1.0", "列 ISO 里的目录（UDF；Windows 安装盘的 install.wim 只在 UDF 里）",
         A_ISOLS,(int)(sizeof A_ISOLS/sizeof A_ISOLS[0]), cmd_iso_ls},
     {"iso.extract","1.0", "从 ISO 里抽文件到本地（流式 1 MiB；App 不必自己装 ISO 库）",

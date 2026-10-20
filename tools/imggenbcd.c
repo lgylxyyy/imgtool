@@ -22,15 +22,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* 从 "{guid}" 里取 guid（去花括号），结果写入 out（≥40 字节） */
-static void guid_trim(const char *in, char *out, size_t cap){
-    const char *p = in;
-    if(p[0] == '{') p++;
-    snprintf(out, cap, "%s", p);
-    char *c = strchr(out, '}');
-    if(c) *c = 0;
-}
-
 int main(int argc,char**argv){
     /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
        也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/

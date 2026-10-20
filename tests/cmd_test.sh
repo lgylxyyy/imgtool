@@ -320,6 +320,41 @@ print([e['size'] for e in d['data']['entries'] if e['name'].lower()=='install.wi
     fi
 }
 
+echo "════ 4h. 恢复分区四件套（part.attr / winre.find / recovery.populate*）════"
+{   # ★ 政策是"默认不建"；这里验的是"勾了之后能不能纯命令表做完"。
+    WIM=/workspace/build/iso-win10/install.wim
+    SDI=/workspace/build/iso-win10/boot.sdi
+    if [ ! -f "$WIM" ]; then
+        echo "  ⏭ 没有 install.wim，跳过恢复分区用例"
+    else
+        R="$W/rec.qcow2"
+        $T/imgcmd img.create --out="$R" --size-gb=12 --rec-mb=1024 --progress=none >/dev/null 2>&1
+        REC=$($T/imgcmd part.show --img="$R" --ro --progress=none 2>/dev/null | jq_ "[p['first'] for p in d['data']['pt']['parts'] if p['typeGuid'].startswith('de94bba4')][0]")
+        [ -n "$REC" ] && ok "img.create --rec-mb=1024 建出恢复分区（LBA $REC）" || ng "没有恢复分区"
+
+        $T/imgcmd winre.find --src="$WIM" --index=1 --progress=none > "$W/wf.json" 2>/dev/null
+        [ "$(jq_ "d['data']['size_bytes']" < "$W/wf.json")" = "435363851" ] \
+            && ok "winre.find → 找到 Winre.wim（435,363,851 字节）" || ng "winre.find 异常：$(head -c 200 "$W/wf.json")"
+        # 反例：不是 WIM 的文件 → 稳定错误码
+        code=$($T/imgcmd winre.find --src=/etc/hostname --progress=none 2>/dev/null | jq_ "d['err']['error_code']")
+        [ "$code" = "WIM-NOTFOUND" ] && ok "winre.find 垃圾输入 → WIM-NOTFOUND" || ng "winre.find 反例：$code"
+
+        $T/imgcmd recovery.populate --img="$R" --rec-lba="$REC" --winre-src="$WIM" \
+            --winre-index=1 --bootsdi-src="$SDI" --format=true --progress=none > "$W/rp.json" 2>/dev/null
+        [ "$(jq_ "d['data']['winre_bytes']" < "$W/rp.json")" = "435363851" ] \
+            && ok "recovery.populate → 写入 Winre.wim 435 MB" || ng "recovery.populate 失败：$(head -c 200 "$W/rp.json")"
+        [ "$(jq_ "d['data']['gpt_attr_set']" < "$W/rp.json")" = "True" ] \
+            && ok "recovery.populate → GPT 属性已设" || ng "GPT 属性没设上"
+        ex=$($T/imgcmd ntfs.exists --img="$R" --lba="$REC" --path=/Recovery/WindowsRE/Winre.wim --progress=none 2>/dev/null | jq_ "d['data']['exists']")
+        [ "$ex" = "True" ] && ok "恢复分区里确实有 Winre.wim" || ng "文件不在"
+        at=$($T/imgcmd part.show --img="$R" --ro --progress=none 2>/dev/null | jq_ "[p['attributes'] for p in d['data']['pt']['parts'] if p['typeGuid'].startswith('de94bba4')][0]")
+        [ "$at" = "0x8000000000000001" ] && ok "part.show 读回属性 = 0x8000000000000001" || ng "属性读回=$at"
+        $T/imgcmd part.attr --img="$R" --lba="$REC" --attr=0x1 --progress=none >/dev/null 2>&1
+        at2=$($T/imgcmd part.show --img="$R" --ro --progress=none 2>/dev/null | jq_ "[p['attributes'] for p in d['data']['pt']['parts'] if p['typeGuid'].startswith('de94bba4')][0]")
+        [ "$at2" = "0x0000000000000001" ] && ok "part.attr 能改（0x8000000000000001 → 0x1）" || ng "part.attr 没生效：$at2"
+    fi
+}
+
 echo "════ 5. 日志（--log）：里程碑 + 错误都落盘，且逐行可解析 ════"
 $T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src="$W/blob.bin" --dst=/EFI/blob2.bin \
     --log="$W/run.log" --log-level=info >/dev/null 2>&1
