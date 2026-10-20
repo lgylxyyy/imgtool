@@ -35,6 +35,9 @@ $T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src="$W/blob.bin" --dst=/EFI/b
 [ "$(jq_ "d['data']['written_bytes']" < "$W/put.json")" = "$(stat -c%s "$W/blob.bin")" ] && ok "fat.put 写入成功（默认不校验空间）" || ng "fat.put 异常：$(head -c 200 "$W/put.json")"
 $T/imgcmd fat.ls --img="$W/t.qcow2" --lba=$LBA --path=/EFI > "$W/ls.json" 2>/dev/null
 [ "$(jq_ "[e['name'] for e in d['data']['entries']]" < "$W/ls.json" | grep -c blob.bin)" = "1" ] && ok "fat.ls 看到刚写的文件" || ng "fat.ls 异常"
+rm -f "$W/blob.out"
+$T/imgcmd fat.export --img="$W/t.qcow2" --lba=$LBA --path=/EFI/blob.bin --dst="$W/blob.out" --progress=none >/dev/null 2>&1
+[ "$(md5sum < "$W/blob.bin")" = "$(md5sum < "$W/blob.out" 2>/dev/null)" ] && ok "fat.export 抽回来 md5 一致（UEFI 的 BCD 靠它）" || ng "fat.export 异常"
 
 echo "════ 3. check_size 开关（默认关 / 显式开）════"
 head -c 400000000 /dev/zero > "$W/huge.bin"

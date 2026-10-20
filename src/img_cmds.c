@@ -1675,6 +1675,41 @@ static int cmd_iso_extract(img_ctx *ctx, const img_args *in, img_result *out){
 }
 /* 未编 libudfread 时也要有符号：给表一个明确报不可用的实现 */
 
+
+/* ---------- fat.export（与 ntfs.export 对称；UEFI 的 BCD 在 ESP 上，是 FAT32）---------- */
+static const img_arg A_FATEXPORT[] = {
+    {"img",  IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
+    {"lba",  IMG_A_U64, true, NULL, "FAT32 分区起始 LBA", chk_lba},
+    {"path", IMG_A_STR, true, NULL, "分区内要导出的绝对路径（/ 开头）", NULL},
+    {"dst",  IMG_A_STR, true, NULL, "本地输出文件路径（会覆盖）", NULL},
+};
+static int cmd_fat_export(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *path=img_args_get(in,"path"), *dst=img_args_get(in,"dst");
+    if(!path||path[0]!='/'||!dst){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","需要 / 开头的 path 与 dst",NULL); return IMG_EINVAL; }
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){ pb=(t->parts[i].last_lba-t->parts[i].first_lba+1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+    img_fat32_fs *fs=img_fat32_mount(q,lba,false);      /* 只读：导出不该改盘 */
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL",path,"不是合法 FAT32（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
+    void *buf=NULL; size_t n=0;
+    rc=img_fat32_read_file(fs,path,&buf,&n);
+    img_fat32_unmount(fs);
+    if(rc!=IMG_OK){ img_result_fail(out,rc,"FAT-ENTRY-NOTFOUND",path,"文件不存在或读不出",NULL); return rc; }
+    FILE *o=fopen(dst,"wb");
+    if(!o){ free(buf); img_result_fail(out,IMG_EIO,"HOST-OPEN-FAIL",dst,"本地文件写不了",NULL); return IMG_EIO; }
+    size_t wr=fwrite(buf,1,n,o); fclose(o); free(buf);
+    if(wr!=n){ img_result_fail(out,IMG_EIO,"HOST-ENOSPC",dst,"本地写入不完整",NULL); return IMG_EIO; }
+    img_result_str(out,"path",path);
+    img_result_u64(out,"bytes",(uint64_t)n);
+    return IMG_OK;
+}
+
 const img_cmd IMG_CMD_TABLE[] = {
     {"img.info",  "1.0", "显示镜像基本信息（大小/分区表/分区数）",
         A_INFO,   (int)(sizeof A_INFO  /sizeof A_INFO[0]),   cmd_img_info},
@@ -1708,6 +1743,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_PARTLAYOUT,(int)(sizeof A_PARTLAYOUT/sizeof A_PARTLAYOUT[0]), cmd_part_layout},
     {"boot.repair","1.0","BIOS 引导一键修复（诊断→按需重写→复验→JSON）",
         A_BOOTREPAIR,(int)(sizeof A_BOOTREPAIR/sizeof A_BOOTREPAIR[0]), cmd_boot_repair},
+    {"fat.export","1.0", "把 FAT32 分区里的文件导出到本地（UEFI 的 BCD 在 ESP 上）",
+        A_FATEXPORT,(int)(sizeof A_FATEXPORT/sizeof A_FATEXPORT[0]), cmd_fat_export},
     {"fat.exists", "1.0", "查 FAT32 路径是否存在（断点续跑探测原语）",
         A_FATEXISTS,(int)(sizeof A_FATEXISTS/sizeof A_FATEXISTS[0]), cmd_fat_exists},
     {"ctl.cancel","1.0", "请求取消正在执行的操作（另一线程调用；协作式，下一个检查点生效）",
