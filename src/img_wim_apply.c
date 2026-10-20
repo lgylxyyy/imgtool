@@ -23,6 +23,12 @@
 struct cb_ctx { img_prog *p; };
 static enum wimlib_progress_status on_progress(enum wimlib_progress_msg msg,
                                                union wimlib_progress_info *info, void *ctx){
+    /* ★ 第一件事：喂看门狗。解压阶段可能几十秒不产生任何一次 qcow2 写
+     *  （6.86 GB 的 ESD 实测连续 260 秒没有完成过 I/O），I/O 看门狗会把它
+     *  判成"卡死"并取消 —— 实测报错是 IO-TIMEOUT(gap=260886ms) 紧跟
+     *  CMD-CANCELLED，整盘灌不完。wimlib 的进度回调本身就是"还活着"的证据，
+     *  这里 touch 之后，看门狗才真正等价于"完全没有任何进展"。*/
+    img_io_touch();
     struct cb_ctx *c = ctx;
     if(!c || !c->p) return 0;
     switch(msg){

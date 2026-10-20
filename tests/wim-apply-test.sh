@@ -7,11 +7,17 @@
 #   ③ 结束后 qemu-img check 必须无错（镜像文件本身不能被写坏）
 #
 # 用法: tests/wim-apply-test.sh [ESD路径] [索引]
+#
+# ⚠ 资源：要写一张 20 GiB 盘、解压 6.9 GB 的 ESD，**峰值内存 > 4 GB**。
+#   本工作区沙箱只有 ~3.4 GB 可用 → 会在阶段①中途被系统杀掉（无报错、qcow2 停住）。
+#   要在内存 ≥8 GB 的机器上跑；或先把 ESD 换成小镜像（boot.wim）。
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T="$ROOT/build/tools"
 TE="$ROOT/build/tests"
-ESD="${1:-/workspace/【不忘初心】Windows11_26H1_28000.2525_X64_纯净[深度精简版][1.74G](2026.7.20).esd}"
+# ★ 默认路径改到 images/（旧值写在 /workspace/ 根下，实际文件在 /workspace/images/，
+#   所以 WITH_WIM=1 也只会报"找不到 ESD"——这也是它长期被当成"跑不了的重型项"的原因之一）
+ESD="${1:-/workspace/images/【不忘初心】Windows11_26H1_28000.2525_X64_纯净[深度精简版][1.74G](2026.7.20).esd}"
 IDX="${2:-1}"
 W=$(mktemp -d /tmp/wimtestXXXXXX)
 pass=0; fail=0
