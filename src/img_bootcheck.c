@@ -504,6 +504,32 @@ int img_bootcheck_json(const img_bootcheck_result_t *r, char *buf, int cap){
     return n;
 }
 
+int img_bootcheck_json_array(const img_bootcheck_result_t *r, char *buf, int cap){
+    if(!r||!buf||cap<16) return 0;
+    int n=0;
+    buf[n++]='[';
+    for(int i=0;i<r->count;i++){
+        const img_check_t *c=&r->items[i];
+        char line[1024];
+        const char *lvl = c->level==IMG_CK_REQUIRED?"required":
+                          c->level==IMG_CK_WARN?"warn":"info";
+        char id[128], nm[256], det[sizeof c->detail*2];
+        #define ESC2(dst,src) do{ int j=0; for(const char *p=(src); *p && j<(int)sizeof(dst)-2; p++){ \
+            if(*p=='"'||*p=='\\'){ (dst)[j++]='\\'; } (dst)[j++]=*p; } (dst)[j]=0; }while(0)
+        ESC2(id, c->id); ESC2(nm, c->name); ESC2(det, c->detail);
+        #undef ESC2
+        int m=snprintf(line,sizeof line,
+            "%s{\"id\":\"%s\",\"name\":\"%s\",\"level\":\"%s\",\"pass\":%s,\"detail\":\"%s\"}",
+            i?",":"", id, nm, lvl, c->pass?"true":"false", det);
+        if(m<0) break;
+        if(n+m >= cap-2) break;
+        memcpy(buf+n,line,(size_t)m); n+=m;
+    }
+    if(n<cap-1) buf[n++]=']';
+    buf[n]=0;
+    return n;
+}
+
 int img_bootcheck_summary(const img_bootcheck_result_t *r, char *buf, int cap){
     if(!r||!buf||cap<=0) return 0;
     int req_ok=0, req_n=0, warn_ok=0, warn_n=0, info_n=0;

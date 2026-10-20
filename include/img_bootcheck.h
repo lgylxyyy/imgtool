@@ -55,8 +55,12 @@ int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *ou
 int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
                      img_bootcheck_result_t *out, img_prog *prog);
 
-/* 把结果打成 JSON 数组（每项一行，方便流式输出）；返回写入字节数 */
+/* 把结果打成 NDJSON（每项一行，方便流式输出）；返回写入字节数 */
 int img_bootcheck_json(const img_bootcheck_result_t *r, char *buf, int cap);
+/* ★ 打成【单个合法 JSON 数组】"[{...},{...}]"（无换行）。
+ *   命令表（boot.check）必须用它：把 NDJSON 塞进结果信封的 data 会产出非法 JSON
+ *   （换行在 JSON 值里非法）—— 2026-10-20 实测踩到。*/
+int img_bootcheck_json_array(const img_bootcheck_result_t *r, char *buf, int cap);
 
 /* 一行汇总："6/8 必需项通过 · 2 项警告" */
 int img_bootcheck_summary(const img_bootcheck_result_t *r, char *buf, int cap);
