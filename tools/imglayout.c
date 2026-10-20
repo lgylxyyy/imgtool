@@ -53,7 +53,7 @@ int main(int argc,char**argv){
         printf("  MBR: 最多 4 个主分区；单分区 ≤2 TiB；只能 1 个活动分区\n");
         printf("  GPT: 最多 128 个分区；单分区 ≤16 EiB；需要 ESP(FAT32)+MSR(16MiB)\n");
         printf("  FAT32: Windows 下最大 32 GiB   |   NTFS: ≤256 TiB   |   exFAT: ≤16 EiB\n");
-        printf("  ESP: 512B 扇区 ≥200 MiB，4K 扇区 ≥300 MiB\n");
+        printf("  ESP: 官方 512B 扇区 ≥100~200 MiB、4K 扇区 ≥300 MiB；本工具默认 200 MiB\n");
         printf("  BIOS系统分区: ≥100 MiB（官方），推荐 500 MiB（升级/BitLocker 需要）\n");
         return 0;
     }

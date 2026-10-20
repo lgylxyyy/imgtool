@@ -27,9 +27,13 @@ static const img_role_limits_t LIMITS[IMG_ROLE_COUNT] = {
      *   政策性判断（过小/过大弹警告）由 App 层决定 —— 因为本库会被其它调用方使用，
      *   硬编政策不合适。工具层只拦【技术正确性】问题（见 img_constraints_check_partition）。 */
     [IMG_ROLE_ESP] = {
-        .min_bytes = 128*MiB, .rec_bytes = 512*MiB, .def_bytes = 512*MiB,
+        /* ★ 默认 200 MiB（用户 2026-10-20 定：128 MiB ~ 512 MiB 都行，默认取 200）。
+         *   依据：ESP 只放启动文件（实测 Win11 一套约 34 MB），512B 簇的 FAT32
+         *   写满要逐簇写 —— ESP 越大越浪费（见手册 §13.10 的 6.3 MB/s）。
+         *   官方口径：512B 扇区 ≥100~200 MiB；4K 扇区 ≥300 MiB。上限留 1 GiB 不拦。*/
+        .min_bytes = 128*MiB, .rec_bytes = 512*MiB, .def_bytes = 200*MiB,
         .max_bytes = 1*GiB, .must_fat32 = true,
-        .note = "UEFI 只认 FAT 系；512 MiB 是常用默认值（qcow2 不写不占空间）",
+        .note = "UEFI 只认 FAT 系；默认 200 MiB（128~512 都合规），4K 扇区请给 300 MiB",
     },
     [IMG_ROLE_SYSPART] = {
         .min_bytes = 128*MiB, .rec_bytes = 512*MiB, .def_bytes = 512*MiB,
@@ -47,12 +51,15 @@ static const img_role_limits_t LIMITS[IMG_ROLE_COUNT] = {
         .note = "必须 NTFS；262144 GiB = 256 TiB (NTFS 上限)",
     },
     [IMG_ROLE_RECOVERY] = {
-        /* ★ 注意：实测 Winre.wim = 415 MB → 分区至少要 ~500 MB 才放得下
-         *   （微软文档说的 250MB 是旧基准，LTSC 这份更大） */
+        /* ★ 默认【不建】（用户 2026-10-19 定的政策：默认不创建恢复分区、不写 WinRE，
+         *   勾选才做 —— DESIGN-OUTPUT.md §十一 / app/docs 手册 §15）。
+         *   要建就必须显式给：imglayout mk ... --rec 1024，或 part.layout --rec-gb=1。
+         *   尺寸依据：实测 Winre.wim = 415 MB → 分区至少 ~500 MB 才放得下
+         *   （微软文档说的 250MB 是旧基准，LTSC/Win11 这份更大）。*/
         .min_bytes = 0,      /* 0 = 可以不建恢复分区 */
-        .rec_bytes = 1*GiB, .def_bytes = 1*GiB, .max_bytes = 2*GiB,
+        .rec_bytes = 1*GiB, .def_bytes = 0, .max_bytes = 2*GiB,
         .must_ntfs = true,
-        .note = "存放 Winre.wim；实测 415MB → 建议 ≥500MB，默认 1 GiB",
+        .note = "默认不建；勾选后建议 ≥500MB（实测 Winre.wim 415MB）",
     },
     [IMG_ROLE_DATA] = {
         .min_bytes = 0, .rec_bytes = 0, .def_bytes = 0, .max_bytes = 0,
@@ -152,8 +159,8 @@ int img_constraints_check_partition(const img_part_request_t *q, img_check_resul
 int img_constraints_check_table(const img_parttable_t *t, img_check_result_t *out){
     if(!t) return IMG_EINVAL;
     res_ok(out);
-    int used=0;
-    for(int i=0;i<IMG_MAX_PARTITIONS;i++) if(t->parts[i].used) used++;
+    int used=0;                        /* ★ 只数【主表项】：逻辑分区不占 MBR 的 4 个槽 */
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++) if(t->parts[i].used && !t->parts[i].logical) used++;
 
     if(t->table==IMG_TABLE_MBR){
         if(used>4){
@@ -188,6 +195,10 @@ int img_constraints_check_table(const img_parttable_t *t, img_check_result_t *ou
         for(int j=i+1;j<IMG_MAX_PARTITIONS;j++){
             const img_partition_t *b=&t->parts[j];
             if(!b->used) continue;
+            /* ★ 扩展容器【本来就要】包住它里面的逻辑分区 —— 这不是重叠 */
+            bool a_ext=(a->type==IMG_MBR_EXTENDED||a->type==IMG_MBR_EXTENDED_L);
+            bool b_ext=(b->type==IMG_MBR_EXTENDED||b->type==IMG_MBR_EXTENDED_L);
+            if((a->logical&&b_ext)||(b->logical&&a_ext)) continue;
             if(a->first_lba<=b->last_lba && b->first_lba<=a->last_lba){
                 res_fail(out,IMG_EINVAL,"分区#%d 与 #%d 重叠",i,j);
                 sug(out,"重叠的分区会导致数据损坏");
@@ -207,10 +218,10 @@ void img_layout_defaults(img_layout_opts_t *o, img_table_t table){
     o->alignment = 2048;
     o->msr_bytes  = 16*MiB;
     if(table==IMG_TABLE_GPT){
-        o->esp_bytes  = LIMITS[IMG_ROLE_ESP].def_bytes;    /* 300MB */
+        o->esp_bytes  = LIMITS[IMG_ROLE_ESP].def_bytes;    /* 200 MiB */
         o->recovery_bytes = LIMITS[IMG_ROLE_RECOVERY].def_bytes;
     } else {
-        o->sys_bytes  = LIMITS[IMG_ROLE_SYSPART].def_bytes;/* 500MB */
+        o->sys_bytes  = LIMITS[IMG_ROLE_SYSPART].def_bytes;/* 512 MiB */
     }
 }
 

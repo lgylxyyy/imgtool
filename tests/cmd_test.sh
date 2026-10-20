@@ -202,6 +202,33 @@ $T/imgntfsfs "$W/winre.qcow2" $WE exists /Windows/Setup/Scripts/SetupComplete.cm
 $T/imgntfsfs "$W/winre.qcow2" $WE exists /Windows/Setup/Scripts/SetupComplete.cmd 2>&1 | grep -q "是" && \
   ok "再写回幂等" || ng "重写失败"
 
+echo "════ 4e0. 扩展/逻辑分区：part.show 不重复列、导出 logical、check 不误报 ════"
+{   # ★ 2026-10-20 修：旧实现把逻辑分区也塞进 MBR 主槽 → part.show 重复列同一条，
+    #   且 imglayout check 报「MBR 最多 4 个主分区，当前 5 个」的假阳性（手册 §13.9）。
+    X="$W/ext.qcow2"
+    $T/imglayout mk "$X" $((4*1024*1024*1024)) mbr >/dev/null 2>&1
+    $T/imgcmd part.layout --img="$X" --sr-mb=64 --sys-gb=1 --rec-gb=0 --extended=true --progress=none >/dev/null 2>&1
+    $T/imgcmd part.show --img="$X" --ro --progress=none > "$W/ext.json" 2>/dev/null
+    python3 - "$W/ext.json" <<'PYX'
+import json,sys
+d=json.load(open(sys.argv[1]))
+ps=d['data']['pt']['parts']
+keys=[(p['first'],p['last']) for p in ps]
+dup = len(keys)!=len(set(keys))
+log = [p for p in ps if p.get('logical')]
+ok = (not dup) and len(log)==1
+print(("OK" if ok else "BAD"), "parts=%d dup=%s logical=%d" % (len(ps), dup, len(log)))
+sys.exit(0 if ok else 1)
+PYX
+    [ $? -eq 0 ] && ok "part.show 无重复条目、逻辑分区带 logical=true（$W/ext.json）" \
+                  || ng "part.show 对扩展/逻辑分区仍重复或没导出 logical：$(head -c 300 "$W/ext.json")"
+    if $T/imglayout check "$X" 2>&1 | grep -q "最多 4 个主分区"; then
+        ng "imglayout check 仍把逻辑分区算进 4 个主槽（假阳性）"
+    else
+        ok "imglayout check 不再误报「MBR 最多 4 个主分区」"
+    fi
+}
+
 echo "════ 4e. ntfs.exists / fat.exists（断点续跑探测原语）════"
 j=$("$T/imgcmd" ntfs.exists --img="$W/winre.qcow2" --lba=$WE --path=/Windows/Setup/Scripts/SetupComplete.cmd)
 ex=$(echo "$j" | jq_ "d['data']['exists']")
