@@ -943,6 +943,9 @@ static int cmd_part_copy(img_ctx *ctx, const img_args *in, img_result *out){
                         img_span_kv_u64(&sp2,"dst_lba",dlba);
                         img_span_kv_u64(&sp2,"size_bytes",n);
                         img_span_begin(&sp2);
+                        img_prog *pg=img_cmd_prog();
+                        if(pg){ img_prog_phase(pg,IMG_PH_COPY,"跨镜像拷贝分区");
+                                img_prog_op(pg,IMG_OP_WRITE); img_prog_bytes(pg,0,n); }
                         uint64_t done=0, written=0;
                         while(done<n && rc==IMG_OK){
                             size_t k=(size_t)((n-done)<(1024*1024)?(n-done):(1024*1024));
@@ -952,6 +955,8 @@ static int cmd_part_copy(img_ctx *ctx, const img_args *in, img_result *out){
                                 if(rc==IMG_OK) written+=k;
                             }
                             done+=k;
+                            if(pg) img_prog_bytes(pg,done,n);   /* 节流在 img_prog 内部（200ms）*/
+                            if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
                         }
                         img_span_end(&sp2,rc);
                         if(rc==IMG_OK){
@@ -1493,16 +1498,22 @@ static int cmd_ntfs_export(img_ctx *ctx, const img_args *in, img_result *out){
     if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
     img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
     if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",path,"不是合法 NTFS（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
-    void *buf=NULL; size_t n=0;
-    rc=img_ntfs_read_file(fs,path,&buf,&n);
+    /* ★ 流式导出（1 MiB 一块）：以前把整文件读进内存，install.wim 4 GB 会 OOM，
+     *   而且中间没有进度可报。*/
+    img_span sp; img_span_prep(&sp,"ntfs","export","导出 NTFS 文件");
+    img_span_kv_str(&sp,"path",path); img_span_begin(&sp);
+    uint64_t got=0;
+    rc=img_ntfs_copy_out(fs,path,dst,img_cmd_prog(),&got);
     img_ntfs_umount(fs);
-    if(rc!=IMG_OK){ img_result_fail(out,rc,"FAT-ENTRY-NOTFOUND",path,"文件不存在或读不出",NULL); return rc; }
-    FILE *o=fopen(dst,"wb");
-    if(!o){ free(buf); img_result_fail(out,IMG_EIO,"HOST-OPEN-FAIL",dst,"本地文件写不了",NULL); return IMG_EIO; }
-    size_t wr=fwrite(buf,1,n,o); fclose(o); free(buf);
-    if(wr!=n){ img_result_fail(out,IMG_EIO,"HOST-ENOSPC",dst,"本地写入不完整",NULL); return IMG_EIO; }
+    img_span_kv_u64(&sp,"written",got);
+    img_span_end(&sp,rc);
+    if(rc!=IMG_OK){
+        const char *code=(rc==IMG_ECANCELLED)?"CMD-CANCELLED":"FAT-ENTRY-NOTFOUND";
+        img_result_fail(out,rc,code,path,(rc==IMG_ECANCELLED)?"已取消":"文件不存在或读不出",NULL);
+        return rc;
+    }
     img_result_str(out,"path",path);
-    img_result_u64(out,"bytes",(uint64_t)n);
+    img_result_u64(out,"bytes",got);
     return IMG_OK;
 #else
     (void)ctx;(void)in;(void)out; return IMG_ENOTSUP;
@@ -1697,16 +1708,20 @@ static int cmd_fat_export(img_ctx *ctx, const img_args *in, img_result *out){
     if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
     img_fat32_fs *fs=img_fat32_mount(q,lba,false);      /* 只读：导出不该改盘 */
     if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL",path,"不是合法 FAT32（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
-    void *buf=NULL; size_t n=0;
-    rc=img_fat32_read_file(fs,path,&buf,&n);
+    img_span sp; img_span_prep(&sp,"fat32","export","导出 FAT32 文件");
+    img_span_kv_str(&sp,"path",path); img_span_begin(&sp);
+    uint64_t got=0;
+    rc=img_fat32_copy_out(fs,path,dst,img_cmd_prog(),&got);
     img_fat32_unmount(fs);
-    if(rc!=IMG_OK){ img_result_fail(out,rc,"FAT-ENTRY-NOTFOUND",path,"文件不存在或读不出",NULL); return rc; }
-    FILE *o=fopen(dst,"wb");
-    if(!o){ free(buf); img_result_fail(out,IMG_EIO,"HOST-OPEN-FAIL",dst,"本地文件写不了",NULL); return IMG_EIO; }
-    size_t wr=fwrite(buf,1,n,o); fclose(o); free(buf);
-    if(wr!=n){ img_result_fail(out,IMG_EIO,"HOST-ENOSPC",dst,"本地写入不完整",NULL); return IMG_EIO; }
+    img_span_kv_u64(&sp,"written",got);
+    img_span_end(&sp,rc);
+    if(rc!=IMG_OK){
+        const char *code=(rc==IMG_ECANCELLED)?"CMD-CANCELLED":"FAT-ENTRY-NOTFOUND";
+        img_result_fail(out,rc,code,path,(rc==IMG_ECANCELLED)?"已取消":"文件不存在或读不出",NULL);
+        return rc;
+    }
     img_result_str(out,"path",path);
-    img_result_u64(out,"bytes",(uint64_t)n);
+    img_result_u64(out,"bytes",got);
     return IMG_OK;
 }
 

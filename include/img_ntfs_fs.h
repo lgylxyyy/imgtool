@@ -34,8 +34,14 @@ int img_ntfs_mkdir_p(img_ntfs_fs *fs, const char *abs_path);
 /* 路径存在性（文件或目录） */
 bool img_ntfs_path_exists(img_ntfs_fs *fs, const char *abs_path);
 
-/* 读整个文件到内存（调用方 free）。*out_len 返回字节数 */
+/* 读整个文件到内存（调用方 free）。*out_len 返回字节数。
+ * ⚠ 只适合小文件（≤几十 MB）。大文件（install.wim 4 GB）会 OOM，用下面的流式版。*/
 int img_ntfs_read_file(img_ntfs_fs *fs, const char *abs_path, void **out, size_t *out_len);
+
+/* 流式导出到本地文件（1 MiB 一块，边读边写；prog 可为 NULL）。
+ * 与 read_file 的区别：内存峰值恒定 1 MiB，可对 GB 级文件用，且能报进度。*/
+int img_ntfs_copy_out(img_ntfs_fs *fs, const char *abs_path, const char *dst_path,
+                      img_prog *prog, uint64_t *out_bytes);
 
 /* 把内存数据写成文件（ESP 里常有几个 KB 的小文件） */
 int img_ntfs_put_file_mem(img_ntfs_fs *fs, const void *data, size_t len,

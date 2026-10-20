@@ -46,9 +46,12 @@ int img_fat32_put_file(img_fat32_fs *fs, const char *local_path,
 int img_fat32_put_data(img_fat32_fs *fs, const void *data, size_t len,
                        const char *dst_abs_path);
 
-/* 读文件（调用方 free） */
+/* 读文件（调用方 free）。⚠ 整文件进内存，只适合小文件 */
 int img_fat32_read_file(img_fat32_fs *fs, const char *abs_path,
                         void **out, size_t *out_len);
+/* 流式导出到本地文件（1 MiB 缓冲；prog 可为 NULL）*/
+int img_fat32_copy_out(img_fat32_fs *fs, const char *abs_path, const char *dst_path,
+                       img_prog *prog, uint64_t *out_bytes);
 
 /* 列目录：每项回调 name/is_dir/size。返回 IMG_OK */
 typedef void (*img_fat32_list_cb)(void *ud, const char *name, bool is_dir, uint64_t size);

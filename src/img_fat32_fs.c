@@ -772,6 +772,42 @@ int img_fat32_read_file(img_fat32_fs *fs, const char *abs_path, void **out, size
     return IMG_OK;
 }
 
+int img_fat32_copy_out(img_fat32_fs *fs, const char *abs_path, const char *dst_path,
+                       img_prog *prog, uint64_t *out_bytes){
+    if(out_bytes) *out_bytes=0;
+    if(!fs||!abs_path||!dst_path) return IMG_EINVAL;
+    uint32_t dir; char nm[256];
+    if(split_parent(fs, abs_path, &dir, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
+    dir_ent e;
+    if(dir_find(fs, dir, nm, &e)!=IMG_OK || !e.found) return IMG_ENOENT;
+    if(e.is_dir) return IMG_ENOTSUP;
+    FILE *o=fopen(dst_path,"wb");
+    if(!o) return IMG_EIO;
+    if(prog){ img_prog_op(prog,IMG_OP_READ);
+              img_prog_phase(prog,IMG_PH_EXTRACT,"导出 FAT32 文件");
+              img_prog_bytes(prog,0,e.size); }
+    size_t csz=(size_t)fs->L.sectors_per_cluster*512;
+    uint8_t *buf=malloc(csz?csz:512);
+    int rc=IMG_OK;
+    if(!buf){ fclose(o); return IMG_ENOMEM; }
+    uint32_t c=e.cluster, done=0; uint64_t guard=0;
+    while(c>=2 && c<FAT32_EOC && done<e.size){
+        if(FAT32_CHAIN_GUARD(fs,guard)){ rc=IMG_ECORRUPT; break; }
+        size_t n=(e.size-done<csz)?(size_t)(e.size-done):csz;
+        if(rd(fs,clus_off(fs,c),buf,n)){ rc=IMG_EIO; break; }
+        if(fwrite(buf,1,n,o)!=n){ rc=IMG_EIO; break; }
+        done+=(uint32_t)n;
+        if(prog) img_prog_bytes(prog,done,e.size);
+        if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
+        uint32_t nx=0; if(fat_get(fs,c,&nx)){ rc=IMG_EIO; break; }
+        c=nx;
+    }
+    free(buf); fclose(o);
+    if(rc!=IMG_OK){ unlink(dst_path); return rc; }
+    if(out_bytes) *out_bytes=done;
+    return IMG_OK;
+}
+
 int img_fat32_list_dir(img_fat32_fs *fs, const char *abs_path, img_fat32_list_cb cb, void *ud){
     if(!fs||!cb) return IMG_EINVAL;
     uint32_t dir = fs->L.root_cluster;

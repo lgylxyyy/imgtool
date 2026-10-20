@@ -353,8 +353,9 @@ int img_iso_extract(img_iso *s, const char *path, const char *dst,
 
     FILE *o=fopen(dst,"wb");
     if(!o) return IMG_EIO;
-    if(prog){ img_prog_phase(prog,IMG_PH_EXTRACT,"从 ISO 抽取");
-              img_prog_op(prog,IMG_OP_DECOMPRESS); img_prog_bytes(prog,0,want); }
+    if(prog){ img_prog_op(prog,IMG_OP_DECOMPRESS);
+              img_prog_phase(prog,IMG_PH_EXTRACT,"从 ISO 抽取");
+              img_prog_bytes(prog,0,want); }
 
     enum { CHUNK = 1u<<20 };
     uint8_t *buf=malloc(CHUNK);

@@ -251,6 +251,43 @@ int img_ntfs_read_file(img_ntfs_fs *fs, const char *abs_path, void **out, size_t
     return IMG_OK;
 }
 
+/* 流式导出：1 MiB 一块，边读边写（内存峰值恒定）*/
+int img_ntfs_copy_out(img_ntfs_fs *fs, const char *abs_path, const char *dst_path,
+                      img_prog *prog, uint64_t *out_bytes){
+    if(out_bytes) *out_bytes=0;
+    if(!fs||!fs->vol||!abs_path||!dst_path) return IMG_EINVAL;
+    ntfs_inode *ni = lookup(fs->vol, abs_path, NULL);
+    if(!ni) return IMG_ENOENT;
+    ntfs_attr *na = ntfs_attr_open(ni, AT_DATA, NULL, 0);
+    if(!na){ ntfs_inode_close(ni); return IMG_EIO; }
+    s64 sz = na->data_size;
+    if(sz<0){ ntfs_attr_close(na); ntfs_inode_close(ni); return IMG_ECORRUPT; }
+    FILE *o=fopen(dst_path,"wb");
+    if(!o){ ntfs_attr_close(na); ntfs_inode_close(ni); return IMG_EIO; }
+    if(prog){ img_prog_op(prog,IMG_OP_READ);
+              img_prog_phase(prog,IMG_PH_EXTRACT,"导出 NTFS 文件");
+              img_prog_bytes(prog,0,(uint64_t)sz); }
+    enum { CHUNK = 1u<<20 };
+    uint8_t *buf=malloc(CHUNK);
+    int rc=IMG_OK;
+    if(!buf) rc=IMG_ENOMEM;
+    s64 done=0;
+    while(rc==IMG_OK && done<sz){
+        size_t want=(size_t)((sz-done)>(s64)CHUNK?CHUNK:(sz-done));
+        s64 got=ntfs_attr_pread(na,done,(s64)want,buf);
+        if(got<=0){ rc=IMG_EIO; break; }
+        if(fwrite(buf,1,(size_t)got,o)!=(size_t)got){ rc=IMG_EIO; break; }
+        done+=got;
+        if(prog) img_prog_bytes(prog,(uint64_t)done,(uint64_t)sz);
+        if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
+    }
+    free(buf); fclose(o);
+    ntfs_attr_close(na); ntfs_inode_close(ni);
+    if(rc!=IMG_OK){ unlink(dst_path); return rc; }
+    if(out_bytes) *out_bytes=(uint64_t)done;
+    return IMG_OK;
+}
+
 /* ---------- 写文件 ---------- */
 /* 内存数据写文件（与 put_file 同逻辑，只是数据来源不同）*/
 int img_ntfs_put_file_mem(img_ntfs_fs *fs, const void *data, size_t len,
