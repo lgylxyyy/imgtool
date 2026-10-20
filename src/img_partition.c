@@ -171,13 +171,24 @@ static int read_mbr(img_qcow2 *q, img_parttable_t *t, bool *is_gpt){
             const uint8_t *g0=e+446, *g1=e+446+16;
             uint32_t rel=le32(g0+8), sz=le32(g0+12);
             if(g0[4]!=0 && sz!=0){
-                img_partition_t *L=&t->parts[slot++];
-                memset(L,0,sizeof *L);
+                uint64_t abs_first=ebr+rel, abs_last=abs_first+sz-1;
+                /* ★ 兼容旧盘：以前我们把逻辑分区也写进了 MBR 主表项，
+                 *   读回来会在 MBR 槽与 EBR 链各出现一次。这里发现同 (first,last)
+                 *   已存在就不再追加，只把它【改判成逻辑分区】—— 老镜像也能读对。 */
+                int dup=-1;
+                for(int z=0;z<IMG_MAX_PARTITIONS;z++){
+                    if(t->parts[z].used && !t->parts[z].logical &&
+                       t->parts[z].first_lba==abs_first && t->parts[z].last_lba==abs_last){ dup=z; break; }
+                }
+                img_partition_t *L;
+                if(dup>=0){ L=&t->parts[dup]; }
+                else      { L=&t->parts[slot++]; memset(L,0,sizeof *L); }
                 L->used=true; L->logical=true;
                 L->type=g0[4];
-                L->first_lba=ebr+rel;
-                L->last_lba=L->first_lba+sz-1;
+                L->first_lba=abs_first;
+                L->last_lba=abs_last;
                 if(slot>t->count) t->count=slot;
+                if(dup>=0 && dup+1>t->count) t->count=dup+1;
             }
             uint32_t nrel=le32(g1+8);
             if(g1[4]!=0 && nrel!=0) ebr=ebr+nrel;             /* 下一段 EBR（相对） */
@@ -370,15 +381,24 @@ static int write_mbr(img_qcow2 *q, img_parttable_t *t){
     memcpy(s, t->mbr_code, 446);
     wle32(s+440, t->disk_signature);
 
-    int slot=0;
-    for(int i=0;i<IMG_MAX_PARTITIONS && slot<4;i++){
+    /* ★ 逻辑分区【绝不】写进 MBR 主表项 —— 它只存在于 EBR 里（MS-DNNF/维基百科规范）。
+     *   旧写法把逻辑分区也塞进第 4 个主槽（绝对偏移），于是同一分区既在 MBR 又在 EBR：
+     *   ① 读回来重复列（part.show 出现两条一模一样的分区）
+     *   ② imglayout check 误报「MBR 最多 4 个主分区，当前 5 个」
+     *   ③ Windows 磁盘管理会看到与扩展分区重叠的"幽灵主分区"
+     *   （实测 2026-10-20：build/bios-test/Win10-BIOS.qcow2 就是这个形态，SeaBIOS 仍能启动，
+     *     但格式不合法 —— 见 app/docs/工具能力与App集成手册.md §13.9） */
+    int slot=0, nprim=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++){
         const img_partition_t *p=&t->parts[i];
-        if(!p->used) continue;
-        build_mbr_entry(p, s+446+slot*16);
+        if(!p->used || p->logical) continue;
+        nprim++;
+        if(slot<4) build_mbr_entry(p, s+446+slot*16);
         slot++;
     }
-    /* ★ MBR 最多 4 个主分区，多了要报错（不能静默丢） */
     if(slot==0) return IMG_ESTATE;
+    /* 主分区（含扩展容器）超过 4 个：MBR 装不下，必须报错，不能静默丢 */
+    if(nprim>4) return IMG_EFULL;
     s[510]=0x55; s[511]=0xaa;
     int rc = img_qcow2_write(q, 0, s, 512);   /* 先写 MBR，再写 EBR 链 */
     if(rc!=IMG_OK) return rc;
@@ -416,13 +436,12 @@ static int write_mbr(img_qcow2 *q, img_parttable_t *t){
                 lba_to_chs(0xFFFFFFFFull, e1+1); lba_to_chs(0xFFFFFFFFull, e1+5);  /* 越界哨兵 fe ff ff（★不能全零，S=0 非法）*/
                 memcpy(eb+446+16, e1, 16);
             } else {
-                /* 最后一段：段大小覆盖到本段逻辑分区结束 */
-                uint8_t e1[16]; memset(e1,0,16);
-                e1[4]=IMG_MBR_EXTENDED_L;
-                wle32(e1+8, (uint32_t)(lp.last_lba-ebr+1));
-                wle32(e1+12, (uint32_t)(lp.last_lba-ebr+1));
-                lba_to_chs(0xFFFFFFFFull, e1+1); lba_to_chs(0xFFFFFFFFull, e1+5);
-                memcpy(eb+446+16, e1, 16);
+                /* ★ 链尾：第二个条目必须【全零】（规范："the second entry of an EBR
+                *   partition table will contain zero-bytes if it's the last EBR"）。
+                *   旧写法在这里填 0x0F + 把"段大小"写进起始偏移，读端会误以为还有下一段
+                *   EBR 去跟着跳 —— 见 app/docs/工具能力与App集成手册.md §13.9。 */
+                memset(eb+446+16, 0, 16);
+                (void)lp;
             }
             eb[510]=0x55; eb[511]=0xaa;
             rc=img_qcow2_write(q, ebr*512ULL, eb, 512);
@@ -692,25 +711,34 @@ int img_parttable_json(const img_parttable_t *t, char *buf, int cap){
         t->table==IMG_TABLE_GPT?"GPT":(t->table==IMG_TABLE_MBR?"MBR":"NONE"),
         (unsigned long long)t->disk_sectors, t->disk_guid);
     bool first=true;
-    for(int i=0;i<IMG_MAX_PARTITIONS && k<cap-64;i++){
+    int emitted=0, wanted=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++){
         const img_partition_t *p=&t->parts[i];
         if(!p->used) continue;
+        wanted++;
+        if(k>cap-320) break;                 /* 预留：一条最多 ~300 字节 + 收尾 */
         if(!first) k+=snprintf(buf+k,(size_t)(cap-k),",");
         first=false;
+        /* ★ logical 字段必须导出：App 靠它区分"MBR 主表项"与"EBR 里的逻辑分区"，
+         *   否则会按数组下标/数量猜（4 主槽限制、扩展容器包住逻辑分区都得猜）。
+         *   内存结构 img_partition_t.logical 一直有，只是没写进 JSON（手册 §13.9）。 */
         k+=snprintf(buf+k,(size_t)(cap-k),
             "{\"i\":%d,\"first\":%llu,\"last\":%llu,\"sectors\":%llu,"
-            "\"mbri\":%u,\"active\":%s,\"typeGuid\":\"%s\",\"partGuid\":\"%s\","
+            "\"mbri\":%u,\"active\":%s,\"logical\":%s,\"typeGuid\":\"%s\",\"partGuid\":\"%s\","
             "\"name\":\"%s\",\"attributes\":\"0x%016llx\"}",
             i,
             (unsigned long long)p->first_lba,
             (unsigned long long)p->last_lba,
             (unsigned long long)(p->last_lba-p->first_lba+1),
-            p->type, p->status==0x80?"true":"false",
+            p->type, p->status==0x80?"true":"false", p->logical?"true":"false",
             p->type_guid, p->part_guid, p->name,
             (unsigned long long)p->attributes);
-        if(k>=cap-2) break;
+        emitted++;
     }
     k+=snprintf(buf+k,(size_t)(cap-k),"]}");
+    /* ★ 装不下就明确失败，绝不静默截断（旧版 8 KiB 缓冲写满就停循环、照样返回成功，
+     *   App 拿到"少几个分区"的表还以为读全了）。 */
+    if(emitted<wanted) return 0;
     return k;
 }
 

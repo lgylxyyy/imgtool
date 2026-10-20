@@ -64,6 +64,33 @@ int main(void){
        eb[510]==0x55 && eb[511]==0xaa, "EBR0 有 55AA");
     OK(eb[446+4]==IMG_MBR_NTFS_EXFAT && eb[446+8]==0x00 && eb[446+9]==0x08, "EBR0 entry0：相对偏移=2048（小端 00 08）");
     OK(eb[446+16+4]==IMG_MBR_EXTENDED_L, "EBR0 entry1：下一段 EBR 类型 0x0F");
+
+    /* ★ 链尾规范：最后一个 EBR 的第二个条目必须【全零】（否则读端会去跟一个不存在的下一段）
+     *   —— 2026-10-20 修（手册 §13.9）。旧写法在这里填 0x0F + 把段大小写进起始偏移。*/
+    uint8_t el[512];
+    OK(img_qcow2_read_full(q,(log2_first-2048)*512ULL,el,512)==IMG_OK &&
+       el[510]==0x55 && el[511]==0xaa, "链尾 EBR 有 55AA");
+    { int allz=1; for(int i=446+16;i<446+32;i++) if(el[i]){ allz=0; break; }
+      OK(allz, "链尾 EBR 的 entry1 全零（规范要求：最后一段不再指向下一段）"); }
+
+    /* ★ 逻辑分区【绝不】出现在 MBR 的 4 个主槽里（旧写法塞进去 → part.show 重复列、
+     *   imglayout check 误报「最多 4 个主分区，当前 5 个」、Windows 看到幽灵主分区）*/
+    { uint8_t mbr[512]; int ghost=0;
+      if(img_qcow2_read_full(q,0,mbr,512)==IMG_OK){
+        for(int e=0;e<4;e++){
+            const uint8_t *en=mbr+446+e*16;
+            if(en[4]==0) continue;
+            uint64_t abs=(uint64_t)(en[8]|en[9]<<8|en[10]<<16|(uint32_t)en[11]<<24);
+            if(abs==log1_first || abs==log2_first) ghost=1;
+        }
+      }
+      OK(!ghost, "MBR 主槽里没有逻辑分区（只有 3 主分区 + 1 扩展容器）"); }
+
+    /* ★ part.show 用的 JSON 必须导出 logical —— App 靠它区分主表项/逻辑分区 */
+    { char jb[64*1024]; int n=img_parttable_json(&r,jb,sizeof jb);
+      OK(n>0 && strstr(jb,"\"logical\":true") && strstr(jb,"\"logical\":false"),
+         "分区表 JSON 导出 logical 字段（App 不必再靠猜）"); }
+
     img_qcow2_close(q); img_io_close(fh);
     unlink(path);
     if(fails){ printf("\n════ 结果：❌ 有失败（%d）════\n",fails); return 1; }
