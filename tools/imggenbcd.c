@@ -35,7 +35,9 @@ int main(int argc,char**argv){
     /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
        也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
     img_log_cli(argc, argv, "imggenbcd");
-    if(argc<5){ fprintf(stderr,"用法: %s <参考BCD> <输出BCD> <partGuid> <diskGuid> [espPartGuid]\n",argv[0]); return 2; }
+    if(argc<5 || argc==7){
+        fprintf(stderr,"用法: %s <参考BCD> <输出BCD> <sysGuid> <diskGuid> [espGuid] [oldRecGuid newRecGuid]\n",argv[0]);
+        return 2; }
 
     /* ★ 先验 GUID：非法 GUID 绝不许"改了个寂寞还返回 0" */
     unsigned char probe[88];
@@ -45,6 +47,10 @@ int main(int argc,char**argv){
     }
     if(argc>=6 && img_bcd_make_partition_device(argv[5], argv[4], probe) != IMG_OK){
         printf("❌ ESP 分区 GUID 非法：%s\n", argv[5]);
+        return 1;
+    }
+    if(argc>=8 && img_bcd_make_partition_device(argv[7], argv[4], probe) != IMG_OK){
+        printf("❌ 恢复分区 GUID 非法：%s\n", argv[7]);
         return 1;
     }
 
@@ -63,47 +69,44 @@ int main(int argc,char**argv){
     }
 
     /* ★ 必须【改之前】先记下参考盘的原始 GUID —— 改完就读不到旧值了 */
-    char old_os[40]={0}, old_esp[40]={0}, tp[40], td[40];
-    if(guid[0] && img_bcd_get_device_guids(b, guid, IMG_BCD_EL_WIM_DEVICE, old_os, td)!=IMG_OK)
+    char old_os[40]={0}, old_esp[40]={0}, old_disk[40]={0}, td[40];
+    if(guid[0] && img_bcd_get_device_guids(b, guid, IMG_BCD_EL_WIM_DEVICE, old_os, old_disk)!=IMG_OK)
         old_os[0]=0;
     if(guid[0] && !old_os[0])
-        img_bcd_get_device_guids(b, guid, IMG_BCD_EL_APP_DEVICE, old_os, td);
-    if(argc>=6)
+        img_bcd_get_device_guids(b, guid, IMG_BCD_EL_APP_DEVICE, old_os, old_disk);
+    if(argc>=6){
         img_bcd_get_device_guids(b, IMG_BCD_GUID_BOOTMGR, IMG_BCD_EL_APP_DEVICE, old_esp, td);
+        if(!old_disk[0]) snprintf(old_disk,sizeof old_disk,"%s",td);
+    }
+    const char *old_rec = argc>=8 ? argv[6] : NULL;
+    const char *new_rec = argc>=8 ? argv[7] : NULL;
 
-    printf("  参考盘 系统分区=%s\n", old_os[0]?old_os:"(无)");
-    printf("  参考盘 ESP 分区=%s\n", old_esp[0]?old_esp:"(无)");
+    printf("  参考盘 系统分区=%s / ESP=%s / 恢复=%s / 磁盘=%s\n",
+           old_os[0]?old_os:"(无)", old_esp[0]?old_esp:"(无)",
+           old_rec?old_rec:"(无)", old_disk[0]?old_disk:"(无)");
     printf("  新盘   系统分区=%s", argv[3]);
     if(argc>=6) printf(" / ESP=%s", argv[5]);
-    printf("\n");
+    if(argc>=8) printf(" / 恢复=%s", argv[7]);
+    printf(" / 磁盘=%s\n", argv[4]);
     if(!old_os[0] && !old_esp[0]){
         printf("❌ 参考件里找不到可映射的分区设备（不是 UEFI BCD？）\n");
         img_bcd_close(b); return 1;
     }
 
-    /* 全对象重映射：按【旧 GUID → 新 GUID】逐对象改，未知分区不动 */
-    int hit=0, listed=0;
-    char **objs=NULL; size_t nobj=0;
-    if(img_bcd_list_objects(b,&objs,&nobj)==IMG_OK){
-        listed=1;
-        static const char *EIDS[]={ IMG_BCD_EL_WIM_DEVICE, IMG_BCD_EL_APP_DEVICE, NULL };
-        for(size_t i=0;i<nobj;i++){
-            for(int e=0;EIDS[e];e++){
-                if(img_bcd_get_device_guids(b,objs[i],EIDS[e],tp,td)!=IMG_OK) continue;
-                const char *np=NULL;
-                if(old_os[0] && !strcmp(tp,old_os)) np=argv[3];
-                else if(argc>=6 && old_esp[0] && !strcmp(tp,old_esp)) np=argv[5];
-                if(!np) continue;
-                int rc=img_bcd_patch_device_guids(b,objs[i],EIDS[e],np,argv[4]);
-                if(rc==IMG_OK){ printf("    %s %s: %s → %s\n", objs[i], EIDS[e], tp, np); hit++; }
-                else printf("    ⚠ %s %s 改写失败：%s\n", objs[i], EIDS[e], img_strerror(rc));
-            }
-        }
-        img_bcd_free_object_list(objs,nobj);
-    } else printf("  ⚠ 对象枚举失败，改用加载器兜底\n");
-
-    /* 兜底：对象枚举失败时，至少把 OS 加载器的两个设备对象改掉 */
-    if(!listed && guid[0]){
+    /* ★ 全对象映射：不止 11000001/21000001，还有 21000026/31000003 等；
+     *   只改已知元素 ID 会让 bootmgr 仍去找旧盘（随机 GUID 启动失败）。*/
+    int hit=0;
+    int prc=img_bcd_patch_all_guid_bindings(b,
+            old_os[0]?old_os:NULL, argv[3],
+            (argc>=6 && old_esp[0])?old_esp:NULL, (argc>=6)?argv[5]:NULL,
+            old_rec, new_rec,
+            old_disk[0]?old_disk:NULL, argv[4], &hit);
+    if(prc!=IMG_OK){
+        printf("❌ 全对象映射失败：%s\n", img_strerror(prc));
+        img_bcd_close(b); return 1;
+    }
+    /* 兜底：万一参考件结构不认识，至少把 OS 加载器的两个设备对象改掉 */
+    if(hit==0 && guid[0]){
         int rc1=img_bcd_patch_device_guids(b,guid,IMG_BCD_EL_WIM_DEVICE,argv[3],argv[4]);
         int rc2=img_bcd_patch_device_guids(b,guid,IMG_BCD_EL_APP_DEVICE,argv[3],argv[4]);
         printf("  兜底改加载器 21000001: %s / 11000001: %s\n", img_strerror(rc1), img_strerror(rc2));

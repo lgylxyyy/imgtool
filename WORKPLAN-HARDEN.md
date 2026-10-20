@@ -258,6 +258,20 @@ Dism++ 源码挖掘（Chuyu-Team/Dism++）：下一轮用 gh 只读扒其引导�
 | 5 | `recovery_bcd_test` 长期跳过（缺 `../build/w128/iso/bcd`） | 需从官方 ISO 重新提取该参考件，或改为自带参考件 |
 | 6 | 双盘/多条目（BIOS+UEFI） | ⛔ 冻结，见上 |
 
+### 恢复分区/WinRE：默认关（2026-10-19 用户定，待实现）
+
+契约见 `DESIGN-OUTPUT.md §十一`，App 流程见 `../app/docs/RECOVERY-FLOW.md`。
+
+- [ ] `imglayout` 默认 `recovery_bytes=0`（显式 `--rec` 才建）
+- [ ] `imgbc` 默认不把“无恢复分区”当警告；加 `--expect-recovery`
+- [ ] 新增 `winre.find`（ESD/WIM；ISO 由 App 抽取后传入）
+- [ ] 新增 `recovery.populate`（UEFI 独立分区：格式化/属性/写件/复验）
+- [ ] 新增 `recovery.populate-system`（BIOS：写 `\Windows\System32\Recovery`）
+- [ ] `winre.auto` 脚本加时间戳标记 + 捕获 enable/info 输出（便于确认执行）
+- [ ] 错误码进 `E_TEXT` / App `i18n/strings.json` 并对账通过
+- [ ] 正反用例：勾选/未勾选、ESD 无 WinRE、换 WIM 成功、取消、写失败
+- [ ] 默认关的回归：不带 `--rec` 建盘 → 分区表无恢复分区、`imgbc` 不报红
+
 ### 回归入口（改完代码先跑它）
 ```bash
 tests/run_all.sh      # 11 套：cmd · corrupt-chain · timeout · fd · thread · cancel ·

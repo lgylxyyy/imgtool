@@ -269,6 +269,11 @@ int img_bcd_copy_object(img_bcd *dst, const char *src_path, const char *guid){
 
     hive_node_h dobj = hivex_node_get_child(dst->h, hivex_root(dst->h), "Objects");
     if(!dobj) dobj = hivex_node_add_child(dst->h, hivex_root(dst->h), "Objects");
+    /* ★ 目标已有同 GUID 对象时先删再拷（模板覆盖语义）。
+     *   否则 hivex_node_add_child 会因重名失败 —— 实测：Win11 的 BCD 自带
+     *   ISO 的 ramdisk/WinPE 对象，恢复条目构建会在这里断掉。 */
+    hive_node_h old = hivex_node_get_child(dst->h, dobj, want);
+    if(old) hivex_node_delete_child(dst->h, old);
     hive_node_h dn = copy_node_recursive(dst, sh, so, dobj);
     hivex_close(sh);
     return dn ? IMG_OK : IMG_EIO;
@@ -785,6 +790,51 @@ int img_bcd_get_device_guids(img_bcd *b, const char *obj_guid, const char *eid,
     guid_bytes_to_text((const uint8_t*)d+56, disk_out);
     free(d);
     return IMG_OK;
+}
+
+/* ---------- 全对象 GUID 批量映射（换盘必做） ---------- */
+typedef struct {
+    const char *old_os, *new_os, *old_esp, *new_esp;
+    const char *old_rec, *new_rec, *old_disk, *new_disk;
+    img_bcd *b; int patched;
+} guid_patch_ud;
+static int guid_patch_cb(void *ud, const char *obj_guid, const char *eid,
+                         hive_node_h el, const char *vkey, char *blob, size_t len){
+    (void)obj_guid; (void)eid;
+    guid_patch_ud *p=(guid_patch_ud*)ud;
+    if(len < 88) return IMG_OK;
+    char pg[40], dg[40];
+    guid_bytes_to_text((const uint8_t*)blob+32, pg);
+    guid_bytes_to_text((const uint8_t*)blob+56, dg);
+    const char *np=NULL, *nd=NULL;
+    if(p->old_os  && !strcmp(pg,p->old_os))  np=p->new_os;
+    else if(p->old_esp && !strcmp(pg,p->old_esp)) np=p->new_esp;
+    else if(p->old_rec && !strcmp(pg,p->old_rec)) np=p->new_rec;
+    if(p->old_disk && !strcmp(dg,p->old_disk)) nd=p->new_disk;
+    if(!np && !nd) return IMG_OK;                    /* 不属于本盘：不动 */
+    uint8_t tmp[88];
+    if(img_bcd_make_partition_device(np?np:pg, nd?nd:dg, tmp)!=IMG_OK) return IMG_EINVAL;
+    memcpy(blob+32, tmp+32, 16);
+    memcpy(blob+56, tmp+56, 16);
+    hive_set_value sv={ .key=(char*)vkey, .t=hive_t_binary, .len=len, .value=blob };
+    if(hivex_node_set_value(p->b->h, el, &sv, 0)!=0) return IMG_EIO;
+    p->patched++;
+    return IMG_OK;
+}
+int img_bcd_patch_all_guid_bindings(img_bcd *b,
+        const char *old_os,  const char *new_os,
+        const char *old_esp, const char *new_esp,
+        const char *old_rec, const char *new_rec,
+        const char *old_disk, const char *new_disk,
+        int *patched){
+    if(!b) return IMG_EINVAL;
+    if(patched) *patched=0;
+    guid_patch_ud ud={ .old_os=old_os, .new_os=new_os, .old_esp=old_esp, .new_esp=new_esp,
+                       .old_rec=old_rec, .new_rec=new_rec, .old_disk=old_disk,
+                       .new_disk=new_disk, .b=b, .patched=0 };
+    int rc=scan_mbr_devices(b, guid_patch_cb, &ud);
+    if(patched) *patched=ud.patched;
+    return rc;
 }
 
 /* 枚举 Objects 下所有对象 GUID —— 换盘重建时要遍历全部 device 对象 */

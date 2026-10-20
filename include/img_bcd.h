@@ -118,6 +118,22 @@ int img_bcd_get_element_binary(img_bcd *b, const char *guid, const char *eid,
 /* 把 device 对象里的分区 GUID / 磁盘 GUID 换成新盘的值（换盘重建后必做） */
 int img_bcd_patch_device_guids(img_bcd *b, const char *obj_guid, const char *eid,
                                const char *part_guid, const char *disk_guid);
+
+/* ---- 全对象 GUID 批量映射（换盘必做）----
+ * 参考 BCD 里同一块盘会出现【多个】分区设备对象（不止 11000001/21000001）：
+ * 实测 Win11 参考件还有 21000026、31000003 等。只改已知元素 ID 会漏掉它们，
+ * bootmgr/winload 仍会去找旧盘 → 随机 GUID 新盘启动失败。
+ * 本函数按 hive 结构遍历所有 type=6 的 88 字节设备对象：
+ *   分区 GUID：old_os→new_os / old_esp→new_esp / old_rec→new_rec（可传 NULL 跳过）
+ *   磁盘 GUID：old_disk→new_disk（强烈建议传；所有设备都应指向新盘）
+ * 只改 blob 的 [32..47]（分区 GUID）与 [56..71]（磁盘 GUID），其它字节原样。
+ * patched 返回改动的对象数（可为 NULL）。 */
+int img_bcd_patch_all_guid_bindings(img_bcd *b,
+        const char *old_os,  const char *new_os,
+        const char *old_esp, const char *new_esp,
+        const char *old_rec, const char *new_rec,
+        const char *old_disk, const char *new_disk,
+        int *patched);
 /* MBR/BIOS 设备命门：读/写【磁盘签名 + 分区字节偏移】（见 img_bcd.c 布局注释） */
 int img_bcd_get_mbr_binding(img_bcd *b,const char*obj_guid,const char*eid,
                             uint32_t *sig_out,uint64_t *off_out);

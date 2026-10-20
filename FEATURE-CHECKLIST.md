@@ -40,6 +40,20 @@
 | 15 | **测试** | 一条正用例 + **一条反用例**（坏参数 / 坏数据 / 取消），并加入 `tests/run_all.sh` | tests |
 | 16 | **文档** | 若有新命令 → 记进本文第三节；新契约 → 记进 `DESIGN-OUTPUT.md` | docs |
 
+### 第 0 条补充：恢复分区/WinRE（2026-10-19 用户定，默认关）
+
+| 归工具层 | 归 App 层 |
+|---|---|
+| `winre.find`：在 ESD/WIM 里找 WinRE，返回 index/internal_path/size | 决定“先查用户选的 ESD”；找不到时弹窗让用户换 ISO/ESD/WIM |
+| `recovery.populate`：格式化恢复分区、GPT 属性、写 winre.wim/boot.sdi、复验 | 决定 UEFI 用独立恢复分区、分区大小、失败后重试/放弃 |
+| `recovery.populate-system`：把 WinRE 复制到 `\Windows\System32\Recovery` | 决定 BIOS 用系统分区（不建独立分区） |
+| `winre.auto`：写 SetupComplete.cmd（开机 reagentc /enable + 自删） | 决定是否调用、何时提示用户 |
+| `imglayout --rec`（默认 0）/ `imgpart add` | 勾选框默认不勾；勾了才传 --rec |
+| ISO → 只认 WIM/ESD | App 用 Android 侧 ISO 库抽 `sources/install.wim` 后再调工具 |
+
+**铁律**：默认不建恢复分区、不写 WinRE；找不到 WinRE 不猜、不静默降级，必须让用户重选。
+完整契约见 `DESIGN-OUTPUT.md §十一`；App 流程见 `../app/docs/RECOVERY-FLOW.md`。
+
 ### 为什么这 16 条（都是踩过的坑）
 ```
 1/2  实测：off+len 回绕 → 越界写把镜像头部改成 UINT64_MAX，qemu-img 从此打不开

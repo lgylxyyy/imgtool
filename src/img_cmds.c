@@ -767,6 +767,8 @@ static const char WINRE_SCRIPT[] =
     "rem          ReAgent.xml + BCD recoverysequence for THIS machine's partition layout)\r\n"
     "reagentc /enable\r\n"
     "reagentc /info > \"%SystemRoot%\\Temp\\winre-enable.log\" 2>&1\r\n"
+    "rem one-shot: delete this script after it runs (goto aborts the batch first)\r\n"
+    "(goto) 2>nul & del /f /q \"%~f0\"\r\n"
     "exit /b 0\r\n";
 #endif /* IMG_WITH_NTFS3G */
 static int cmd_winre_auto(img_ctx *ctx, const img_args *in, img_result *out){

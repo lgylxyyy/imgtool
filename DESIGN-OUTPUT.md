@@ -260,4 +260,97 @@ App 侧记一份 <镜像>.state.json：{ "steps": [ {"name":"esp","done":true,"a
 **工具侧的幂等性承诺**：重跑安全（不会因重跑而坏数据）；唯一不幂等的是"WIM 灌入"，
 它必须以"格式化+重灌"整段重做（wimlib 无断点接口，不做假断点）。
 
+## 十一、恢复分区与 WinRE（默认关闭，2026-10-19 用户定）
+
+### 11.1 一句话
+**默认不创建恢复分区、默认不写 WinRE。** 只有用户在 App 里显式勾选，才走恢复流程；
+工具层只提供“查/建/填/验”的机制，不替用户决定要不要。
+
+### 11.2 层归属（谁做什么）
+
+| 事项 | 归工具层（imgtool） | 归 App 层（不做进库） |
+|---|---|---|
+| 在用户选的 ESD/WIM 里找 WinRE | ✅ `winre.find`：返回 found/index/internal_path/size | 决定“先查用户选的 ESD” |
+| ISO | ❌ 不内置 ISO 阅读器 | ✅ App 用 Android 侧 ISO 库抽出 `sources/install.wim`，再调 `winre.find` |
+| 找不到 WinRE 怎么办 | ✅ 只返回 `WINRE-NOTFOUND` | ✅ 弹窗提醒、让用户重选 ISO/ESD/WIM；取消则不做恢复 |
+| 恢复分区建不建、多大 | ✅ 提供 `imglayout --rec` / `imgpart add`（**默认 0**） | ✅ 勾选框默认关；勾了才传 `--rec` 并选大小 |
+| 格式化恢复分区、属性、复制 winre.wim/boot.sdi | ✅ `recovery.populate` | 决定 UEFI 用独立分区 |
+| BIOS 放系统分区 | ✅ `recovery.populate-system`（复制到 `\Windows\System32\Recovery`） | 决定 BIOS 用系统分区 |
+| 开机自动 `reagentc /enable` + 自删 | ✅ `winre.auto`（写 SetupComplete.cmd） | 决定是否调用 |
+| 失败回滚/是否继续 | ✅ 返回稳定错误码 + 已写状态 | ✅ 决定重试/放弃/退回“不建恢复分区” |
+
+**判定口诀**：换一个 App 就可能不一样（默认关、弹窗、选文件、分区大小）→ App；
+换一个 App 也不能变（WIM 解析、NTFS 写入、GPT 属性、字节结构）→ 工具。
+
+### 11.3 工具契约（新增/调整，落地状态见 WORKPLAN-HARDEN 清单）
+> 下面是**目标契约**；`winre.find` / `recovery.populate*` / 默认值调整尚未全部实现，
+> 以 `WORKPLAN-HARDEN.md` 的勾选状态为准（未打勾 = 未实现）。
+
+#### `winre.find`
+```json
+// 入参
+{"src":"/path/win11.esd","index":1}       // index=0/缺省：扫描全部索引
+// 出参（成功）
+{"ok":true,"data":{"found":true,"container":"esd","index":1,
+  "internal_path":"\\Windows\\System32\\Recovery\\Winre.wim",
+  "size_bytes":435000000}}
+// 找不到
+{"ok":false,"err":{"rc":-4,"error_code":"WINRE-NOTFOUND","at":"/path/win11.esd"}}
+```
+- 只接受 **WIM/ESD**；ISO 由 App 先抽 `sources/install.wim`（或 `boot.wim`）再调本命令。
+- 搜索路径优先级：`\Windows\System32\Recovery\Winre.wim` → `\Recovery\WindowsRE\Winre.wim`。
+- 不落盘、不改源文件；只读扫描。
+
+#### `recovery.populate`（UEFI：独立恢复分区）
+```json
+{"img":"...","rec-lba":105064448,
+ "winre-src":"/path/win11.esd","winre-index":1,
+ "winre-path":"\\Windows\\System32\\Recovery\\Winre.wim",
+ "bootsdi-src":"/path/boot.sdi",
+ "format":true,"set-gpt-attr":true,
+ "os-lba":296960,"enable-script":true}
+```
+做的事：确认 `rec-lba` 在分区表 → （可选）格式化 NTFS → 建 `\Recovery\WindowsRE`
+→ 写 `Winre.wim` + `boot.sdi` → 复验大小 → （可选）GPT 属性 `0x8000000000000001`
+→ （可选）调 `winre.auto` 写自删脚本。
+**不建分区**：分区由 App 通过 `imglayout --rec` 或 `imgpart add` 显式创建。
+
+#### `recovery.populate-system`（BIOS：系统分区内）
+```json
+{"img":"...","os-lba":206848,
+ "winre-src":"/path/win11.esd","winre-index":1,
+ "winre-path":"\\Windows\\System32\\Recovery\\Winre.wim",
+ "bootsdi-src":"/path/boot.sdi","enable-script":true}
+```
+复制到 `\Windows\System32\Recovery\Winre.wim` + `boot.sdi`，再调 `winre.auto`。
+不创建独立分区。
+
+#### 默认值调整（工具层）
+- `imglayout mk ... gpt`：`recovery_bytes` 默认从 1 GiB 改为 **0**（不建恢复分区）。
+  需要恢复分区时必须显式 `--rec 1024`。
+- `part.layout`：`rec-gb` 默认已是 **0**，保持。
+- `winre.auto`：只在被调用时写；默认不自动调用。
+- `imgbc`：默认**不把“没有恢复分区”当警告**；只有显式 `--expect-recovery` 才检查/报错。
+
+#### 新增错误码（App 文案表要对账）
+`WINRE-NOTFOUND` / `WINRE-SRC-BAD` / `WINRE-INDEX-BAD` / `WINRE-COPY-FAIL` /
+`REC-PART-MISSING` / `REC-FORMAT-FAIL` / `REC-ATTR-FAIL` / `REC-VERIFY-FAIL`
+
+### 11.4 App 编排（默认关）
+```
+[ ] 创建恢复分区（默认不勾）
+勾选后：
+  ① winre.find(用户选的 ESD/WIM)
+     命中 → 继续
+     未命中 → 弹窗“所选文件不含 WinRE，请选择包含 WinRE 的 ISO/ESD/WIM”
+              用户重选：ISO 先在 App 侧抽 sources/install.wim → 再 winre.find
+              取消 → 取消勾选，按“无恢复分区”继续
+  ② UEFI：layout 时显式带 --rec=<MiB> → recovery.populate
+     BIOS：不建分区 → recovery.populate-system（复制到 Windows 目录）
+  ③ winre.auto：写 SetupComplete.cmd（开机 reagentc /enable + 自删）
+不勾选：不传 --rec、不调任何 recovery.*、不写脚本。
+```
+App 必须在写入前显示：WinRE 来源、内部路径、大小、目标分区剩余空间；
+失败时显示具体错误码，不得静默退回“无恢复分区”。
+
 ## 九、落地进度

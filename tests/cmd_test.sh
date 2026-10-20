@@ -191,7 +191,8 @@ echo "════ 4e. ntfs.exists / fat.exists（断点续跑探测原语）═
 j=$("$T/imgcmd" ntfs.exists --img="$W/winre.qcow2" --lba=$WE --path=/Windows/Setup/Scripts/SetupComplete.cmd)
 ex=$(echo "$j" | jq_ "d['data']['exists']")
 sz=$(echo "$j" | jq_ "d['data']['size_bytes']")
-[ "$ex" = "True" ] && [ "$sz" = "274" ] && ok "ntfs.exists 存在且大小=274（断点判定可用）" || ng "exists=$ex size=$sz"
+[ "$ex" = "True" ] && [ "${sz:-0}" -gt 0 ] && ok "ntfs.exists 存在且大小=$sz（断点判定可用）" || ng "exists=$ex size=$sz"
+grep -q 'del /f /q' /tmp/wr.cmd && ok "脚本含自删指令（一次性）" || ng "脚本缺自删指令"
 j=$("$T/imgcmd" ntfs.exists --img="$W/winre.qcow2" --lba=$WE --path=/Windows/System32/ntoskrnl.exe)
 ex=$(echo "$j" | jq_ "d['data']['exists']")
 [ "$ex" = "False" ] && ok "ntfs.exists 不存在（没灌过的分区）" || ng "误报存在"
