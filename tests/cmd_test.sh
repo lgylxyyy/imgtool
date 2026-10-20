@@ -304,6 +304,16 @@ import json;d=json.load(open('$W/il2.json'))
 print([e['size'] for e in d['data']['entries'] if e['name'].lower()=='install.wim'][0])" 2>/dev/null)" = "3966348023" ] \
             && ok "iso.ls /sources → install.wim 大小 3,966,348,023（与抽出来的文件一致）" \
             || ng "install.wim 大小不对：$(head -c 200 "$W/il2.json")"
+        # 回退路径：强制走 ISO9660（这张盘的 ISO9660 树里只有 README.TXT）
+        ic=$(IMG_ISO_FORCE_ISO9660=1 $T/imgcmd iso.ls --iso="$ISO" --path=/ --progress=none 2>/dev/null | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin); print(d['data']['count'])
+except Exception: print(-1)")
+        [ "$ic" = "1" ] && ok "iso.ls 回退到 ISO9660 → 1 项（UDF 优先，回退可用）" || ng "ISO9660 回退异常：count=$ic"
+        rm -f "$W/r.txt"
+        IMG_ISO_FORCE_ISO9660=1 $T/imgcmd iso.extract --iso="$ISO" --path=/README.TXT --dst="$W/r.txt" --progress=none >/dev/null 2>&1
+        [ "$(stat -c%s "$W/r.txt" 2>/dev/null)" = "135" ] && ok "iso.extract 走 ISO9660 → 135 字节" || ng "ISO9660 抽取异常"
         rm -f "$W/b.sdi"
         $T/imgcmd iso.extract --iso="$ISO" --path=/boot/boot.sdi --dst="$W/b.sdi" --progress=none > "$W/ix.json" 2>/dev/null
         if [ -s "$W/b.sdi" ] && [ "$(stat -c%s "$W/b.sdi")" = "3170304" ]; then

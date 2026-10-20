@@ -45,6 +45,10 @@ struct img_iso {
     uint32_t part_start;   /* 分区起点（lb_size 单位）*/
     uint64_t fsd_lb;       /* File Set Descriptor 在分区内的 lb */
     uint64_t root_lb;      /* 根目录 FE 的 lb */
+    int      mode;         /* 0=UDF（首选） 1=ISO9660/Joliet（回退）*/
+    uint32_t iso_root_lba; /* ISO9660 根目录所在扇区（2048）*/
+    uint32_t iso_root_len;
+    bool     iso_joliet;
     char     vol[128];
     char     err[200];
 };
@@ -61,6 +65,130 @@ static int rd_abs(img_iso *s, uint64_t lb, void *buf){
 }
 
 /* ---------- 打开：AVDP → VDS → LVD → FSD ---------- */
+/* ---------- ISO9660 / Joliet（回退；纯 ISO9660 的盘也能读） ---------- */
+typedef struct { char name[300]; bool dir; uint32_t lba; uint32_t size; uint8_t flags; } iso_ent;
+
+/* 名字规范化：ISO9660 形如 "NAME.EXT;1"；Joliet 是 UCS-2BE */
+static void iso_name_norm(const uint8_t *p, int n, bool joliet, char *out, size_t cap){
+    size_t k=0;
+    if(joliet){
+        for(int i=0;i+1<n && k+1<cap;i+=2){
+            uint16_t ch=(uint16_t)((p[i]<<8)|p[i+1]);
+            out[k++] = (ch && ch<128) ? (char)ch : (ch?'?':0);
+            if(!ch) break;
+        }
+    } else {
+        for(int i=0;i<n && k+1<cap;i++) out[k++]=(char)p[i];
+    }
+    out[k]=0;
+    char *semi=strchr(out,';'); if(semi) *semi=0;       /* 去版本号 */
+    size_t L=strlen(out);
+    if(L && out[L-1]=='.') out[L-1]=0;                  /* 去尾点（目录）*/
+}
+
+/* 遍历一个 ISO9660 目录；每条记录回调 */
+typedef void (*iso_ent_cb)(void *ud, const iso_ent *e);
+static int iso_iter(img_iso *s, uint32_t lba, uint32_t len, iso_ent_cb cb, void *ud){
+    if(!len) return IMG_OK;
+    uint8_t *buf=malloc(len);
+    if(!buf) return IMG_ENOMEM;
+    if(img_io_read_full(s->io,(uint64_t)lba*2048,buf,len)!=IMG_OK){ free(buf); return IMG_EIO; }
+    uint32_t off=0;
+    while(off < len){
+        uint8_t rl=buf[off];
+        if(rl==0){ off = ((off/2048)+1)*2048; continue; }   /* 记录不跨扇区 */
+        if(off+rl>len || rl<34) break;
+        const uint8_t *r=buf+off;
+        iso_ent e; memset(&e,0,sizeof e);
+        e.lba = (uint32_t)r[2] | ((uint32_t)r[3]<<8) | ((uint32_t)r[4]<<16) | ((uint32_t)r[5]<<24);
+        e.size= (uint32_t)r[10]| ((uint32_t)r[11]<<8)| ((uint32_t)r[12]<<16)| ((uint32_t)r[13]<<24);
+        e.flags=r[25];
+        e.dir=(e.flags & 0x02)!=0;
+        int nl=r[32];
+        if(33+nl<=rl) iso_name_norm(r+33,nl,s->iso_joliet,e.name,sizeof e.name);
+        /* 跳过 "." / ".."：ISO9660 里它们的名字是 0x00 / 0x01 单字节，不是字面点 */
+        bool dot = (nl==1 && (r[33]==0 || r[33]==1));
+        if(!dot && e.name[0] && strcmp(e.name,".") && strcmp(e.name,"..") && cb) cb(ud,&e);
+        off += rl;
+    }
+    free(buf);
+    return IMG_OK;
+}
+
+/* 在目录里按名字找（大小写不敏感）；同一名字多段（>4GB 用多 extent）合起来 */
+typedef struct { const char *want; iso_ent hit; int n; uint32_t extents[32]; uint32_t ext_lens[32]; uint64_t total; } iso_find;
+static void iso_find_cb(void *ud, const iso_ent *e){
+    iso_find *f=(iso_find*)ud;
+    if(strcasecmp(e->name,f->want)) return;
+    f->hit=*e; f->n++;
+    if(f->n<=32){
+        f->extents[f->n-1]=e->lba;
+        f->ext_lens[f->n-1]=e->size;
+        f->total += e->size;
+    }
+}
+static int iso_find_in(img_iso *s, uint32_t lb, uint32_t len, const char *name, iso_find *out){
+    memset(out,0,sizeof *out); out->want=name;
+    int rc=iso_iter(s,lb,len,iso_find_cb,out);
+    if(rc!=IMG_OK) return rc;
+    return out->n? IMG_OK : IMG_ENOENT;
+}
+static int iso_resolve(img_iso *s, const char *path, uint32_t *lb, uint32_t *len,
+                       bool *is_dir, uint64_t *size, iso_find *files){
+    uint32_t cur_lb=s->iso_root_lba, cur_len=s->iso_root_len;
+    bool d=true; uint64_t sz=0;
+    if(path && *path && strcmp(path,"/")){
+        char buf[512]; snprintf(buf,sizeof buf,"%s",path);
+        char *save=NULL;
+        for(char *tok=strtok_r(buf,"/\\",&save); tok; tok=strtok_r(NULL,"/\\",&save)){
+            if(!*tok) continue;
+            iso_find f;
+            if(iso_find_in(s,cur_lb,cur_len,tok,&f)!=IMG_OK) return IMG_ENOENT;
+            cur_lb=f.hit.lba; cur_len=f.hit.size; d=f.hit.dir; sz=f.total;
+            if(files) *files=f;
+        }
+    }
+    if(lb) *lb=cur_lb; if(len) *len=cur_len;
+    if(is_dir) *is_dir=d; if(size) *size=sz;
+    return IMG_OK;
+}
+
+/* 尝试按 ISO9660 打开（PVD 在 16；有 Joliet SVD 就用它的名字）*/
+static int open_iso9660(img_iso *s, uint8_t *blk, char *err, size_t errcap){
+    if(rd_abs(s,16,blk)!=IMG_OK || memcmp(blk+1,"CD001",5)!=0) return IMG_EFORMAT;
+    const uint8_t *rr=blk+156;                       /* PVD 的根目录记录 */
+    s->iso_root_lba = (uint32_t)rr[2] | ((uint32_t)rr[3]<<8) | ((uint32_t)rr[4]<<16) | ((uint32_t)rr[5]<<24);
+    s->iso_root_len = (uint32_t)rr[10]| ((uint32_t)rr[11]<<8)| ((uint32_t)rr[12]<<16)| ((uint32_t)rr[13]<<24);
+    s->iso_joliet=false;
+    {   int vl=blk[40]; if(vl>0 && vl<33){
+            char nm[64]; iso_name_norm(blk+40+1,vl,false,nm,sizeof nm);
+            snprintf(s->vol,sizeof s->vol,"%s",nm);
+        }
+    }
+    /* SVD（type=2）且转义序列以 % 开头 → Joliet，名字是 UCS-2 */
+    for(int sec=17; sec<32; sec++){
+        if(rd_abs(s,(uint64_t)sec,blk)!=IMG_OK) break;
+        if(memcmp(blk+1,"CD001",5)!=0) break;
+        if(blk[0]==255) break;                       /* 结束 */
+        if(blk[0]==2 && blk[88]=='%'){               /* %/@ %/C %/E */
+            const uint8_t *jr=blk+156;
+            s->iso_root_lba=(uint32_t)jr[2]|((uint32_t)jr[3]<<8)|((uint32_t)jr[4]<<16)|((uint32_t)jr[5]<<24);
+            s->iso_root_len=(uint32_t)jr[10]|((uint32_t)jr[11]<<8)|((uint32_t)jr[12]<<16)|((uint32_t)jr[13]<<24);
+            s->iso_joliet=true;
+            /* 卷标 */
+            int vl=blk[80]; if(vl>0 && vl<33){
+                char nm[64]; iso_name_norm(blk+81,vl,true,nm,sizeof nm);
+                snprintf(s->vol,sizeof s->vol,"%s",nm);
+            }
+            break;
+        }
+    }
+    if(!s->iso_root_lba){ if(err) snprintf(err,errcap,"ISO9660 根目录记录不可用"); return IMG_EFORMAT; }
+    s->mode=1;
+    (void)err; (void)errcap;
+    return IMG_OK;
+}
+
 int img_iso_open_io(img_iso **out, img_io *io, char *err, size_t errcap){
     if(err && errcap) err[0]=0;
     if(!out || !io) return IMG_EINVAL;
@@ -72,59 +200,61 @@ int img_iso_open_io(img_iso **out, img_io *io, char *err, size_t errcap){
     uint8_t *blk=malloc(2048);
     if(!blk){ free(s); return IMG_ENOMEM; }
 
-    /* AVDP：块 256（规范也允许最后一块 / 最后-256）*/
-    uint64_t total = img_io_size(io)/2048;
-    uint64_t cand[3] = {256, total? total-1 : 0, total>256 ? total-257 : 0};
-    uint32_t vds_lb=0, vds_len=0; int found=0;
-    for(int i=0;i<3 && !found;i++){
-        if(cand[i]==0) continue;
-        if(rd_abs(s,cand[i],blk)!=IMG_OK) continue;
-        if(g16(blk)!=TAG_AVDP) continue;
-        vds_len=g32(blk+16); vds_lb=g32(blk+20);
-        found=1;
-    }
-    if(!found){ free(blk); free(s);
-        if(err) snprintf(err,errcap,"不是 UDF 镜像（找不到 AVDP；Windows 安装盘的 ISO9660 目录树通常是空的）");
-        return IMG_EFORMAT; }
+    int forced_iso = (getenv("IMG_ISO_FORCE_ISO9660")!=NULL);
 
-    /* VDS：找 LVD（要 lb_size / FSD 位置）与 PD（分区起点）*/
-    uint32_t nlb = vds_len/2048; if(nlb>64) nlb=64;
-    uint32_t pstart=0; int have_pd=0, have_lvd=0;
-    for(uint32_t i=0;i<nlb;i++){
-        if(rd_abs(s,vds_lb+i,blk)!=IMG_OK) break;
-        uint16_t tag=g16(blk);
-        if(tag==TAG_TERM) break;
-        if(tag==TAG_PD && !have_pd){
-            /* 不按"分区号"匹配：微软安装盘的分区号是 0x0BAD（实测 2989）。
-             * 我们直接用第一个 PD 的起点 + LVD 里 map 的 part_ref。*/
-            pstart=g32(blk+188); have_pd=1;
-        } else if(tag==TAG_LVD && !have_lvd){
-            uint32_t lbs=g32(blk+212);
-            if(lbs>=512 && lbs<=65536) s->lb_size=lbs;
-            /* long_ad: len@248, loc@252, part@256 */
-            s->fsd_lb=g32(blk+252);
-            have_lvd=1;
-            /* 卷标（d-string，前 1 字节是压缩 id）*/
-            const uint8_t *vid=blk+84;
-            if(vid[0]==8){ int n=0; while(n<127 && vid[1+n] && n<127){ s->vol[n]=(char)vid[1+n]; n++; }
-                           s->vol[n]=0; }
+    /* ---------- ① 先试 UDF（Windows 安装盘的正路） ---------- */
+    if(!forced_iso){
+        uint64_t total = img_io_size(io)/2048;
+        uint64_t cand[3] = {256, total? total-1 : 0, total>256 ? total-257 : 0};
+        uint32_t vds_lb=0, vds_len=0; int found=0;
+        for(int i=0;i<3 && !found;i++){
+            if(cand[i]==0) continue;
+            if(rd_abs(s,cand[i],blk)!=IMG_OK) continue;
+            if(g16(blk)!=TAG_AVDP) continue;
+            vds_len=g32(blk+16); vds_lb=g32(blk+20);
+            found=1;
+        }
+        if(found){
+            uint32_t nlb = vds_len/2048; if(nlb>64) nlb=64;
+            uint32_t pstart=0; int have_pd=0, have_lvd=0;
+            for(uint32_t i=0;i<nlb;i++){
+                if(rd_abs(s,vds_lb+i,blk)!=IMG_OK) break;
+                uint16_t tag=g16(blk);
+                if(tag==TAG_TERM) break;
+                if(tag==TAG_PD && !have_pd){
+                    /* 不按"分区号"匹配：微软安装盘的分区号是 0x0BAD（实测 2989）*/
+                    pstart=g32(blk+188); have_pd=1;
+                } else if(tag==TAG_LVD && !have_lvd){
+                    uint32_t lbs=g32(blk+212);
+                    if(lbs>=512 && lbs<=65536) s->lb_size=lbs;
+                    s->fsd_lb=g32(blk+252);
+                    have_lvd=1;
+                    const uint8_t *vid=blk+84;
+                    if(vid[0]==8){ int n=0; while(n<127 && vid[1+n] && n<127){ s->vol[n]=(char)vid[1+n]; n++; }
+                                   s->vol[n]=0; }
+                }
+            }
+            if(have_lvd && have_pd){
+                s->part_start=pstart;
+                if(rd_lb(s,s->fsd_lb,blk,1)==IMG_OK && g16(blk)==TAG_FSD){
+                    s->root_lb=g32(blk+404);
+                    s->mode=0;
+                    free(blk);
+                    *out=s;
+                    return IMG_OK;
+                }
+            }
         }
     }
-    if(!have_lvd || !have_pd){ free(blk); free(s);
-        if(err) snprintf(err,errcap,"UDF 结构不完整（缺 LVD/PD）");
-        return IMG_EFORMAT; }
-    s->part_start=pstart;
 
-    /* FSD → 根目录 ICB */
-    if(rd_lb(s,s->fsd_lb,blk,1)!=IMG_OK || g16(blk)!=TAG_FSD){
-        free(blk); free(s);
-        if(err) snprintf(err,errcap,"读不到 File Set Descriptor");
-        return IMG_EFORMAT;
-    }
-    s->root_lb=g32(blk+404);            /* root_directory_icb: len@400, loc@404 */
-    free(blk);
-    *out=s;
-    return IMG_OK;
+    /* ---------- ② 回退：ISO9660 / Joliet（Linux 光盘、工具盘） ---------- */
+    int rc=open_iso9660(s,blk,err,errcap);
+    if(rc==IMG_OK){ free(blk); *out=s; return IMG_OK; }
+
+    free(blk); free(s);
+    if(err) snprintf(err,errcap,
+        "不是 UDF 也不是 ISO9660（Windows 安装盘的 ISO9660 目录树是空的，install.wim 只在 UDF 里）");
+    return IMG_EFORMAT;
 }
 int img_iso_open_path(img_iso **out, const char *path, char *err, size_t errcap){
     if(err && errcap) err[0]=0;
@@ -308,6 +438,14 @@ static int resolve(img_iso *s, const char *path, uint64_t *out_lb, bool *is_dir,
 }
 
 int img_iso_stat(img_iso *s, const char *path, uint64_t *size, bool *is_dir){
+    if(s && s->mode==1){
+        uint32_t lb=0, len=0; bool d=false; uint64_t sz=0;
+        int rc=iso_resolve(s,path,&lb,&len,&d,&sz,NULL);
+        if(rc!=IMG_OK) return rc;
+        if(is_dir) *is_dir=d;
+        if(size) *size=sz;
+        return IMG_OK;
+    }
     if(size) *size=0;
     if(is_dir) *is_dir=false;
     uint64_t lb=0; bool d=false; uint64_t sz=0;
@@ -326,7 +464,21 @@ static void list_cb(void *ud, const char *name, bool isdir, uint64_t sz, uint64_
     c->n++;
     if(c->cb) c->cb(c->ud,name,isdir,sz);
 }
+static void iso_list_wrap(void *ud, const iso_ent *e){
+    struct { img_iso_entry_cb cb; void *ud; int n; } *c=ud;
+    c->n++;
+    if(c->cb) c->cb(c->ud, e->name, e->dir, e->size);
+}
 int img_iso_list(img_iso *s, const char *path, img_iso_entry_cb cb, void *ud){
+    if(s && s->mode==1){
+        uint32_t lb=0, len=0; bool d=false;
+        int rc=iso_resolve(s,(path&&*path)?path:"/",&lb,&len,&d,NULL,NULL);
+        if(rc!=IMG_OK) return rc;
+        if(!d) return IMG_ENOTSUP;
+        struct { img_iso_entry_cb cb; void *ud; int n; } c={cb,ud,0};
+        rc=iso_iter(s,lb,len,iso_list_wrap,&c);
+        return rc==IMG_OK? c.n : rc;
+    }
     uint64_t lb=0; bool d=false;
     int rc=resolve(s,(path && *path)?path:"/",&lb,&d,NULL);
     if(rc!=IMG_OK) return rc;
@@ -342,6 +494,40 @@ int img_iso_extract(img_iso *s, const char *path, const char *dst,
                     uint64_t max_bytes, img_prog *prog, uint64_t *out_bytes){
     if(out_bytes) *out_bytes=0;
     if(!s || !path || !dst) return IMG_EINVAL;
+    if(s->mode==1){
+        iso_find f;
+        uint32_t lb=0,len=0; bool d=false; uint64_t sz=0;
+        int rc=iso_resolve(s,path,&lb,&len,&d,&sz,&f);
+        if(rc!=IMG_OK) return rc;
+        if(d) return IMG_ENOTSUP;
+        uint64_t want=(max_bytes && max_bytes<f.total)?max_bytes:f.total;
+        FILE *o=fopen(dst,"wb"); if(!o) return IMG_EIO;
+        if(prog){ img_prog_op(prog,IMG_OP_READ);
+                  img_prog_phase(prog,IMG_PH_EXTRACT,"从 ISO 抽取");
+                  img_prog_bytes(prog,0,want); }
+        enum { CHUNK=1u<<20 };
+        uint8_t *buf=malloc(CHUNK);
+        if(!buf){ fclose(o); return IMG_ENOMEM; }
+        uint64_t done=0;
+        for(int i=0;i<f.n && i<32 && rc==IMG_OK;i++){
+            uint64_t off=(uint64_t)f.extents[i]*2048, left=f.ext_lens[i];
+            while(left && rc==IMG_OK){
+                if(want && done>=want) break;
+                size_t n=(size_t)(left<CHUNK?left:CHUNK);
+                if(want && done+n>want) n=(size_t)(want-done);
+                if(img_io_read_full(s->io,off,buf,n)!=IMG_OK){ rc=IMG_EIO; break; }
+                if(fwrite(buf,1,n,o)!=n){ rc=IMG_EIO; break; }
+                off+=n; left-=n; done+=n;
+                if(prog) img_prog_bytes(prog,done,want?want:done);
+                img_hb("iso","extract","iso9660",done>>20);
+                if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
+            }
+        }
+        free(buf); fclose(o);
+        if(rc!=IMG_OK) unlink(dst);
+        if(out_bytes) *out_bytes=done;
+        return rc;
+    }
     uint64_t lb=0; bool d=false; uint64_t fsz=0;
     int rc=resolve(s,path,&lb,&d,&fsz);
     if(rc!=IMG_OK) return rc;
