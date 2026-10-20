@@ -39,85 +39,31 @@ int main(int argc,char**argv){
         fprintf(stderr,"用法: %s <参考BCD> <输出BCD> <sysGuid> <diskGuid> [espGuid] [oldRecGuid newRecGuid]\n",argv[0]);
         return 2; }
 
-    /* ★ 先验 GUID：非法 GUID 绝不许"改了个寂寞还返回 0" */
-    unsigned char probe[88];
-    if(img_bcd_make_partition_device(argv[3], argv[4], probe) != IMG_OK){
-        printf("❌ 系统分区 GUID 或磁盘 GUID 非法：%s / %s\n", argv[3], argv[4]);
-        return 1;
-    }
-    if(argc>=6 && img_bcd_make_partition_device(argv[5], argv[4], probe) != IMG_OK){
-        printf("❌ ESP 分区 GUID 非法：%s\n", argv[5]);
-        return 1;
-    }
-    if(argc>=8 && img_bcd_make_partition_device(argv[7], argv[4], probe) != IMG_OK){
-        printf("❌ 恢复分区 GUID 非法：%s\n", argv[7]);
-        return 1;
-    }
-
+    /* ★ 共享实现：img_bcd_remap()（库里那份，命令表 bcd.gen-uefi 用的是同一段代码）。
+     *   它内部做：GUID 合法性前置校验 → 读参考件旧 GUID（系统/ESP/磁盘/恢复）
+     *   → 按 hive 结构全对象映射 → 兜底改两个加载器 → 返回改动处数。*/
     img_bcd *b = img_bcd_open_file(argv[1]);
-    if(!b){ printf("❌ 打不开参考 BCD\n"); return 1; }
+    if(!b){ printf("❌ 打不开参考 BCD（%s）\n", argv[1]); return 1; }
 
-    char buf[80]; char guid[80]="";
-    bool have_do = (img_bcd_get_display_order_first(b, buf, sizeof buf)==IMG_OK);
-    if(have_do){
-        printf("  参考加载器: %s\n", buf);
-        guid_trim(buf, guid, sizeof guid);
-    } else if(argc<6){
-        printf("❌ 参考 BCD 没有 DisplayOrder\n"); img_bcd_close(b); return 1;
-    } else {
-        printf("  参考 BCD 没有 DisplayOrder —— 只做 ESP 分区重映射\n");
-    }
+    img_bcd_remap_req_t rq;
+    rq.sys_guid     = argv[3];
+    rq.disk_guid    = argv[4];
+    rq.esp_guid     = (argc>=6) ? argv[5] : NULL;
+    rq.old_rec_guid = (argc>=8) ? argv[6] : NULL;
+    rq.new_rec_guid = (argc>=8) ? argv[7] : NULL;
 
-    /* ★ 必须【改之前】先记下参考盘的原始 GUID —— 改完就读不到旧值了 */
-    char old_os[40]={0}, old_esp[40]={0}, old_disk[40]={0}, td[40];
-    if(guid[0] && img_bcd_get_device_guids(b, guid, IMG_BCD_EL_WIM_DEVICE, old_os, old_disk)!=IMG_OK)
-        old_os[0]=0;
-    if(guid[0] && !old_os[0])
-        img_bcd_get_device_guids(b, guid, IMG_BCD_EL_APP_DEVICE, old_os, old_disk);
-    if(argc>=6){
-        img_bcd_get_device_guids(b, IMG_BCD_GUID_BOOTMGR, IMG_BCD_EL_APP_DEVICE, old_esp, td);
-        if(!old_disk[0]) snprintf(old_disk,sizeof old_disk,"%s",td);
+    char err[256]=""; int hit=0;
+    int rc = img_bcd_remap(b, &rq, &hit, err, sizeof err);
+    if(rc != IMG_OK){
+        printf("❌ 换盘重映射失败：%s（rc=%s）\n", err[0]?err:"?", img_strerror(rc));
+        img_bcd_close(b);
+        return 1;
     }
-    const char *old_rec = argc>=8 ? argv[6] : NULL;
-    const char *new_rec = argc>=8 ? argv[7] : NULL;
+    printf("  全对象重映射: 共 %d 处（系统=%s%s%s / 磁盘=%s）\n", hit, argv[3],
+           rq.esp_guid?", ESP=":"", rq.esp_guid?rq.esp_guid:"", argv[4]);
 
-    printf("  参考盘 系统分区=%s / ESP=%s / 恢复=%s / 磁盘=%s\n",
-           old_os[0]?old_os:"(无)", old_esp[0]?old_esp:"(无)",
-           old_rec?old_rec:"(无)", old_disk[0]?old_disk:"(无)");
-    printf("  新盘   系统分区=%s", argv[3]);
-    if(argc>=6) printf(" / ESP=%s", argv[5]);
-    if(argc>=8) printf(" / 恢复=%s", argv[7]);
-    printf(" / 磁盘=%s\n", argv[4]);
-    if(!old_os[0] && !old_esp[0]){
-        printf("❌ 参考件里找不到可映射的分区设备（不是 UEFI BCD？）\n");
-        img_bcd_close(b); return 1;
-    }
-
-    /* ★ 全对象映射：不止 11000001/21000001，还有 21000026/31000003 等；
-     *   只改已知元素 ID 会让 bootmgr 仍去找旧盘（随机 GUID 启动失败）。*/
-    int hit=0;
-    int prc=img_bcd_patch_all_guid_bindings(b,
-            old_os[0]?old_os:NULL, argv[3],
-            (argc>=6 && old_esp[0])?old_esp:NULL, (argc>=6)?argv[5]:NULL,
-            old_rec, new_rec,
-            old_disk[0]?old_disk:NULL, argv[4], &hit);
-    if(prc!=IMG_OK){
-        printf("❌ 全对象映射失败：%s\n", img_strerror(prc));
-        img_bcd_close(b); return 1;
-    }
-    /* 兜底：万一参考件结构不认识，至少把 OS 加载器的两个设备对象改掉 */
-    if(hit==0 && guid[0]){
-        int rc1=img_bcd_patch_device_guids(b,guid,IMG_BCD_EL_WIM_DEVICE,argv[3],argv[4]);
-        int rc2=img_bcd_patch_device_guids(b,guid,IMG_BCD_EL_APP_DEVICE,argv[3],argv[4]);
-        printf("  兜底改加载器 21000001: %s / 11000001: %s\n", img_strerror(rc1), img_strerror(rc2));
-        if(rc1==IMG_OK) hit++;
-        if(rc2==IMG_OK) hit++;
-    }
-    printf("  全对象重映射: 共 %d 处\n", hit);
-    if(hit==0){ printf("❌ 一处也没改到（参考件 GUID 与参数不匹配？）\n"); img_bcd_close(b); return 1; }
-
-    int rc = img_bcd_save(b, argv[2]);
+    rc = img_bcd_save(b, argv[2]);
     printf("  写出: %s → %s\n", argv[2], img_strerror(rc));
     img_bcd_close(b);
-    return rc==IMG_OK?0:1;
+    return rc==IMG_OK ? 0 : 1;
 }

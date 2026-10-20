@@ -134,6 +134,30 @@ int img_bcd_patch_all_guid_bindings(img_bcd *b,
         const char *old_rec, const char *new_rec,
         const char *old_disk, const char *new_disk,
         int *patched);
+/* ------------------------------------------------------------------ */
+/* 一站式换盘：把【参考 BCD】里的设备对象重映射到【新盘 GUID】           */
+/* ------------------------------------------------------------------ */
+/* 背景：UEFI 换盘（克隆/新建）后，BCD 里所有 type=6 设备对象都还指着参考盘。
+ * 只改 11000001/21000001 两个加载器会漏掉 memtest/resume/ramdisk → 0xc000000e。
+ * 本函数把 imggenbcd 那套"先读旧值 → 全对象映射 → 兜底"的流程收进库里，
+ * 让 CLI（imggenbcd）和命令表（bcd.gen-uefi）走同一份实现，不再各写一遍。
+ *
+ *   req.sys_guid  新盘系统分区 partGuid（必填）
+ *   req.disk_guid 新盘 diskGuid（必填）
+ *   req.esp_guid  新盘 ESP partGuid（NULL = 只映射系统分区，ESP 对象保持原样）
+ *   req.old_rec_guid/new_rec_guid  恢复分区重映射（都可 NULL）
+ * 出参 hits = 实际改动的设备对象数（0 表示参考件里没有可映射的设备，调用方应报错）。
+ * 返回 IMG_OK / IMG_EINVAL（GUID 非法）/ IMG_EFORMAT（参考件不是 UEFI BCD）。*/
+typedef struct {
+    const char *sys_guid;
+    const char *disk_guid;
+    const char *esp_guid;
+    const char *old_rec_guid;
+    const char *new_rec_guid;
+} img_bcd_remap_req_t;
+int img_bcd_remap(img_bcd *b, const img_bcd_remap_req_t *req,
+                  int *hits, char *err, size_t errcap);
+
 /* MBR/BIOS 设备命门：读/写【磁盘签名 + 分区字节偏移】（见 img_bcd.c 布局注释） */
 int img_bcd_get_mbr_binding(img_bcd *b,const char*obj_guid,const char*eid,
                             uint32_t *sig_out,uint64_t *off_out);

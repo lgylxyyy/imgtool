@@ -867,3 +867,89 @@ void img_bcd_free_object_list(char **guids, size_t n){
     for(size_t i=0;i<n;i++) free(guids[i]);
     free(guids);
 }
+
+/* ================================================================== */
+/* 一站式换盘：参考 BCD → 新盘 GUID 的可引导 BCD（CLI 与命令表共用）   */
+/* ================================================================== */
+static void remap_trim_guid(const char *in, char *out, size_t cap){
+    if(!out||!cap) return;
+    out[0]=0;
+    if(!in) return;
+    const char *p=in;
+    while(*p==' '||*p=='{') p++;
+    size_t n=0;
+    while(p[n] && p[n]!='}' && n+1<cap){ out[n]=p[n]; n++; }
+    out[n]=0;
+}
+
+int img_bcd_remap(img_bcd *b, const img_bcd_remap_req_t *req,
+                  int *hits, char *err, size_t errcap){
+    if(err && errcap) err[0]=0;
+    if(hits) *hits=0;
+    if(!b || !req || !req->sys_guid || !req->disk_guid) return IMG_EINVAL;
+
+    /* GUID 先校验：非法就别开工（旧 imggenbcd 会"改了个寂寞还返回 0"）*/
+    unsigned char probe[88];
+    if(img_bcd_make_partition_device(req->sys_guid, req->disk_guid, probe)!=IMG_OK){
+        if(err) snprintf(err,errcap,"系统分区 GUID 或磁盘 GUID 非法");
+        return IMG_EINVAL;
+    }
+    if(req->esp_guid && img_bcd_make_partition_device(req->esp_guid, req->disk_guid, probe)!=IMG_OK){
+        if(err) snprintf(err,errcap,"ESP 分区 GUID 非法");
+        return IMG_EINVAL;
+    }
+    if(req->new_rec_guid && img_bcd_make_partition_device(req->new_rec_guid, req->disk_guid, probe)!=IMG_OK){
+        if(err) snprintf(err,errcap,"恢复分区 GUID 非法");
+        return IMG_EINVAL;
+    }
+
+    /* 参考件里的加载器 GUID（DisplayOrder 第一条）；没有就只能做 ESP 重映射 */
+    char order[96]="", obj[80]="";
+    bool have_do = (img_bcd_get_display_order_first(b, order, sizeof order)==IMG_OK);
+    if(have_do) remap_trim_guid(order, obj, sizeof obj);
+    if(!have_do && !req->esp_guid){
+        if(err) snprintf(err,errcap,"参考 BCD 没有 DisplayOrder，且没给 ESP GUID —— 无从下手");
+        return IMG_EFORMAT;
+    }
+
+    /* ★ 必须【改之前】先记下参考盘的旧 GUID：改完就读不到了 */
+    char old_os[40]={0}, old_esp[40]={0}, old_disk[40]={0}, td[40]={0};
+    if(obj[0]){
+        if(img_bcd_get_device_guids(b, obj, IMG_BCD_EL_WIM_DEVICE, old_os, old_disk)!=IMG_OK)
+            old_os[0]=0;
+        if(!old_os[0])
+            img_bcd_get_device_guids(b, obj, IMG_BCD_EL_APP_DEVICE, old_os, old_disk);
+    }
+    if(req->esp_guid){
+        img_bcd_get_device_guids(b, IMG_BCD_GUID_BOOTMGR, IMG_BCD_EL_APP_DEVICE, old_esp, td);
+        if(!old_disk[0] && td[0]) snprintf(old_disk,sizeof old_disk,"%s",td);
+    }
+    if(!old_os[0] && !old_esp[0]){
+        if(err) snprintf(err,errcap,"参考件里找不到可映射的分区设备（不是 UEFI BCD？）");
+        return IMG_EFORMAT;
+    }
+
+    int hit=0;
+    int rc=img_bcd_patch_all_guid_bindings(b,
+            old_os[0]?old_os:NULL, req->sys_guid,
+            (req->esp_guid && old_esp[0])?old_esp:NULL, req->esp_guid,
+            req->old_rec_guid, req->new_rec_guid,
+            old_disk[0]?old_disk:NULL, req->disk_guid, &hit);
+    if(rc!=IMG_OK){
+        if(err) snprintf(err,errcap,"全对象映射失败：%s", img_strerror(rc));
+        return rc;
+    }
+    /* 兜底：参考件结构不认识时，至少把两个加载器设备改对 */
+    if(hit==0 && obj[0]){
+        int rc1=img_bcd_patch_device_guids(b,obj,IMG_BCD_EL_WIM_DEVICE,req->sys_guid,req->disk_guid);
+        int rc2=img_bcd_patch_device_guids(b,obj,IMG_BCD_EL_APP_DEVICE,req->sys_guid,req->disk_guid);
+        if(rc1==IMG_OK) hit++;
+        if(rc2==IMG_OK) hit++;
+    }
+    if(hits) *hits=hit;
+    if(hit==0){
+        if(err) snprintf(err,errcap,"一处也没改到（参考件 GUID 与本盘不匹配？）");
+        return IMG_ENOENT;
+    }
+    return IMG_OK;
+}
