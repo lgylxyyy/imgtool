@@ -242,6 +242,18 @@ int img_result_json(const img_result *r, char *buf, int cap){
     return (int)(w.p-buf);
 }
 
+/* ================= 进度通道（P2） ================= */
+static img_progress_cb g_prog_cb = NULL;
+static void           *g_prog_ud = NULL;
+static img_prog       *g_prog    = NULL;
+
+void img_cmd_set_progress(img_progress_cb cb, void *ud){
+    g_prog_cb = cb; g_prog_ud = ud;
+    if(g_prog){ img_prog_free(g_prog); g_prog=NULL; }
+    if(cb) g_prog = img_prog_new(cb, ud, 200);
+}
+img_prog *img_cmd_prog(void){ return g_prog; }
+
 /* ================= 上下文 ================= */
 struct img_ctx {
     img_lock_t lk;               /* ★ 同一句柄串行：并发调同一张盘会踩内部缓存 */

@@ -228,6 +228,30 @@ static void render_card(const img_error_info_t *ei){
     }
 }
 
+/* ================= 进度（P2）：--progress=bar 时的百分比行 =================
+ * 库内部只在 phase/op/item 变化或跨过 200 ms 节流时回调，不会刷屏。
+ * 只在 human 模式下渲染；--progress=none/json 时完全不注册（零开销）。*/
+static void on_progress(void *ud, const img_progress_t *p){
+    (void)ud;
+    if(!p) return;
+    const char *ph=img_phase_name(p->phase), *op=img_op_name(p->op);
+    char line[512]; int n=0;
+    if(p->pct>=0){
+        n=snprintf(line,sizeof line,"\r▶ %s·%s  %3d%%", ph?ph:"", op?op:"", p->pct);
+        if(p->total_bytes)
+            n+=snprintf(line+n,sizeof line-(size_t)n,"  %llu/%llu MB",
+                (unsigned long long)(p->cur_bytes/1048576),(unsigned long long)(p->total_bytes/1048576));
+        else if(p->total)
+            n+=snprintf(line+n,sizeof line-(size_t)n,"  %llu/%llu",(unsigned long long)p->cur,(unsigned long long)p->total);
+        if(p->eta_s>=0) n+=snprintf(line+n,sizeof line-(size_t)n,"  剩余 %ds",p->eta_s);
+    } else {
+        n=snprintf(line,sizeof line,"\r▶ %s·%s  %s", ph?ph:"", op?op:"", p->item?p->item:"");
+    }
+    if(p->item && p->pct>=0) n+=snprintf(line+n,sizeof line-(size_t)n,"  %s", p->item);
+    if(n>0) wr_all(2,line,(size_t)n);
+    if(p->pct>=100) wr_all(2,"\n",1);
+}
+
 /* ================= 用法帮助 ================= */
 static void print_help(const img_cmd *c){
     if(!c){ printf("没有这个命令\n"); return; }
@@ -301,6 +325,8 @@ int main(int argc, char **argv){
     /* 屏幕形态：tty → 人话行；非 tty → JSON；--progress=bar|json|none 强制 */
     ui.human = progress ? (!strcmp(progress,"bar")) : (isatty(2)!=0);
     if(progress && !strcmp(progress,"none")) ui.human=false;
+    /* ★ 只有人话模式才注册进度回调：其余两种模式保持"只出一行信封"的旧行为 */
+    if(ui.human) img_cmd_set_progress(on_progress, &ui);
     img_out_open_fd(2, ui.human);      /* human=true → 库不再往 stderr 吐机器行 */
     img_out_set_text(on_event, &ui);   /* ★ 库发码 → 这里出中文/英文人话行 */
 

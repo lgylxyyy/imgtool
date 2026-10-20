@@ -16,6 +16,7 @@
 #include "img_types.h"
 #include "img_qcow2.h"
 #include "img_partition.h"
+#include "img_progress.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -102,6 +103,20 @@ const img_cmd *img_cmd_table(int *out_count);
 int img_cmd_exec(const char *name, img_ctx *ctx, const img_args *in, img_result *out);
 /* 导出命令表（含参数规格/帮助/校验提示）→ App 可用它自动生成界面、也能生成 --help */
 int img_cmd_list_json(char *buf, int cap);
+
+/* ---------------- 进度通道（P2） ----------------
+ * 之前每个 handler 都往库函数里传 NULL → App 只能看到 begin/done 里程碑，
+ * 灌 6.8 GB 的 ESD 与写 6 KB 小文件在 UI 上完全一样（手册 §7）。
+ * 用法：
+ *     img_cmd_set_progress(my_cb, ud);          // 进程级；传 NULL 关闭
+ *     ... img_cmd_exec(...) ...                 // handler 内部自动带上
+ * 语义：cb 只在【注册了】才被触发（没注册 = 零开销，与旧行为完全一致）；
+ *       节流/相位变化由 img_prog 内部处理（默认 200 ms，phase/op/item 变化立即发）。
+ * ⚠ 进程级单例：两个线程并行跑不同镜像时进度会混在一起 —— 与日志同一个取舍，
+ *    App 侧请串行执行（或自己按 cmd 名过滤）。*/
+void img_cmd_set_progress(img_progress_cb cb, void *ud);
+/* handler 里拿进度器；没注册返回 NULL（可以直接传给库函数）。*/
+img_prog *img_cmd_prog(void);
 
 #ifdef __cplusplus
 }

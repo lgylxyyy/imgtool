@@ -196,7 +196,7 @@ static int cmd_fat_put(img_ctx *ctx, const img_args *in, img_result *out){
     }
 
     long long t0=now_ms_();
-    int rc=img_fat32_put_file(fs,src,dst,NULL);
+    int rc=img_fat32_put_file(fs,src,dst,img_cmd_prog());
     long long ms=now_ms_()-t0;
     img_fat32_unmount(fs);
 
@@ -347,7 +347,7 @@ static int cmd_wim_apply_cmd(img_ctx *ctx, const img_args *in, img_result *out){
         img_span_begin(&sp);
         img_ntfs_fmt_opts_t o; img_ntfs_fmt_defaults(&o,lba,pb);
         o.label=img_args_get(in,"label");
-        rc=img_ntfs_format(q,&o,NULL);
+        rc=img_ntfs_format(q,&o,img_cmd_prog());
         img_span_end(&sp,rc);
         if(rc){ img_result_fail(out,rc,"NTFS-FORMAT-FAIL",NULL,NULL,NULL); return rc; }
     }
@@ -357,7 +357,7 @@ static int cmd_wim_apply_cmd(img_ctx *ctx, const img_args *in, img_result *out){
     wo.no_acls  =img_args_bool(in,"no_acls",false);
     wo.no_attrs =img_args_bool(in,"no_attrs",false);
     wo.wimboot  =img_args_bool(in,"wimboot",false);
-    rc=img_wim_apply(wim,idx,q,lba,&wo,NULL);
+    rc=img_wim_apply(wim,idx,q,lba,&wo,img_cmd_prog());
     if(rc){
         const char *code=(rc==IMG_ECANCELLED)?"CMD-CANCELLED":"WIM-APPLY-FAIL";
         img_result_fail(out,rc,code,NULL,NULL,NULL);
@@ -728,7 +728,7 @@ static int cmd_img_clone(img_ctx *ctx, const img_args *in, img_result *out){
     /* ① 改名（源全程只读的前提） ② 写新 ③ 校验 ④ keep_old */
     if(rename(src,oldp)!=0){ img_result_fail(out,IMG_EIO,"IMG-OPEN-FAIL",src,"旧镜像改名失败（权限/占用）",NULL); return IMG_EIO; }
     img_clone_stats_t st;
-    rc=img_clone(oldp, src, keep, nkeep, guid_random, &st, NULL);
+    rc=img_clone(oldp, src, keep, nkeep, guid_random, &st, img_cmd_prog());
     if(rc!=IMG_OK){
         unlink(src); rename(oldp,src);              /* ★ 回滚：用户文件回到原路径 */
         const char *code=(rc==IMG_ECANCELLED)?"CMD-CANCELLED":
@@ -1213,7 +1213,7 @@ static int cmd_boot_repair(img_ctx *ctx, const img_args *in, img_result *out){
         if(img_ntfs_fix_geometry(q,sys_lba)==IMG_OK) gp++;
         if(vbr_lba!=sys_lba && img_ntfs_fix_geometry(q,vbr_lba)==IMG_OK) gp++;
         img_result_u64(out,"geometry_patched",(uint64_t)gp);
-        int rc=img_fixboot(q,vbr_lba,q2,tl,NULL);
+        int rc=img_fixboot(q,vbr_lba,q2,tl,img_cmd_prog());
         if(rc!=IMG_OK){ img_result_fail(out,rc,"BOOT-VBR-WRITE-FAIL",NULL,NULL,NULL); return rc; }
         fixed++;
     }
@@ -1399,7 +1399,7 @@ static int cmd_fs_format(img_ctx *ctx, const img_args *in, img_result *out){
         img_span sp; img_span_prep(&sp,"ntfs","format","格式化 NTFS");
         img_span_kv_u64(&sp,"lba",lba); img_span_kv_u64(&sp,"size_bytes",pb);
         img_span_begin(&sp);
-        rc=img_ntfs_format(q,&o,NULL);
+        rc=img_ntfs_format(q,&o,img_cmd_prog());
         img_span_end(&sp,rc);
         if(rc){ img_result_fail(out,rc,"NTFS-FORMAT-FAIL",NULL,NULL,NULL); return rc; }
         img_result_str(out,"fs","NTFS");
@@ -1411,7 +1411,7 @@ static int cmd_fs_format(img_ctx *ctx, const img_args *in, img_result *out){
         img_span sp; img_span_prep(&sp,"fat32","format","格式化 FAT32");
         img_span_kv_u64(&sp,"lba",lba); img_span_kv_u64(&sp,"size_bytes",pb);
         img_span_begin(&sp);
-        rc=img_fat32_format(q,&o,&L,NULL);
+        rc=img_fat32_format(q,&o,&L,img_cmd_prog());
         img_span_end(&sp,rc);
         if(rc){ img_result_fail(out,rc,"FAT-PUT-FAIL",NULL,"FAT32 格式化失败",NULL); return rc; }
         img_result_str(out,"fs","FAT32");
@@ -1459,7 +1459,7 @@ static int cmd_ntfs_put(img_ctx *ctx, const img_args *in, img_result *out){
     img_span sp; img_span_prep(&sp,"ntfs","put","写入文件");
     img_span_kv_str(&sp,"path",dst); img_span_kv_u64(&sp,"size_bytes",(uint64_t)st.st_size);
     img_span_begin(&sp);
-    rc=img_ntfs_put_file(fs,src,dst,NULL);
+    rc=img_ntfs_put_file(fs,src,dst,img_cmd_prog());
     img_span_end(&sp,rc);
     img_ntfs_umount(fs);
     if(rc){ img_result_fail(out,rc,"FAT-PUT-FAIL",dst,"写入失败（空间/只读/路径）",NULL); return rc; }
@@ -1562,7 +1562,7 @@ static int cmd_boot_check(img_ctx *ctx, const img_args *in, img_result *out){
     img_bootcheck_result_t r; memset(&r,0,sizeof r);
     img_span sp; img_span_prep(&sp,"bc","check","引导链自检");
     img_span_begin(&sp);
-    int rc=img_bootcheck_ex(q,mode,flags,&r,NULL);
+    int rc=img_bootcheck_ex(q,mode,flags,&r,img_cmd_prog());
     img_span_end(&sp,rc);
     if(rc!=IMG_OK && r.count==0){
         img_result_fail(out,rc,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL); return rc;
