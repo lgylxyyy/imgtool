@@ -41,6 +41,10 @@ typedef enum {
 int  img_log_open   (const char *path, img_lv_t lv, size_t max_bytes, int keep);
 int  img_log_open_fd(int fd,          img_lv_t lv, size_t max_bytes, int keep);
 void img_log_close  (void);
+/* 真正打开着的日志路径；没开日志 / 用 fd 模式 → NULL。
+ * ★ 失败卡片的"日志："这一行必须用它，不能自己拼 <img>.imgtool.log —— 那样
+ *   --log=/别的路径 时卡片会印错，而"卡片里印的路径打不开"会让用户以为附件漏发。*/
+const char *img_log_path(void);
 void img_log_set_level(img_lv_t lv);
 img_lv_t img_log_level(void);
 bool img_log_enabled(img_lv_t lv);

@@ -134,6 +134,9 @@ int img_log_open_fd(int fd, img_lv_t lv, size_t max_bytes, int keep){
     G.fd=fd; G.path[0]=0;          /* fd 模式不能改名轮转（App 自己管，见契约）*/
     return open_common(lv,max_bytes,keep);
 }
+const char *img_log_path(void){
+    return (G.fd>=0 && G.path[0]) ? G.path : NULL;
+}
 void img_log_close(void){
     if(G.fd>=0 && G.path[0]) close(G.fd);   /* fd 模式不替调用方关 fd */
     G.fd=-1; G.out_fd=-1;
@@ -259,7 +262,10 @@ void img_error_record(const char *cmd, const char *code, int rc, const char *at,
     if(status)snprintf(g_last_err.status,sizeof g_last_err.status,"%s",status);
     snprintf(g_last_err.img,sizeof g_last_err.img,"%.240s",G.img);
     snprintf(g_last_err.ctx,sizeof g_last_err.ctx,"%.240s",G.ctx);
-    snprintf(g_last_err.log,sizeof g_last_err.log,"%s%s.imgtool.log",G.img[0]?G.img:"","");
+    /* ★ 以前这里硬拼 "<img>.imgtool.log"：没开日志 / 用 --log=别的路径 时都是错的。
+     *   现在只报【真正打开着的】那个文件；没有就留空，由卡片/App 明说"未开启"。*/
+    { const char *lp=img_log_path();
+      if(lp) snprintf(g_last_err.log,sizeof g_last_err.log,"%s",lp); }
     g_last_err.events_len = ring_dump_into(g_last_err.events,(int)sizeof g_last_err.events);
     g_have_err = 1;
 }

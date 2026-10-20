@@ -19,6 +19,7 @@
 #include <string.h>
 #include <unistd.h>   /* isatty / write */
 #include <fcntl.h>    /* open */
+#include <sys/stat.h> /* stat：判断日志到底落没落盘 */
 
 /* ================= CLI 专用文案表（中/英） ================= */
 static char g_lang[8] = "zh";
@@ -194,7 +195,19 @@ static void render_card(const img_error_info_t *ei){
     n+=snprintf(card+n,sizeof card-(size_t)n,"%s: %s\n", en?"Cause":"原因    ", txt_cause(ei->code));
     n+=snprintf(card+n,sizeof card-(size_t)n,"%s: %s\n", en?"Suggest":"建议    ", txt_suggest(ei->code));
     if(!en && ei->status[0]) n+=snprintf(card+n,sizeof card-(size_t)n,"当前状态: %s\n", ei->status);
-    if(ei->log[0])    n+=snprintf(card+n,sizeof card-(size_t)n,"%s: %s\n", en?"Log":"日志  ", ei->log);
+    if(ei->log[0]){
+        /* ★ 卡片是"用户拿去反馈"的东西，路径必须是事实：只印真正打开着的日志，
+         *   并且确认它确实有内容（没开 --log 时磁盘上根本没有这个文件）。*/
+        struct stat st;
+        bool has = (stat(ei->log,&st)==0 && S_ISREG(st.st_mode) && st.st_size>0);
+        n+=snprintf(card+n,sizeof card-(size_t)n,"%s: %s%s\n", en?"Log":"日志  ", ei->log,
+            has ? "" : (en?"  (NOT written - rerun with --log)"
+                           :"  （未落盘：重跑时加 --log 才有）"));
+    } else {
+        n+=snprintf(card+n,sizeof card-(size_t)n,"%s: %s\n", en?"Log":"日志  ",
+            en?"not enabled (rerun with --log to capture one)"
+               :"未开启（重跑时加 --log 才会写日志）");
+    }
     n+=snprintf(card+n,sizeof card-(size_t)n,
         en?"--- event tail (%d bytes, machine format) ---\n":"──────── 事件尾部（内存最近 %d 字节，机器格式）────────\n",
         ei->events_len);
