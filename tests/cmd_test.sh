@@ -241,6 +241,47 @@ ex=$(echo "$j" | jq_ "d['data']['exists']")
 check_err "ntfs.exists 路径不带 /" "CMD-ARG-BAD" \
   "$T/imgcmd" ntfs.exists --img="$W/winre.qcow2" --lba=$WE --path=Windows --progress=bar
 
+echo "════ 4f. 建盘流水线（img.create / fs.format / ntfs.put / ntfs.export / boot.check / bcd.gen-uefi）════"
+{   # ★ 这 6 条是 2026-10-20 补的：以前 App 只能调表外 CLI 才能建盘（手册 §11.0）
+    P="$W/pipe.qcow2"
+    $T/imgcmd img.create --out="$P" --size-gb=6 --progress=none > "$W/cr.json" 2>/dev/null
+    n=$(jq_ "d['data']['parts_total']" < "$W/cr.json")
+    [ "$n" = "3" ] && ok "img.create：GPT 默认 3 个分区（ESP200+MSR16+Windows 其余）" \
+                   || ng "img.create parts_total=$n（应为 3）"
+
+    # 已存在且没 force → 必须拒绝（不许悄悄覆盖）
+    code=$($T/imgcmd img.create --out="$P" --size-gb=6 --progress=none 2>/dev/null | jq_ "d['err']['error_code']")
+    [ "$code" = "CMD-ARG-BAD" ] && ok "img.create 已存在 → 拒绝（$code）" || ng "img.create 覆盖护栏失效：$code"
+
+    ESP=$($T/imgcmd part.show --img="$P" --ro --progress=none 2>/dev/null | jq_ "[p['first'] for p in d['data']['pt']['parts'] if p['typeGuid'].startswith('c12a7328')][0]")
+    SYS=$($T/imgcmd part.show --img="$P" --ro --progress=none 2>/dev/null | jq_ "[p['first'] for p in d['data']['pt']['parts'] if p['typeGuid'].startswith('ebd0a0a2')][0]")
+    SG=$($T/imgcmd part.show --img="$P" --ro --progress=none 2>/dev/null | jq_ "[p['partGuid'] for p in d['data']['pt']['parts'] if p['typeGuid'].startswith('ebd0a0a2')][0]")
+    EG=$($T/imgcmd part.show --img="$P" --ro --progress=none 2>/dev/null | jq_ "[p['partGuid'] for p in d['data']['pt']['parts'] if p['typeGuid'].startswith('c12a7328')][0]")
+    DG=$($T/imgcmd part.show --img="$P" --ro --progress=none 2>/dev/null | jq_ "d['data']['pt']['diskGuid']")
+
+    $T/imgcmd fs.format --img="$P" --lba="$ESP" --fs=fat32 --label=EFI --progress=none > "$W/f1.json" 2>/dev/null
+    [ "$(jq_ "d['data']['fs']" < "$W/f1.json")" = "FAT32" ] && ok "fs.format FAT32（ESP）" || ng "fs.format FAT32 失败"
+    $T/imgcmd fs.format --img="$P" --lba="$SYS" --fs=ntfs --label=Windows --progress=none > "$W/f2.json" 2>/dev/null
+    [ "$(jq_ "d['data']['fs']" < "$W/f2.json")" = "NTFS" ] && ok "fs.format NTFS（快速，$(jq_ "d['duration_ms']" < "$W/f2.json") ms）" || ng "fs.format NTFS 失败"
+
+    head -c 5000 /etc/services > "$W/put.bin"
+    $T/imgcmd ntfs.put --img="$P" --lba="$SYS" --src="$W/put.bin" --dst=/Windows/System32/Recovery/x.bin --progress=none > "$W/np.json" 2>/dev/null
+    [ "$(jq_ "d['data']['written_bytes']" < "$W/np.json")" = "5000" ] && ok "ntfs.put 写入 5000 字节（父目录自动建）" || ng "ntfs.put 失败：$(head -c 200 "$W/np.json")"
+    $T/imgcmd ntfs.exists --img="$P" --lba="$SYS" --path=/Windows/System32/Recovery/x.bin --progress=none > "$W/ne.json" 2>/dev/null
+    [ "$(jq_ "d['data']['exists']" < "$W/ne.json")" = "True" ] && ok "ntfs.exists 看到刚写的文件" || ng "ntfs.exists 没看到"
+    $T/imgcmd ntfs.export --img="$P" --lba="$SYS" --path=/Windows/System32/Recovery/x.bin --dst="$W/back.bin" --progress=none >/dev/null 2>&1
+    [ "$(md5sum < "$W/put.bin" | cut -d' ' -f1)" = "$(md5sum < "$W/back.bin" | cut -d' ' -f1)" ] && ok "ntfs.export 抽回来 md5 一致" || ng "ntfs.export 内容不一致"
+
+    $T/imgcmd boot.check --img="$P" --mode=uefi --progress=none > "$W/bc.json" 2>/dev/null
+    cnt=$($T/imgcmd boot.check --img="$P" --mode=uefi --progress=none 2>/dev/null | jq_ "d['data']['count']")
+    [ "${cnt:-0}" -ge 11 ] && ok "boot.check 返回 $cnt 项（items 是合法 JSON 数组）" || ng "boot.check 异常：$(head -c 200 "$W/bc.json")"
+
+    $T/imgcmd bcd.gen-uefi --ref="$ROOT/reference/bcd-reference-uefi.bin" --out="$W/bcd_new.bin" \
+        --sys-guid="$SG" --disk-guid="$DG" --esp-guid="$EG" --progress=none > "$W/bg.json" 2>/dev/null
+    h=$(jq_ "d['data']['bindings_patched']" < "$W/bg.json")
+    [ "${h:-0}" -ge 3 ] && [ -s "$W/bcd_new.bin" ] && ok "bcd.gen-uefi 改到 $h 处设备并写出 BCD" || ng "bcd.gen-uefi 失败：$(head -c 200 "$W/bg.json")"
+}
+
 echo "════ 5. 日志（--log）：里程碑 + 错误都落盘，且逐行可解析 ════"
 $T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src="$W/blob.bin" --dst=/EFI/blob2.bin \
     --log="$W/run.log" --log-level=info >/dev/null 2>&1

@@ -37,7 +37,7 @@ $T/imglayout mk "$W/b.qcow2" $((20*1024*1024*1024)) gpt --esp 200 --msr 16 >/dev
 $T/imgmkfs "$W/b.qcow2" --mkfs 2048 T >/dev/null 2>&1
 head -c 16777216 /dev/urandom > "$W/big.bin"      # 取消测试要够大的源（16MB）
 
-run "cmd_test（命令表/校验/日志 27 条）"  bash "$ROOT/tests/cmd_test.sh"
+run "cmd_test（命令表/校验/日志/建盘流水线 67 条）"  bash "$ROOT/tests/cmd_test.sh"
 run "corrupt-chain-test（防死循环）"      bash "$ROOT/tests/corrupt-chain-test.sh"
 run "timeout_test（I/O 看门狗：无进展→超时→fail-fast）" bash -c "./build/tests/timeout_test"
 run "fd_test（fd 生命周期 15 条）"        "$ROOT/build/tests/fd_test" "$W/a.qcow2"

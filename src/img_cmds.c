@@ -4,9 +4,12 @@
  * 参数规格里的类型/必填/默认/校验，CLI 与 App 共用 —— 不再两处各写一遍。
  */
 #define _POSIX_C_SOURCE 200809L
+#include <sys/stat.h>   /* img.create/ntfs.put 要 stat 判存在与大小 */
 #include "img_cmd.h"
 #include "img_fixboot.h"
 #include "img_bcd.h"
+#include "img_constraints.h"   /* img_layout_build：img.create 用 */
+#include "img_bootcheck.h"      /* boot.check 用 */
 #include "img_io.h"
 #include "img_fat32.h"
 #include "img_fat32_fs.h"
@@ -1283,6 +1286,302 @@ static int cmd_boot_repair(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+
+/* ================= 7. 补齐 App 建盘流水线缺的 5 个命令（2026-10-20）=================
+ * 背景（手册 §11.0）：命令表原来只有"零件"，建盘/格式化/写 NTFS 文件/UEFI BCD/自检
+ * 都只能调表外 CLI，App 通过 JNI 走不通整条流水线。这 5 条把它们搬进表里。
+ * ★ 命名规矩：凡是"产出新镜像"的命令，路径参数叫 out（不叫 img）——
+ *   img 会被 img_cmd_exec 当作"已存在的镜像"去打开（img_ctx_open 要求存在）。*/
+
+/* ---------- img.create ---------- */
+static const img_arg A_IMGCREATE[] = {
+    {"out",     IMG_A_STR,  true,  NULL,   "要创建的 qcow2 路径（已存在时需 force=true）", NULL},
+    {"size-gb", IMG_A_U64,  true,  NULL,   "虚拟磁盘大小（GiB）", NULL},
+    {"table",   IMG_A_ENUM, false, "gpt",  "分区表：gpt(UEFI) | mbr(BIOS)", NULL},
+    {"esp-mb",  IMG_A_U64,  false, "200",  "（gpt）ESP 大小 MiB", NULL},
+    {"msr-mb",  IMG_A_U64,  false, "16",   "（gpt）MSR 大小 MiB", NULL},
+    {"rec-mb",  IMG_A_U64,  false, "0",    "恢复分区 MiB（0=不建；政策默认关）", NULL},
+    {"sys-mb",  IMG_A_U64,  false, NULL,   "系统分区 MiB：mbr=活动系统分区（缺省 512）；gpt=Windows 分区大小（缺省=吃满剩余）", NULL},
+    {"force",   IMG_A_BOOL, false, "false","已存在则覆盖（★会删掉原文件）", NULL},
+};
+static int cmd_img_create(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx;
+    const char *outp=img_args_get(in,"out");
+    uint64_t gb=img_args_u64(in,"size-gb",0);
+    const char *tb=img_args_get(in,"table"); if(!tb||!*tb) tb="gpt";
+    if(!outp||!*outp){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","out","缺少输出路径",NULL); return IMG_EINVAL; }
+    if(!gb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","size-gb","必须是正整数（GiB）",NULL); return IMG_EINVAL; }
+    bool gpt, mbr;
+    gpt=!strcasecmp(tb,"gpt"); mbr=!strcasecmp(tb,"mbr");
+    if(!gpt && !mbr){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","table","只接受 gpt | mbr",NULL); return IMG_EINVAL; }
+    bool force=img_args_bool(in,"force",false);
+    struct stat st;
+    if(!force && stat(outp,&st)==0){
+        img_result_fail(out,IMG_EEXISTS,"CMD-ARG-BAD","out","输出文件已存在（force=true 才覆盖）",NULL);
+        return IMG_EEXISTS;
+    }
+    const uint64_t MiB=1024u*1024u, GiB=1024u*1024u*1024u;
+    uint64_t bytes=gb*GiB;
+    if(bytes < 1024ull*MiB){ img_result_fail(out,IMG_ERANGE,"CMD-ARG-BAD","size-gb","盘太小（≥1 GiB）",NULL); return IMG_ERANGE; }
+
+    /* ① 建 qcow2 本体（稀疏：只写头，不占实际空间）*/
+    img_io_opts_t io={0}; io.writable=true; io.truncate=true;
+    img_io *f=img_io_open_path(outp,&io);
+    if(!f){ img_result_fail(out,IMG_EIO,"HOST-OPEN-FAIL",outp,"创建文件失败（权限/目录不存在）",NULL); return IMG_EIO; }
+    img_qcow2_create_opts_t co={0}; co.size=bytes; co.cluster_bits=16;
+    int rc=img_qcow2_create(f,&co);
+    if(rc!=IMG_OK){ img_io_close(f); unlink(outp);
+        img_result_fail(out,rc,"IMG-FORMAT",outp,"qcow2 创建失败",NULL); return rc; }
+
+    /* ② 分区表（复用 img_layout_build，与 imglayout mk 同一份实现）*/
+    img_qcow2_opts_t qo={0};
+    img_qcow2 *q=img_qcow2_open(f,&qo);
+    if(!q||img_qcow2_write_init(q)!=IMG_OK){ img_io_close(f); unlink(outp);
+        img_result_fail(out,IMG_EFORMAT,"IMG-FORMAT",outp,"qcow2 头写不进去",NULL); return IMG_EFORMAT; }
+    img_layout_opts_t lo; img_layout_defaults(&lo, gpt?IMG_TABLE_GPT:IMG_TABLE_MBR);
+    /* ★ sys_bytes 的语义【按表不同】（img_layout_build 里写死的）：
+     *   MBR = 活动系统分区大小；GPT = Windows 分区大小，0 表示吃满剩余。
+     *   默认值交给 img_layout_defaults()，这里只在用户显式给了才覆盖。*/
+    lo.esp_bytes      = img_args_u64(in,"esp-mb",200)*MiB;
+    lo.msr_bytes      = img_args_u64(in,"msr-mb",16)*MiB;
+    lo.recovery_bytes = img_args_u64(in,"rec-mb",0)*MiB;
+    { uint64_t sysmb=img_args_u64(in,"sys-mb",0);
+      if(sysmb) lo.sys_bytes = sysmb*MiB; }
+    img_parttable_t t; img_check_result_t err; memset(&t,0,sizeof t); memset(&err,0,sizeof err);
+    rc=img_layout_build(&t, bytes/512u, gpt?IMG_TABLE_GPT:IMG_TABLE_MBR, &lo, &err);
+    if(rc!=IMG_OK){
+        img_qcow2_close(q); img_io_close(f); unlink(outp);
+        img_result_fail(out,rc,"PART-WRITE-FAIL",outp,err.reason[0]?err.reason:"布局生成失败",NULL);
+        return rc;
+    }
+    rc=img_parttable_write(q,&t);
+    if(rc!=IMG_OK){ img_qcow2_close(q); img_io_close(f); unlink(outp);
+        img_result_fail(out,rc,"PART-WRITE-FAIL",outp,"分区表写不进去",NULL); return rc; }
+    img_qcow2_close(q); img_io_close(f);
+
+    /* ③ 结果：把新表原样回给 App（省一次 part.show）*/
+    static char pj[64*1024];
+    int pn=img_parttable_json(&t,pj,sizeof pj);
+    img_result_u64(out,"size_bytes",bytes);
+    img_result_str(out,"table",gpt?"GPT":"MBR");
+    img_result_u64(out,"parts_total",(uint64_t)t.count);
+    if(pn>0) img_result_raw(out,"pt",pj);
+    return IMG_OK;
+}
+
+/* ---------- fs.format ---------- */
+static const img_arg A_FSFORMAT[] = {
+    {"img",   IMG_A_STR,  true,  NULL,  "镜像路径（qcow2）", NULL},
+    {"lba",   IMG_A_U64,  true,  NULL,  "分区起始 LBA", chk_lba},
+    {"fs",    IMG_A_ENUM, false, "ntfs","文件系统：ntfs | fat32", NULL},
+    {"label", IMG_A_STR,  false, NULL,  "卷标（NTFS ≤11 ASCII；FAT32 ≤11）", NULL},
+    {"quick", IMG_A_BOOL, false, "true","NTFS 快速格式化（false=整盘零填，很慢）", NULL},
+};
+static int cmd_fs_format(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *fsn=img_args_get(in,"fs"); if(!fsn||!*fsn) fsn="ntfs";
+    const char *label=img_args_get(in,"label");
+    bool ntfs=!strcasecmp(fsn,"ntfs"), fat=!strcasecmp(fsn,"fat32");
+    if(!ntfs && !fat){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","fs","只接受 ntfs | fat32",NULL); return IMG_EINVAL; }
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){ pb=(t->parts[i].last_lba-t->parts[i].first_lba+1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+
+    if(ntfs){
+        img_ntfs_fmt_opts_t o; img_ntfs_fmt_defaults(&o,lba,pb);
+        o.label=label; o.force=true;
+        o.quick=img_args_bool(in,"quick",true);   /* 默认快速：整盘零填在慢介质上要几十分钟 */
+        img_span sp; img_span_prep(&sp,"ntfs","format","格式化 NTFS");
+        img_span_kv_u64(&sp,"lba",lba); img_span_kv_u64(&sp,"size_bytes",pb);
+        img_span_begin(&sp);
+        rc=img_ntfs_format(q,&o,NULL);
+        img_span_end(&sp,rc);
+        if(rc){ img_result_fail(out,rc,"NTFS-FORMAT-FAIL",NULL,NULL,NULL); return rc; }
+        img_result_str(out,"fs","NTFS");
+    } else {
+        img_fat32_opts_t o={0};
+        o.partition_lba=lba; o.partition_bytes=pb; o.label=label;
+        o.hidden_sectors=(uint32_t)lba; o.num_fats=2; o.active_boot=true;
+        img_fat32_layout_t L; memset(&L,0,sizeof L);
+        img_span sp; img_span_prep(&sp,"fat32","format","格式化 FAT32");
+        img_span_kv_u64(&sp,"lba",lba); img_span_kv_u64(&sp,"size_bytes",pb);
+        img_span_begin(&sp);
+        rc=img_fat32_format(q,&o,&L,NULL);
+        img_span_end(&sp,rc);
+        if(rc){ img_result_fail(out,rc,"FAT-PUT-FAIL",NULL,"FAT32 格式化失败",NULL); return rc; }
+        img_result_str(out,"fs","FAT32");
+        img_result_u64(out,"cluster_bytes",(uint64_t)L.sectors_per_cluster*512u);
+        img_result_u64(out,"cluster_count",L.cluster_count);
+    }
+    img_result_u64(out,"lba",lba);
+    img_result_u64(out,"bytes",pb);
+    if(label) img_result_str(out,"label",label);
+    return IMG_OK;
+}
+
+/* ---------- ntfs.put / ntfs.export（往 NTFS 读写本地文件）---------- */
+static const img_arg A_NTFSPUT[] = {
+    {"img", IMG_A_STR, true,  NULL,   "镜像路径（qcow2）", NULL},
+    {"lba", IMG_A_U64, true,  NULL,   "NTFS 分区起始 LBA", chk_lba},
+    {"src", IMG_A_STR, true,  NULL,   "本地源文件路径", NULL},
+    {"dst", IMG_A_STR, true,  NULL,   "分区内目标绝对路径（/ 开头）", NULL},
+    {"mkdir", IMG_A_BOOL,false,"true","父目录不存在时自动创建", NULL},
+};
+static int cmd_ntfs_put(img_ctx *ctx, const img_args *in, img_result *out){
+    if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 写入）","重新编译时开启该功能并安装对应系统库");
+#if IMG_WITH_NTFS3G
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *src=img_args_get(in,"src"), *dst=img_args_get(in,"dst");
+    bool mk=img_args_bool(in,"mkdir",true);
+    if(!src||!dst||dst[0]!='/'){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","dst","需要 src 与以 / 开头的 dst",NULL); return IMG_EINVAL; }
+    struct stat st;
+    if(stat(src,&st)!=0 || !S_ISREG(st.st_mode)){ img_result_fail(out,IMG_ENOENT,"SRC-NOTFOUND",src,NULL,NULL); return IMG_ENOENT; }
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){ pb=(t->parts[i].last_lba-t->parts[i].first_lba+1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+    img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",dst,"不是合法 NTFS（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
+    if(mk){
+        char parent[512]; snprintf(parent,sizeof parent,"%s",dst);
+        char *sl=strrchr(parent,'/');
+        if(sl && sl!=parent){ *sl=0; img_ntfs_mkdir_p(fs,parent); }
+    }
+    img_span sp; img_span_prep(&sp,"ntfs","put","写入文件");
+    img_span_kv_str(&sp,"path",dst); img_span_kv_u64(&sp,"size_bytes",(uint64_t)st.st_size);
+    img_span_begin(&sp);
+    rc=img_ntfs_put_file(fs,src,dst,NULL);
+    img_span_end(&sp,rc);
+    img_ntfs_umount(fs);
+    if(rc){ img_result_fail(out,rc,"FAT-PUT-FAIL",dst,"写入失败（空间/只读/路径）",NULL); return rc; }
+    img_result_str(out,"path",dst);
+    img_result_u64(out,"written_bytes",(uint64_t)st.st_size);
+    return IMG_OK;
+#else
+    (void)ctx;(void)in;(void)out; return IMG_ENOTSUP;
+#endif
+}
+static const img_arg A_NTFSEXPORT[] = {
+    {"img",  IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
+    {"lba",  IMG_A_U64, true, NULL, "NTFS 分区起始 LBA", chk_lba},
+    {"path", IMG_A_STR, true, NULL, "分区内要导出的绝对路径（/ 开头）", NULL},
+    {"dst",  IMG_A_STR, true, NULL, "本地输出文件路径（会覆盖）", NULL},
+};
+static int cmd_ntfs_export(img_ctx *ctx, const img_args *in, img_result *out){
+    if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 读取）","重新编译时开启该功能并安装对应系统库");
+#if IMG_WITH_NTFS3G
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *path=img_args_get(in,"path"), *dst=img_args_get(in,"dst");
+    if(!path||path[0]!='/'||!dst){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","需要 / 开头的 path 与 dst",NULL); return IMG_EINVAL; }
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){ pb=(t->parts[i].last_lba-t->parts[i].first_lba+1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+    img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",path,"不是合法 NTFS（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
+    void *buf=NULL; size_t n=0;
+    rc=img_ntfs_read_file(fs,path,&buf,&n);
+    img_ntfs_umount(fs);
+    if(rc!=IMG_OK){ img_result_fail(out,rc,"FAT-ENTRY-NOTFOUND",path,"文件不存在或读不出",NULL); return rc; }
+    FILE *o=fopen(dst,"wb");
+    if(!o){ free(buf); img_result_fail(out,IMG_EIO,"HOST-OPEN-FAIL",dst,"本地文件写不了",NULL); return IMG_EIO; }
+    size_t wr=fwrite(buf,1,n,o); fclose(o); free(buf);
+    if(wr!=n){ img_result_fail(out,IMG_EIO,"HOST-ENOSPC",dst,"本地写入不完整",NULL); return IMG_EIO; }
+    img_result_str(out,"path",path);
+    img_result_u64(out,"bytes",(uint64_t)n);
+    return IMG_OK;
+#else
+    (void)ctx;(void)in;(void)out; return IMG_ENOTSUP;
+#endif
+}
+
+/* ---------- bcd.gen-uefi（= imggenbcd，同一份库实现）---------- */
+static const img_arg A_BCDGEN[] = {
+    {"ref",       IMG_A_STR, true,  NULL, "参考 BCD（取自一张能启动的同代 UEFI 盘）", NULL},
+    {"out",       IMG_A_STR, true,  NULL, "输出 BCD 文件路径", NULL},
+    {"sys-guid",  IMG_A_STR, true,  NULL, "新盘系统分区 partGuid", NULL},
+    {"disk-guid", IMG_A_STR, true,  NULL, "新盘 diskGuid", NULL},
+    {"esp-guid",  IMG_A_STR, false, NULL, "新盘 ESP partGuid（不给=只映射系统分区）", NULL},
+    {"old-rec-guid", IMG_A_STR, false, NULL, "参考件里的恢复分区 GUID（可选）", NULL},
+    {"new-rec-guid", IMG_A_STR, false, NULL, "新盘的恢复分区 GUID（可选）", NULL},
+};
+static int cmd_bcd_gen_uefi(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx;
+    const char *ref=img_args_get(in,"ref"), *outp=img_args_get(in,"out");
+    if(!ref||!outp){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","ref/out","需要参考 BCD 与输出路径",NULL); return IMG_EINVAL; }
+    img_bcd *b=img_bcd_open_file(ref);
+    if(!b){ img_result_fail(out,IMG_EFORMAT,"BCD-REF-BAD",ref,"打不开或不是合法 hive",NULL); return IMG_EFORMAT; }
+    img_bcd_remap_req_t rq;
+    rq.sys_guid=img_args_get(in,"sys-guid");
+    rq.disk_guid=img_args_get(in,"disk-guid");
+    rq.esp_guid=img_args_get(in,"esp-guid");
+    rq.old_rec_guid=img_args_get(in,"old-rec-guid");
+    rq.new_rec_guid=img_args_get(in,"new-rec-guid");
+    char err[256]=""; int hits=0;
+    int rc=img_bcd_remap(b,&rq,&hits,err,sizeof err);
+    if(rc!=IMG_OK){ img_bcd_close(b);
+        img_result_fail(out,rc,"BCD-PATCH-FAIL",ref,err[0]?err:"换盘映射失败",NULL); return rc; }
+    rc=img_bcd_save(b,outp);
+    img_bcd_close(b);
+    if(rc!=IMG_OK){ img_result_fail(out,rc,"BCD-WRITE-FAIL",outp,"输出文件写不了",NULL); return rc; }
+    img_result_u64(out,"bindings_patched",(uint64_t)hits);
+    img_result_str(out,"out",outp);
+    return IMG_OK;
+}
+
+/* ---------- boot.check（= imgbc，但走命令表/JSON）---------- */
+static const img_arg A_BOOTCHECK[] = {
+    {"img",  IMG_A_STR,  true,  NULL,    "镜像路径（qcow2）", NULL},
+    {"mode", IMG_A_ENUM, false, "auto",  "引导模式：auto | uefi | bios", NULL},
+    {"expect-recovery", IMG_A_BOOL, false, "false", "要求有恢复分区（默认不要求）", NULL},
+};
+static int cmd_boot_check(img_ctx *ctx, const img_args *in, img_result *out){
+    if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（引导链自检）","重新编译时开启该功能并安装对应系统库");
+#if IMG_WITH_NTFS3G
+    const char *m=img_args_get(in,"mode"); if(!m||!*m) m="auto";
+    img_boot_mode_t mode=IMG_BOOT_AUTO;
+    if(!strcasecmp(m,"uefi")) mode=IMG_BOOT_UEFI;
+    else if(!strcasecmp(m,"bios")) mode=IMG_BOOT_BIOS;
+    else if(strcasecmp(m,"auto")){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","mode","只接受 auto | uefi | bios",NULL); return IMG_EINVAL; }
+    unsigned flags = img_args_bool(in,"expect-recovery",false) ? IMG_BOOTCHK_EXPECT_RECOVERY : 0;
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    img_bootcheck_result_t r; memset(&r,0,sizeof r);
+    img_span sp; img_span_prep(&sp,"bc","check","引导链自检");
+    img_span_begin(&sp);
+    int rc=img_bootcheck_ex(q,mode,flags,&r,NULL);
+    img_span_end(&sp,rc);
+    if(rc!=IMG_OK && r.count==0){
+        img_result_fail(out,rc,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL); return rc;
+    }
+    static char jb[65536];
+    int n=img_bootcheck_json_array(&r,jb,sizeof jb);   /* ★ 必须是数组，不是 NDJSON */
+    char sum[256]; img_bootcheck_summary(&r,sum,sizeof sum);
+    img_result_str(out,"mode", r.is_uefi?"uefi":"bios");
+    img_result_u64(out,"count",(uint64_t)r.count);
+    img_result_u64(out,"required_fail",(uint64_t)r.n_required_fail);
+    img_result_u64(out,"warn_fail",(uint64_t)r.n_warn_fail);
+    img_result_str(out,"summary",sum);
+    if(n>0) img_result_raw(out,"items",jb);
+    return IMG_OK;
+#else
+    (void)ctx;(void)in;(void)out; return IMG_ENOTSUP;
+#endif
+}
+
 const img_cmd IMG_CMD_TABLE[] = {
     {"img.info",  "1.0", "显示镜像基本信息（大小/分区表/分区数）",
         A_INFO,   (int)(sizeof A_INFO  /sizeof A_INFO[0]),   cmd_img_info},
@@ -1320,6 +1619,19 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_FATEXISTS,(int)(sizeof A_FATEXISTS/sizeof A_FATEXISTS[0]), cmd_fat_exists},
     {"ctl.cancel","1.0", "请求取消正在执行的操作（另一线程调用；协作式，下一个检查点生效）",
         NULL, 0, cmd_ctl_cancel},
+    /* ---- 2026-10-20：补齐 App 建盘流水线（手册 §11.0 的 7 个缺口）---- */
+    {"img.create","1.0", "建 qcow2 本体 + 分区表（★路径参数叫 out：img 会被当成已存在镜像打开）",
+        A_IMGCREATE,(int)(sizeof A_IMGCREATE/sizeof A_IMGCREATE[0]), cmd_img_create},
+    {"fs.format","1.0", "把一个分区格式化成 NTFS / FAT32（不用再调 imgntfsfs/imgmkfs）",
+        A_FSFORMAT,(int)(sizeof A_FSFORMAT/sizeof A_FSFORMAT[0]), cmd_fs_format},
+    {"ntfs.put","1.0", "把本地文件写进 NTFS 分区（自动建父目录）",
+        A_NTFSPUT,(int)(sizeof A_NTFSPUT/sizeof A_NTFSPUT[0]), cmd_ntfs_put},
+    {"ntfs.export","1.0", "把 NTFS 分区里的文件导出到本地（抽 bootmgr/boot.sdi/winre.wim）",
+        A_NTFSEXPORT,(int)(sizeof A_NTFSEXPORT/sizeof A_NTFSEXPORT[0]), cmd_ntfs_export},
+    {"bcd.gen-uefi","1.0", "UEFI 换盘：按新盘 GUID 重写 BCD（= imggenbcd，同一份库实现）",
+        A_BCDGEN,(int)(sizeof A_BCDGEN/sizeof A_BCDGEN[0]), cmd_bcd_gen_uefi},
+    {"boot.check","1.0", "引导链自检（= imgbc）：返回逐项结果 + 必需项失败数",
+        A_BOOTCHECK,(int)(sizeof A_BOOTCHECK/sizeof A_BOOTCHECK[0]), cmd_boot_check},
     {"cmd.list",  "1.0", "导出命令表（名字/参数规格/帮助）——App 可据此自动生成界面",
         NULL, 0, cmd_cmd_list},
 };
