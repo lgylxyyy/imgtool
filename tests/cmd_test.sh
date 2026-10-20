@@ -282,6 +282,41 @@ echo "════ 4f. 建盘流水线（img.create / fs.format / ntfs.put / ntf
     [ "${h:-0}" -ge 3 ] && [ -s "$W/bcd_new.bin" ] && ok "bcd.gen-uefi 改到 $h 处设备并写出 BCD" || ng "bcd.gen-uefi 失败：$(head -c 200 "$W/bg.json")"
 }
 
+echo "════ 4g. ISO 抽取（iso.ls / iso.extract；UDF 桥）════"
+{   # ★ Windows 安装盘的 ISO9660 目录树是空的，install.wim 只在 UDF 里 —— 这几条锁住"能进去"。
+    ISO=$(ls /workspace/images/*LTSC*.iso 2>/dev/null | head -1)
+    if [ -z "$ISO" ]; then
+        echo "  ⏭ 没找到 LTSC ISO，跳过 ISO 用例"
+    else
+        $T/imgcmd iso.ls --iso="$ISO" --path=/ --progress=none > "$W/il.json" 2>/dev/null
+        n=$(python3 -c "import json;d=json.load(open('$W/il.json'));print(d['data']['count'] if d['ok'] else -1)" 2>/dev/null)
+        [ "${n:-0}" -gt 5 ] && ok "iso.ls / → $n 项（UDF 根目录）" || ng "iso.ls / 失败：$(head -c 200 "$W/il.json")"
+        names=$(python3 -c "
+import json;d=json.load(open('$W/il.json'))
+print(','.join(e['name'].lower() for e in d['data']['entries']))" 2>/dev/null)
+        echo "$names" | grep -q "sources" && ok "根目录里能看到 sources/（ISO9660 树里是没有的）" || ng "根目录缺 sources/"
+        $T/imgcmd iso.ls --iso="$ISO" --path=/sources --progress=none > "$W/il2.json" 2>/dev/null
+        [ "$(python3 -c "
+import json;d=json.load(open('$W/il2.json'))
+print([e['size'] for e in d['data']['entries'] if e['name'].lower()=='install.wim'][0])" 2>/dev/null)" = "3966348023" ] \
+            && ok "iso.ls /sources → install.wim 大小 3,966,348,023（与抽出来的文件一致）" \
+            || ng "install.wim 大小不对：$(head -c 200 "$W/il2.json")"
+        rm -f "$W/b.sdi"
+        $T/imgcmd iso.extract --iso="$ISO" --path=/boot/boot.sdi --dst="$W/b.sdi" --progress=none > "$W/ix.json" 2>/dev/null
+        if [ -s "$W/b.sdi" ] && [ "$(stat -c%s "$W/b.sdi")" = "3170304" ]; then
+            if [ -f /workspace/build/iso-win10/boot.sdi ]; then
+                [ "$(md5sum < "$W/b.sdi")" = "$(md5sum < /workspace/build/iso-win10/boot.sdi)" ] \
+                    && ok "iso.extract /boot/boot.sdi → 3,170,304 字节，md5 与已知真值一致" \
+                    || ng "boot.sdi md5 不一致"
+            else
+                ok "iso.extract /boot/boot.sdi → 3,170,304 字节"
+            fi
+        else
+            ng "iso.extract 失败：$(head -c 200 "$W/ix.json")"
+        fi
+    fi
+}
+
 echo "════ 5. 日志（--log）：里程碑 + 错误都落盘，且逐行可解析 ════"
 $T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src="$W/blob.bin" --dst=/EFI/blob2.bin \
     --log="$W/run.log" --log-level=info >/dev/null 2>&1

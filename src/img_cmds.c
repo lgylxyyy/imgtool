@@ -9,7 +9,8 @@
 #include "img_fixboot.h"
 #include "img_bcd.h"
 #include "img_constraints.h"   /* img_layout_build：img.create 用 */
-#include "img_bootcheck.h"      /* boot.check 用 */
+#include "img_bootcheck.h"
+#include "img_iso.h"      /* boot.check 用 */
 #include "img_io.h"
 #include "img_fat32.h"
 #include "img_fat32_fs.h"
@@ -1582,6 +1583,98 @@ static int cmd_boot_check(img_ctx *ctx, const img_args *in, img_result *out){
 #endif
 }
 
+
+/* ================= ISO/UDF 抽取（App 只下命令，不自己动文件）=================
+ * 背景（DESIGN-OUTPUT.md §十一 层归属）：ISO → sources/install.wim 原来归 App 做，
+ * 意味着 App 必须自己找 ISO 库、自己写文件。改成工具做：
+ *   iso.ls / iso.extract → App 只剩下"命令权"，读写出问题时排查面收敛到工具日志。*/
+typedef struct { char *b; size_t cap, len; int n; bool trunc; } isolist_t;
+static void iso_list_cb(void *ud, const char *name, bool is_dir, uint64_t size){
+    isolist_t *a=(isolist_t*)ud;
+    if(!a || a->n>=4096){ if(a) a->trunc=true; return; }
+    char item[640]; int k=snprintf(item,sizeof item,"%s{\"name\":\"",a->n?",":"");
+    for(const unsigned char *p=(const unsigned char*)name; p&&*p && k<(int)sizeof item-64; p++){
+        if(*p=='"'||*p=='\\') item[k++]='\\', item[k++]=(char)*p;
+        else if(*p<0x20) k+=snprintf(item+k,sizeof item-(size_t)k,"\\u%04x",*p);
+        else item[k++]=(char)*p;
+    }
+    k+=snprintf(item+k,sizeof item-(size_t)k,"\",\"dir\":%s,\"size\":%llu}",
+                is_dir?"true":"false",(unsigned long long)size);
+    if(a->len+(size_t)k+1 < a->cap){ memcpy(a->b+a->len,item,(size_t)k); a->len+=(size_t)k; a->n++; }
+    else a->trunc=true;
+}
+static const img_arg A_ISOLS[] = {
+    {"iso",  IMG_A_STR, true,  NULL, "ISO 文件路径（UDF bridge；不修改它）", NULL},
+    {"path", IMG_A_STR, false, "/",  "ISO 内的目录（大小写不敏感）", NULL},
+};
+static int cmd_iso_ls(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx;
+    const char *isop=img_args_get(in,"iso");
+    const char *path=img_args_get(in,"path"); if(!path||!*path) path="/";
+    char err[256]="";
+    img_iso *iso=NULL;
+    int rc=img_iso_open_path(&iso,isop,err,sizeof err);
+    if(rc!=IMG_OK){ img_result_fail(out,rc,"HOST-OPEN-FAIL",isop,err[0]?err:"打不开 ISO",NULL); return rc; }
+    static char jb[256*1024];
+    /* ★ raw 类型必须是【一个完整的 JSON 值】：条目之间只有逗号是不够的，得包成数组 */
+    jb[0]='['; isolist_t acc={jb,sizeof jb-2,1,0,false};
+    img_span sp; img_span_prep(&sp,"iso","ls","列 ISO 目录");
+    img_span_kv_str(&sp,"path",path); img_span_begin(&sp);
+    int n=img_iso_list(iso,path,iso_list_cb,&acc);
+    img_span_end(&sp, n<0?IMG_ENOENT:IMG_OK);
+    const char *vol=img_iso_volume_id(iso);
+    img_iso_close(iso);
+    if(n<0){ img_result_fail(out,IMG_ENOENT,"FAT-DIR-NOTFOUND",path,"ISO 里没有这个目录",NULL); return IMG_ENOENT; }
+    jb[acc.len++]=']'; jb[acc.len]=0;
+    img_result_u64(out,"count",(uint64_t)acc.n);
+    img_result_bool(out,"truncated",acc.trunc);
+    if(vol) img_result_str(out,"volume",vol);
+    img_result_raw(out,"entries",jb);
+    return IMG_OK;
+}
+static const img_arg A_ISOEXTRACT[] = {
+    {"iso",  IMG_A_STR, true,  NULL, "ISO 文件路径", NULL},
+    {"path", IMG_A_STR, true,  NULL, "ISO 内的文件路径（如 /sources/install.wim）", NULL},
+    {"dst",  IMG_A_STR, true,  NULL, "本地输出文件（会覆盖）", NULL},
+    {"max-bytes", IMG_A_U64, false, "0", "只抽前 N 字节（0=整份；自测/预览用）", NULL},
+};
+static int cmd_iso_extract(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx;
+    const char *isop=img_args_get(in,"iso");
+    const char *path=img_args_get(in,"path"), *dst=img_args_get(in,"dst");
+    uint64_t maxb=img_args_u64(in,"max-bytes",0);
+    if(!isop||!path||!dst){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","iso/path/dst","三个都必填",NULL); return IMG_EINVAL; }
+    char err[256]="";
+    img_iso *iso=NULL;
+    int rc=img_iso_open_path(&iso,isop,err,sizeof err);
+    if(rc!=IMG_OK){ img_result_fail(out,rc,"HOST-OPEN-FAIL",isop,err[0]?err:"打不开 ISO",NULL); return rc; }
+    uint64_t fsz=0; bool isdir=false;
+    rc=img_iso_stat(iso,path,&fsz,&isdir);
+    if(rc!=IMG_OK){ img_iso_close(iso);
+        img_result_fail(out,IMG_ENOENT,"FAT-ENTRY-NOTFOUND",path,"ISO 里没有这个文件",NULL); return IMG_ENOENT; }
+    if(isdir){ img_iso_close(iso);
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD",path,"这是个目录，不是文件",NULL); return IMG_EINVAL; }
+    img_span sp; img_span_prep(&sp,"iso","extract","从 ISO 抽取文件");
+    img_span_kv_str(&sp,"path",path); img_span_kv_u64(&sp,"size_bytes",fsz);
+    img_span_begin(&sp);
+    uint64_t got=0;
+    rc=img_iso_extract(iso,path,dst,maxb,img_cmd_prog(),&got);
+    img_span_kv_u64(&sp,"written",got);
+    img_span_end(&sp,rc);
+    img_iso_close(iso);
+    if(rc!=IMG_OK){
+        const char *code=(rc==IMG_ECANCELLED)?"CMD-CANCELLED":"HOST-ENOSPC";
+        img_result_fail(out,rc,code,path,(rc==IMG_ECANCELLED)?"已取消（目标文件已删除）":"抽取失败",NULL);
+        return rc;
+    }
+    img_result_str(out,"path",path);
+    img_result_str(out,"dst",dst);
+    img_result_u64(out,"bytes",got);
+    img_result_u64(out,"size_bytes",fsz);
+    return IMG_OK;
+}
+/* 未编 libudfread 时也要有符号：给表一个明确报不可用的实现 */
+
 const img_cmd IMG_CMD_TABLE[] = {
     {"img.info",  "1.0", "显示镜像基本信息（大小/分区表/分区数）",
         A_INFO,   (int)(sizeof A_INFO  /sizeof A_INFO[0]),   cmd_img_info},
@@ -1632,6 +1725,10 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_BCDGEN,(int)(sizeof A_BCDGEN/sizeof A_BCDGEN[0]), cmd_bcd_gen_uefi},
     {"boot.check","1.0", "引导链自检（= imgbc）：返回逐项结果 + 必需项失败数",
         A_BOOTCHECK,(int)(sizeof A_BOOTCHECK/sizeof A_BOOTCHECK[0]), cmd_boot_check},
+    {"iso.ls","1.0", "列 ISO 里的目录（UDF；Windows 安装盘的 install.wim 只在 UDF 里）",
+        A_ISOLS,(int)(sizeof A_ISOLS/sizeof A_ISOLS[0]), cmd_iso_ls},
+    {"iso.extract","1.0", "从 ISO 里抽文件到本地（流式 1 MiB；App 不必自己装 ISO 库）",
+        A_ISOEXTRACT,(int)(sizeof A_ISOEXTRACT/sizeof A_ISOEXTRACT[0]), cmd_iso_extract},
     {"cmd.list",  "1.0", "导出命令表（名字/参数规格/帮助）——App 可据此自动生成界面",
         NULL, 0, cmd_cmd_list},
 };
