@@ -953,3 +953,97 @@ int img_bcd_remap(img_bcd *b, const img_bcd_remap_req_t *req,
     }
     return IMG_OK;
 }
+
+/* ================================================================== */
+/* 从模板构建 BCD（不依赖"参考盘旧 GUID"）                              */
+/* ================================================================== */
+/* 为什么需要它：Win7/8 光盘里的 BCD-Template 没有任何分区绑定（实测 total=0），
+ * 而 boot.repair / imggenbcd 都要"先读旧值再映射" —— 对模板无从下手。
+ * 这里改成"直接写"：
+ *   · 设备对象：GPT 用 img_bcd_make_partition_device() 现造；
+ *               MBR 先借一份模板里的设备 blob（保证类型字段正确），再写签名/偏移。
+ *   · 路径/描述：12000002 / 12000004 字符串。
+ *   · DisplayOrder：指到默认项。
+ * 调用方负责告诉我"sys/sr 在盘上的字节偏移"（= 分区起始 LBA × 512）。*/
+int img_bcd_build(const img_bcd_build_req_t *rq, char *err, size_t errcap){
+    if(err && errcap) err[0]=0;
+    if(!rq || !rq->template_path || !rq->out_path) return IMG_EINVAL;
+    img_bcd *b=img_bcd_open_file(rq->template_path);
+    if(!b){ if(err) snprintf(err,errcap,"模板 BCD 打不开或不是合法 hive"); return IMG_EFORMAT; }
+
+    /* ★ 选"要填的那个启动项"：优先 {bootmgr} 的 default（23000003），
+     *   再退 DisplayOrder。Win7 的 BCD-Template 没有 DisplayOrder，
+     *   但 bootmgr 的 default 指向一个只有 locale 的空壳对象 —— bcdboot 就是填它。*/
+    char os_guid[80]="";
+    { char *v=img_bcd_get_string(b,IMG_BCD_GUID_BOOTMGR,"23000003");
+      if(v){ if(v[0]) remap_trim_guid(v,os_guid,sizeof os_guid); free(v); }
+    }
+    if(!os_guid[0]){
+        char order[96]="";
+        if(img_bcd_get_display_order_first(b,order,sizeof order)==IMG_OK)
+            remap_trim_guid(order,os_guid,sizeof os_guid);
+    }
+    if(!os_guid[0]){
+        img_bcd_close(b);
+        if(err) snprintf(err,errcap,"模板里既没有 bootmgr 的 default 也没有 DisplayOrder —— 换个模板");
+        return IMG_EFORMAT;
+    }
+
+    const char *desc = (rq->desc && *rq->desc) ? rq->desc : "Windows";
+    const char *bootmgr_path = rq->uefi ? "\\EFI\\Microsoft\\Boot\\bootmgfw.efi" : "\\bootmgr";
+    const char *loader_rel   = rq->uefi ? "\\system32\\winload.efi" : "\\system32\\winload.exe";
+    const char *loader_abs   = rq->uefi ? "\\Windows\\system32\\winload.efi"
+                                        : "\\Windows\\system32\\winload.exe";
+
+    /* ---- 设备元素 ---- */
+    if(rq->uefi){
+        unsigned char blob[88];
+        if(!rq->sys_guid || !rq->disk_guid){ img_bcd_close(b);
+            if(err) snprintf(err,errcap,"UEFI 构建需要 sys-guid 与 disk-guid"); return IMG_EINVAL; }
+        if(img_bcd_make_partition_device(rq->sys_guid,rq->disk_guid,blob)!=IMG_OK){
+            img_bcd_close(b); if(err) snprintf(err,errcap,"系统分区/磁盘 GUID 非法"); return IMG_EINVAL; }
+        img_bcd_set_element_binary(b,os_guid,"11000001",blob,sizeof blob);
+        img_bcd_set_element_binary(b,os_guid,"21000001",blob,sizeof blob);
+        if(rq->esp_guid){
+            unsigned char eb[88];
+            if(img_bcd_make_partition_device(rq->esp_guid,rq->disk_guid,eb)==IMG_OK)
+                img_bcd_set_element_binary(b,IMG_BCD_GUID_BOOTMGR,"11000001",eb,sizeof eb);
+        }
+    } else {
+        /* MBR 分区设备：type=6@16 / size=72@24 / 分区字节偏移@32 / 磁盘签名@56 */
+        unsigned char dev[88]; memset(dev,0,sizeof dev);
+        uint32_t ty=6, sz=72;
+        memcpy(dev+16,&ty,4); memcpy(dev+24,&sz,4);
+        memcpy(dev+32,&rq->sys_off,8);
+        memcpy(dev+56,&rq->mbr_sig,4);
+        img_bcd_set_element_binary(b,os_guid,"11000001",dev,sizeof dev);
+        img_bcd_set_element_binary(b,os_guid,"21000001",dev,sizeof dev);
+        if(rq->sr_off){
+            unsigned char bm[88]; memcpy(bm,dev,sizeof bm);
+            memcpy(bm+32,&rq->sr_off,8);
+            img_bcd_set_element_binary(b,IMG_BCD_GUID_BOOTMGR,"11000001",bm,sizeof bm);
+        }
+    }
+
+    /* ---- 字符串 / 继承 / 默认项 ---- */
+    img_bcd_set_string(b,os_guid,"12000002",loader_abs);      /* ApplicationPath */
+    img_bcd_set_string(b,os_guid,"42000002",loader_rel);      /* Win7 用的相对 Path */
+    img_bcd_set_string(b,os_guid,"12000004",desc);
+    img_bcd_set_string(b,os_guid,"12000005","zh-CN");
+    img_bcd_set_string(b,os_guid,"22000002","\\windows");     /* systemroot */
+    img_bcd_set_string(b,os_guid,"14000006","{6efb52bf-1766-41db-a6b3-0ee5eff72bd7}");
+
+    img_bcd_set_string(b,IMG_BCD_GUID_BOOTMGR,"12000002",bootmgr_path);
+    img_bcd_set_string(b,IMG_BCD_GUID_BOOTMGR,"12000004","Windows Boot Manager");
+    img_bcd_set_string(b,IMG_BCD_GUID_BOOTMGR,"12000005","zh-CN");
+    img_bcd_set_string(b,IMG_BCD_GUID_BOOTMGR,"14000006","{7ea2e1ac-2e61-4728-aaa3-896d9d0a9f0e}");
+    img_bcd_set_string(b,IMG_BCD_GUID_BOOTMGR,"23000003",os_guid);   /* default */
+    img_bcd_displayorder_add(b,os_guid);
+    { static const unsigned char tmo=5;
+      img_bcd_set_element_binary(b,IMG_BCD_GUID_BOOTMGR,"25000004",&tmo,1); }
+
+    int rc=img_bcd_save(b,rq->out_path);
+    img_bcd_close(b);
+    if(rc!=IMG_OK){ if(err) snprintf(err,errcap,"BCD 落盘失败"); return rc; }
+    return IMG_OK;
+}

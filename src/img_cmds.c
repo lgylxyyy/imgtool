@@ -1858,6 +1858,49 @@ static int cmd_recovery_populate_system(img_ctx *ctx, const img_args *in, img_re
     return rec_populate_common(ctx,in,out,true);      /* 系统分区内（BIOS）*/
 }
 
+
+/* ---------- bcd.build（从模板直接构建；Win7 的 BCD-Template 没有绑定，只能这么来）---------- */
+static const img_arg A_BCDBUILD[] = {
+    {"template", IMG_A_STR, true,  NULL,   "模板 BCD（如 Win7 的 \Windows\System32\config\BCD-Template）", NULL},
+    {"out",      IMG_A_STR, true,  NULL,   "输出 BCD 文件路径", NULL},
+    {"table",    IMG_A_ENUM,false, "mbr",  "引导方式：mbr(BIOS) | gpt(UEFI)", NULL},
+    {"desc",     IMG_A_STR, false, "Windows","菜单里显示的名字", NULL},
+    {"sig",      IMG_A_STR, false, NULL,   "（mbr）磁盘签名 8 位十六进制", NULL},
+    {"sys-lba",  IMG_A_U64, false, "0",    "（mbr）系统分区起始 LBA", NULL},
+    {"sr-lba",   IMG_A_U64, false, "0",    "（mbr）系统保留/活动分区 LBA", NULL},
+    {"sys-guid", IMG_A_STR, false, NULL,   "（gpt）系统分区 partGuid", NULL},
+    {"disk-guid",IMG_A_STR, false, NULL,   "（gpt）磁盘 GUID", NULL},
+    {"esp-guid", IMG_A_STR, false, NULL,   "（gpt）ESP partGuid", NULL},
+};
+static int cmd_bcd_build(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx;
+    const char *tpl=img_args_get(in,"template"), *outp=img_args_get(in,"out");
+    const char *tb=img_args_get(in,"table"); if(!tb||!*tb) tb="mbr";
+    bool uefi=!strcasecmp(tb,"gpt"), mbr=!strcasecmp(tb,"mbr");
+    if(!tpl||!outp){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","template/out","两个都必填",NULL); return IMG_EINVAL; }
+    if(!uefi && !mbr){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","table","只接受 mbr | gpt",NULL); return IMG_EINVAL; }
+
+    img_bcd_build_req_t rq; memset(&rq,0,sizeof rq);
+    rq.template_path=tpl; rq.out_path=outp; rq.uefi=uefi; rq.desc=img_args_get(in,"desc");
+    rq.sys_off=img_args_u64(in,"sys-lba",0)*512ull;
+    rq.sr_off =img_args_u64(in,"sr-lba",0)*512ull;
+    rq.sys_guid=img_args_get(in,"sys-guid");
+    rq.disk_guid=img_args_get(in,"disk-guid");
+    rq.esp_guid=img_args_get(in,"esp-guid");
+    const char *sig=img_args_get(in,"sig");
+    if(sig && *sig) rq.mbr_sig=(uint32_t)strtoul(sig,NULL,16);
+    if(!uefi && (!rq.sys_off || !rq.mbr_sig)){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","sig/sys-lba","BIOS 构建需要磁盘签名与系统分区 LBA",NULL);
+        return IMG_EINVAL;
+    }
+    char err[256]="";
+    int rc=img_bcd_build(&rq,err,sizeof err);
+    if(rc!=IMG_OK){ img_result_fail(out,rc,"BCD-PATCH-FAIL",tpl,err[0]?err:"构建失败",NULL); return rc; }
+    img_result_str(out,"out",outp);
+    img_result_str(out,"mode",uefi?"gpt":"mbr");
+    return IMG_OK;
+}
+
 const img_cmd IMG_CMD_TABLE[] = {
     {"img.info",  "1.0", "显示镜像基本信息（大小/分区表/分区数）",
         A_INFO,   (int)(sizeof A_INFO  /sizeof A_INFO[0]),   cmd_img_info},
@@ -1906,6 +1949,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_NTFSPUT,(int)(sizeof A_NTFSPUT/sizeof A_NTFSPUT[0]), cmd_ntfs_put},
     {"ntfs.export","1.0", "把 NTFS 分区里的文件导出到本地（抽 bootmgr/boot.sdi/winre.wim）",
         A_NTFSEXPORT,(int)(sizeof A_NTFSEXPORT/sizeof A_NTFSEXPORT[0]), cmd_ntfs_export},
+    {"bcd.build","1.0", "从模板直接构建 BCD（Win7 的 BCD-Template 没有绑定，必须这条）",
+        A_BCDBUILD,(int)(sizeof A_BCDBUILD/sizeof A_BCDBUILD[0]), cmd_bcd_build},
     {"bcd.gen-uefi","1.0", "UEFI 换盘：按新盘 GUID 重写 BCD（= imggenbcd，同一份库实现）",
         A_BCDGEN,(int)(sizeof A_BCDGEN/sizeof A_BCDGEN[0]), cmd_bcd_gen_uefi},
     {"boot.check","1.0", "引导链自检（= imgbc）：返回逐项结果 + 必需项失败数",
