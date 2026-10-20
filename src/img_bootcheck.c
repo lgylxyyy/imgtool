@@ -256,6 +256,10 @@ static img_check_t *add(img_bootcheck_result_t *r, const char *id, const char *n
 }
 
 int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *out, img_prog *prog){
+    return img_bootcheck_ex(q, mode, 0, out, prog);
+}
+int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
+                     img_bootcheck_result_t *out, img_prog *prog){
     if(!q||!out) return IMG_EINVAL;
     memset(out,0,sizeof *out);
 
@@ -411,6 +415,11 @@ int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *ou
         (void)ntp;
     }
     /* ── ⑤ 恢复分区 ── */
+    if(P.rec<0 && (flags & IMG_BOOTCHK_EXPECT_RECOVERY)){
+        /* 只在调用方明确要求时才算缺失（默认策略：不建恢复分区不是错） */
+        add(out,"rec.present","存在恢复分区",IMG_CK_REQUIRED,false,
+            "分区表里没有 de94bba4 类型的恢复分区 —— 建盘时没带 --rec，或分区表被重写过");
+    }
     if(P.rec>=0){
         uint64_t lba=t.parts[P.rec].first_lba;
         uint64_t sz=(t.parts[P.rec].last_lba-t.parts[P.rec].first_lba+1)*512;

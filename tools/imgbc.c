@@ -13,12 +13,16 @@ int main(int argc,char**argv){
     /* --log 支持：镜像旁边会多出 <镜像>.imgtool.log（里程碑 + 错误）；
        也支持 --log=路径 / --log-level=... / --log-max=N（见 DESIGN-OUTPUT.md）*/
     img_log_cli(argc, argv, "imgbc");
-    if(argc<2){ fprintf(stderr,"用法: %s <image.qcow2> [--uefi|--bios|--auto]\n",argv[0]); return 2; }
+    if(argc<2){ fprintf(stderr,"用法: %s <image.qcow2> [--uefi|--bios|--auto] [--expect-recovery]\n",argv[0]); return 2; }
     img_boot_mode_t mode = IMG_BOOT_AUTO;
+    unsigned flags = 0;
     for(int i=2;i<argc;i++){
         if(!strcmp(argv[i],"--uefi")) mode=IMG_BOOT_UEFI;
         else if(!strcmp(argv[i],"--bios")) mode=IMG_BOOT_BIOS;
         else if(!strcmp(argv[i],"--auto")) mode=IMG_BOOT_AUTO;
+        /* ★ 默认不把"没有恢复分区"当错（恢复分区是用户显式勾选才做的，
+         *   见 app/docs/工具能力与App集成手册.md §15）；勾了才用这个开关验。*/
+        else if(!strcmp(argv[i],"--expect-recovery")) flags |= IMG_BOOTCHK_EXPECT_RECOVERY;
     }
     img_io_opts_t io={0}; io.writable=true;
     img_io *f=img_io_open_path(argv[1],&io);
@@ -37,7 +41,7 @@ int main(int argc,char**argv){
     img_span sp;
     img_span_prep(&sp,"bc","check","引导链自检（17 项）");
     img_span_begin(&sp);
-    int rc = img_bootcheck(q, mode, &r, NULL);
+    int rc = img_bootcheck_ex(q, mode, flags, &r, NULL);
     img_span_end(&sp, rc);
     if(rc && r.count==0){
         fprintf(stderr,"❌ 检查失败: %s\n", img_strerror(rc));

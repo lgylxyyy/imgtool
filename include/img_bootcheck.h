@@ -4,6 +4,7 @@
  * 通过条件按模式不同：
  *   · UEFI/GPT：ESP 完整性 + bootmgfw.efi 存在 + BCD 可解析 + 跨引用闭合
  *   · BIOS/MBR：活动标记 + 分区类型0x07 + $Boot 0..9 + bootmgr 存在
+ *   · 恢复分区：默认【不查】；只有 IMG_BOOTCHK_EXPECT_RECOVERY 才查缺没缺
  *   · 共同：   NTFS 结构、BCD 元素齐全、Windows 系统文件存在
  *
  * 用法：bccheck 把结果打成 JSON 数组，每项一行 → App 直接渲染。
@@ -43,8 +44,16 @@ typedef struct {
 /* 模式：自动探测 / 强制某一种 */
 typedef enum { IMG_BOOT_AUTO = 0, IMG_BOOT_UEFI, IMG_BOOT_BIOS } img_boot_mode_t;
 
-/* 跑完整检查。prog 可为 NULL。 */
+/* 检查项开关（默认 0）*/
+/* ★ 默认【不把"没有恢复分区"当失败/警告】—— 恢复分区是用户显式勾选才做的
+ *   （DESIGN-OUTPUT.md §十一、手册 §15）。只有调用方明确"这张盘应当带恢复分区"时
+ *   才传这个位，此时缺恢复分区 = REQUIRED 未通过（rec.present）。*/
+#define IMG_BOOTCHK_EXPECT_RECOVERY  1u
+
+/* 跑完整检查。prog 可为 NULL。等价于 img_bootcheck_ex(q,mode,0,out,prog)。*/
 int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *out, img_prog *prog);
+int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
+                     img_bootcheck_result_t *out, img_prog *prog);
 
 /* 把结果打成 JSON 数组（每项一行，方便流式输出）；返回写入字节数 */
 int img_bootcheck_json(const img_bootcheck_result_t *r, char *buf, int cap);

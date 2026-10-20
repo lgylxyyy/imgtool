@@ -8,6 +8,7 @@
 #   thread_test          并发（日志线程安全/两镜像并行/同 ctx 串行）
 #   cancel_test          取消（不留半成品/不漏簇/不污染下一次/覆盖写时旧文件完好）
 #   bcd_test             BCD 读写（需 libhivex）
+#   ebr_test             MBR 扩展/逻辑分区：EBR 链写回读、链尾 entry 全零
 #   mbr_bcd_test         BIOS BCD 全对象批量改写（签名+偏移，5 处设备）
 #   boot-repair-test.sh  boot.repair 一键修复（诊断/修复/独立验证/幂等/反例）
 #   genbcd-test.sh       imggenbcd UEFI BCD 定制（GUID 映射/4 参/反例）
@@ -49,6 +50,9 @@ if [ -x "$ROOT/build/tests/mbr_bcd_test" ]; then
   run "mbr_bcd_test（BIOS BCD 5 处设备批量改写）" \
       "$ROOT/build/tests/mbr_bcd_test" "$ROOT/reference/bcd-reference-bios-win11.bin" "$W/mbr_bcd.bin"
 else skipped=$((skipped+1)); echo "  ⏭ 跳过 mbr_bcd_test（没编进构建）"; fi
+if [ -x "$ROOT/build/tests/ebr_test" ]; then
+  run "ebr_test（MBR 扩展/逻辑分区 EBR 链往返）" "$ROOT/build/tests/ebr_test"
+else skipped=$((skipped+1)); echo "  ⏭ 跳过 ebr_test（没编进构建）"; fi
 run "boot-repair-test（BIOS 一键修复）" bash "$ROOT/tests/boot-repair-test.sh"
 run "genbcd-test（UEFI BCD 定制）"      bash "$ROOT/tests/genbcd-test.sh"
 if [ -x "$ROOT/build/tests/recovery_bcd_test" ]; then
