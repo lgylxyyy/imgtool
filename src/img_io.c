@@ -62,6 +62,23 @@ img_io *img_io_open_path(const char *path, const img_io_opts_t *o){
     return io;
 }
 
+img_io *img_io_open_existing(const char *path, bool writable){
+    if(!path || !*path) return NULL;
+    /* 先要求"已存在且是普通文件/块设备"，再不带 O_CREAT 打开 —— 绝不创建。 */
+    struct stat st;
+    if(stat(path,&st)<0) return NULL;
+    if(!S_ISREG(st.st_mode) && !S_ISBLK(st.st_mode)) return NULL;
+    int flags = writable ? (O_RDWR | O_CLOEXEC) : O_RDONLY;
+    int fd = open(path, flags);
+    if(fd < 0) return NULL;
+    img_io *io = calloc(1,sizeof *io);
+    if(!io){ close(fd); return NULL; }
+    io->fd = fd;
+    snprintf(io->path,sizeof io->path,"%s",path);
+    io->own_fd = true; io->writable = writable; io->is_fd_mode = false;
+    return io;
+}
+
 img_io *img_io_open_fd(int fd, bool take_ownership, const img_io_opts_t *o){
     /* ★ fd 生命周期契约（DESIGN-OUTPUT.md 第八节）：
      *   take_ownership=true → img_io_close() 会关掉它；false → 调用方自己关，

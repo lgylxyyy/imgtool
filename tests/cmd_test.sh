@@ -63,6 +63,21 @@ check_err "LBA=0（MBR 区）"   CMD-ARG-BAD       $T/imgcmd fat.ls --img="$W/t.
 check_err "源文件不存在"       SRC-NOTFOUND      $T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src=/no/such --dst=/x
 check_err "LBA 上不是 FAT32"   FAT-MOUNT-FAIL    $T/imgcmd fat.ls --img="$W/t.qcow2" --lba=999999
 check_err "镜像不存在"         IMG-OPEN-FAIL     $T/imgcmd img.info --img=/no/such.qcow2
+
+# ★ 真回归（手册 §4.5）：目录存在时，命令表入口【绝不创建 0 字节镜像】。
+#   上面那条走的是 /no/…（目录都不存在），旧实现也会失败，抓不到这个坑 ——
+#   旧代码在"目录存在、文件不存在"时会静默建出一个空文件并报 QC-OPEN-FAIL。
+NEWH="$W/typo.qcow2"
+code=$($T/imgcmd img.info --img="$NEWH" 2>/dev/null | jq_ "d['err']['error_code']")
+[ "$code" = "IMG-OPEN-FAIL" ] && [ ! -e "$NEWH" ] \
+  && ok "可写入口不创建空镜像（选错路径不留垃圾文件）" \
+  || ng "可写入口：code=$code 文件=$([ -e "$NEWH" ] && echo "被创建了(错)" || echo 无)"
+# boot.repair 自己也开一次镜像（不经 ctx）；CLI 会先开 ctx，所以这里先命中 IMG-OPEN-FAIL
+# —— 两条路径都改成"绝不创建"，故只断言：非零 + 没有留下文件。
+code=$($T/imgcmd boot.repair --img="$W/typo2.qcow2" --sys-lba=2048 2>/dev/null | jq_ "d['err']['error_code']")
+{ [ "$code" = "IMG-OPEN-FAIL" ] || [ "$code" = "HOST-OPEN-FAIL" ]; } && [ ! -e "$W/typo2.qcow2" ] \
+  && ok "boot.repair 也不创建镜像（$code）" \
+  || ng "boot.repair：code=$code 文件=$([ -e "$W/typo2.qcow2" ] && echo "被创建了(错)" || echo 无)"
 check_err "目录不存在"         FAT-DIR-NOTFOUND  $T/imgcmd fat.ls --img="$W/t.qcow2" --lba=$LBA --path=/nope
 
 check_err "wim.apply 非法 format 值" "CMD-ARG-BAD" \

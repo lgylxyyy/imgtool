@@ -24,7 +24,16 @@ typedef struct {
 } img_io_opts_t;
 
 /* —— 打开/关闭 —— */
+/* 打开（可写时允许创建）。★ 只有"建盘"这类真的要产出新文件的调用者该用它。*/
 img_io *img_io_open_path(const char *path, const img_io_opts_t *o);
+/* ★ 打开【已存在】的文件，绝不创建（对已存在性有强要求时的唯一正确入口）。
+ *   背景（手册 §4.5，实测）：命令表/JNI 的镜像入口若走 img_io_open_path(writable=true)，
+ *   用户在 App 里选错或手输一个不存在的路径时，会在盘上留下一个 0 字节的 *.qcow2 垃圾，
+ *   并且报的是 QC-OPEN-FAIL（看起来像"镜像损坏"）而不是"文件不存在"。
+ *   本函数先 stat（必须是普通文件或块设备）再不带 O_CREAT 打开：
+ *     · 路径不存在/是目录/fd 拿不到 → 返回 NULL（调用方报 IMG-OPEN-FAIL）
+ *     · 绝不产生新文件 */
+img_io *img_io_open_existing(const char *path, bool writable);
 img_io *img_io_open_fd(int fd, bool take_ownership, const img_io_opts_t *o);
 void    img_io_close(img_io *io);
 

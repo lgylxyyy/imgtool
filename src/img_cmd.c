@@ -261,9 +261,11 @@ img_ctx *img_ctx_open(const char *image_path, bool writable, bool check_size,
     img_set_image(image_path);        /* 卡片/.error.txt 要用（即使没开日志）*/
     c->writable=writable; c->check_size=check_size;
     img_lock_init(&c->lk);
-    img_io_opts_t o={0}; o.writable=writable;
-    c->io=img_io_open_path(c->path,&o);
-    if(!c->io){ if(err) snprintf(err,errcap,"打不开镜像：%s",c->path); free(c); return NULL; }
+    /* ★ 命令表的镜像入口【绝不创建文件】：用户在 App 里选错/手输一个不存在的路径时，
+     *   过去会留下 0 字节垃圾镜像 + 报 QC-OPEN-FAIL（像"镜像损坏"）。现在直接 IMG-OPEN-FAIL。
+     *   建盘是 imglayout mk / img_clone 的职责，它们仍用 img_io_open_path()。*/
+    c->io=img_io_open_existing(c->path,writable);
+    if(!c->io){ if(err) snprintf(err,errcap,"打不开镜像：%s（不存在或不是普通文件）",c->path); free(c); return NULL; }
     return c;
 }
 void img_ctx_close(img_ctx *c){
