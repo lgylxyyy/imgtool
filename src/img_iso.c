@@ -148,8 +148,10 @@ static int iso_resolve(img_iso *s, const char *path, uint32_t *lb, uint32_t *len
             if(files) *files=f;
         }
     }
-    if(lb) *lb=cur_lb; if(len) *len=cur_len;
-    if(is_dir) *is_dir=d; if(size) *size=sz;
+    if(lb) *lb=cur_lb;
+    if(len) *len=cur_len;
+    if(is_dir) *is_dir=d;
+    if(size) *size=sz;
     return IMG_OK;
 }
 
@@ -464,10 +466,31 @@ static void list_cb(void *ud, const char *name, bool isdir, uint64_t sz, uint64_
     c->n++;
     if(c->cb) c->cb(c->ud,name,isdir,sz);
 }
+/* ISO9660 level 3 里 >4 GiB 的文件会被拆成多条连续记录（除最后一条外都带
+ * multi-extent 标志 0x80）。实测一张 4.70 GiB 的假 ISO：
+ *   不合并 → ls 里出现两条 BIG.BIN（4.0 GiB + 0.7 GiB），"列出来像两个文件"
+ *   合并后 → 一条 4,046,796,288… 实际 5,046,796,288 字节，与 extract 一致。
+ * 注意：read/extract 早就会按多条 extent 拼（md5 对得上），只有"列目录"漏了。 */
+typedef struct { img_iso_entry_cb cb; void *ud; int n;
+                 char pend[300]; bool pend_dir; uint64_t pend_sz; bool pend_more; } iso_lctx;
+static void iso_lctx_flush(iso_lctx *c){
+    if(!c->pend[0]) return;
+    c->n++; if(c->cb) c->cb(c->ud, c->pend, c->pend_dir, c->pend_sz);
+    c->pend[0]=0; c->pend_more=false;
+}
 static void iso_list_wrap(void *ud, const iso_ent *e){
-    struct { img_iso_entry_cb cb; void *ud; int n; } *c=ud;
-    c->n++;
-    if(c->cb) c->cb(c->ud, e->name, e->dir, e->size);
+    iso_lctx *c=ud;
+    bool more = (e->flags & 0x80) != 0;         /* multi-extent：后面还有 */
+    if(c->pend_more && !strcasecmp(c->pend, e->name) && c->pend_dir==e->dir){
+        c->pend_sz += e->size;
+        c->pend_more = more;
+        if(!more) iso_lctx_flush(c);
+        return;
+    }
+    iso_lctx_flush(c);
+    snprintf(c->pend,sizeof c->pend,"%s",e->name);
+    c->pend_dir=e->dir; c->pend_sz=e->size; c->pend_more=more;
+    if(!more) iso_lctx_flush(c);
 }
 int img_iso_list(img_iso *s, const char *path, img_iso_entry_cb cb, void *ud){
     if(s && s->mode==1){
@@ -475,8 +498,9 @@ int img_iso_list(img_iso *s, const char *path, img_iso_entry_cb cb, void *ud){
         int rc=iso_resolve(s,(path&&*path)?path:"/",&lb,&len,&d,NULL,NULL);
         if(rc!=IMG_OK) return rc;
         if(!d) return IMG_ENOTSUP;
-        struct { img_iso_entry_cb cb; void *ud; int n; } c={cb,ud,0};
+        iso_lctx c; memset(&c,0,sizeof c); c.cb=cb; c.ud=ud;
         rc=iso_iter(s,lb,len,iso_list_wrap,&c);
+        if(rc==IMG_OK) iso_lctx_flush(&c);
         return rc==IMG_OK? c.n : rc;
     }
     uint64_t lb=0; bool d=false;
