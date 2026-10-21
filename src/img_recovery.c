@@ -98,8 +98,13 @@ int img_winre_extract_file(const char *wim_path, int index, const char *internal
     if(rename(src,dst_path)!=0){
         /* 跨文件系统时退化为复制 */
         FILE *in=fopen(src,"rb"), *out=fopen(dst_path,"wb");
-        if(!in||!out){ if(in)fclose(in); if(out)fclose(out); rmdir(dir);
-                       if(err) snprintf(err,errcap,"临时文件搬不过去：%s",dst_path); return IMG_EIO; }
+        if(!in||!out){
+            if(in) fclose(in);
+            if(out) fclose(out);
+            rmdir(dir);
+            if(err) snprintf(err,errcap,"临时文件搬不过去：%s",dst_path);
+            return IMG_EIO;
+        }
         char buf[1<<20]; size_t n;
         while((n=fread(buf,1,sizeof buf,in))>0) if(fwrite(buf,1,n,out)!=n) break;
         fclose(in); fclose(out); unlink(src);
@@ -161,8 +166,11 @@ int img_recovery_populate(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
     if(bootsdi_src && *bootsdi_src){
         char bdst[320]; snprintf(bdst,sizeof bdst,"%s/boot.sdi",dir);
         int r2=img_ntfs_put_file(fs,bootsdi_src,bdst,prog);
-        if(r2!=IMG_OK){ img_ntfs_umount(fs);
-            if(err) snprintf(err,errcap,"写入 boot.sdi 失败（%s）",bootsdi_src); return r2; }
+        if(r2!=IMG_OK){
+            img_ntfs_umount(fs);
+            if(err) snprintf(err,errcap,"写入 boot.sdi 失败（%s）",bootsdi_src);
+            return r2;
+        }
     }
     img_ntfs_umount(fs);
     if(written_bytes) *written_bytes=wb;

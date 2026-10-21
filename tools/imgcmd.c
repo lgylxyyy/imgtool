@@ -13,6 +13,7 @@
  *       stderr 人话行 + 失败卡片（人看；--progress=bar 或 tty 时）
  */
 #include "img_cmd.h"
+#include "img_text.h"
 #include "img_event.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -289,7 +290,7 @@ int main(int argc, char **argv){
     img_args *args=img_args_new();
     if(!args) return 1;
 
-    { const char *el=getenv("IMGTOOL_LANG"); if(el&&*el) snprintf(g_lang,sizeof g_lang,"%s",el); }
+    { const char *el=getenv("IMGTOOL_LANG"); if(el&&*el){ snprintf(g_lang,sizeof g_lang,"%s",el); img_lang_set(el); } }
 
     for(int i=1;i<argc;i++){
         const char *a=argv[i];
@@ -308,7 +309,9 @@ int main(int argc, char **argv){
         if(!strcmp(key,"log-max")){ logmax=val; continue; }
         if(!strcmp(key,"io-timeout-ms")){ iot=val; continue; }
         if(!strcmp(key,"progress")){ progress=val; continue; }
-        if(!strcmp(key,"lang")){ snprintf(g_lang,sizeof g_lang,"%s",val); continue; }
+        if(!strcmp(key,"lang")){ snprintf(g_lang,sizeof g_lang,"%s",val);
+            img_lang_set(val);   /* ★ 库里的 note/summary/检查项名字跟着换语言 */
+            continue; }
         if(!eq){ fprintf(stderr,"参数 %s 缺少 =值（例如 --lba=2048）\n",a); img_args_free(args); return 2; }
         img_args_set(args,key,val);
     }

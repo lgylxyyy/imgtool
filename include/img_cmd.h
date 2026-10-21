@@ -58,7 +58,7 @@ typedef struct img_result {
     const char *cmd;
     long long   t0_ms;
     /* data: 键值对（字符串/整数/布尔） */
-    struct { char k[40]; int ty; char s[160]; long long n; bool b; const char *raw; } f[IMG_RES_FIELDS];
+    struct { char k[40]; int ty; char s[256]; long long n; bool b; const char *raw; } f[IMG_RES_FIELDS];
     int nf, nf_drop;    /* nf_drop>0 → 结果里会出现 "_overflow"，绝不静默丢字段 */
     /* err */
     int  rc;

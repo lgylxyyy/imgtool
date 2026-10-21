@@ -25,6 +25,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 set(IMG_SOURCES
   src/img_types.c
+  src/img_text.c      # 库内人话的中英双份（img_t / img_lang_set）
   src/img_event.c
   src/img_cmd.c
   src/img_clone.c       # 扇区级克隆（机制；政策在 App/命令层）

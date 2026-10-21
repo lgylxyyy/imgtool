@@ -8,6 +8,7 @@
  *   · Win8(9200) 起 UEFI + Secure Boot 才是正常路径
  */
 #include "img_bootplan.h"
+#include "img_text.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -64,6 +65,17 @@ int main(void){
     OK(img_boot_plan_arch_from_wim("12") == IMG_PLAN_ARCH_ARM64, "WIM arch 12 → arm64");
     { img_boot_plan_t p = plan(10,0,22631,IMG_PLAN_ARCH_X64,1);
       OK(p.os_name && strstr(p.os_name, "11") != NULL, "os_name 认得 22631 是 Windows 11"); }
+
+    /* --- 语言开关：进信封的人话必须能双语 --- */
+    { img_lang_set("en");
+      img_boot_plan_t p1 = plan(6,1,7601,IMG_PLAN_ARCH_X64,1);
+      OK(strstr(p1.detail,"Secure Boot") != NULL, "img_lang_set(\"en\") → detail 变英文");
+      OK(!strcmp(img_t("引导链完整"),"boot chain complete"), "img_t() 命中表");
+      OK(!strcmp(img_t("没登记过的中文"),"没登记过的中文"), "img_t() 未命中 → 原样返回（不崩不丢）");
+      img_lang_set("zh");
+      img_boot_plan_t p2 = plan(6,1,7601,IMG_PLAN_ARCH_X64,1);
+      OK(strstr(p2.detail,"验签") != NULL, "切回中文 → detail 变中文");
+    }
 
     printf(fails ? "\n❌ bootplan_test 失败 %d 项\n" : "\n✅ bootplan_test 全过\n", fails);
     return fails ? 1 : 0;

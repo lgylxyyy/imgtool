@@ -1,5 +1,6 @@
 /* img_bootplan.c — 分区表/固件与 Windows 版本的兼容判定（见头文件的规则来源） */
 #include "img_bootplan.h"
+#include "img_text.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -39,8 +40,7 @@ void img_boot_plan(const img_boot_plan_in_t *in, img_boot_plan_t *out){
     out->verdict = IMG_PLAN_UNKNOWN;
     out->secure_boot = 0;
     snprintf(out->reason, sizeof out->reason, "%s", "BOOT-PLAN-NO-OS-INFO");
-    snprintf(out->detail, sizeof out->detail, "%s",
-             "没读到系统版本，不做判定（不拦你，但请自己确认）");
+    snprintf(out->detail, sizeof out->detail, "%s", img_t("没读到系统版本，不做判定（不拦你，但请自己确认）"));
 
     int b = in->os_build;
     if(b <= 0){ return; }                       /* 信息不足：不拦 */
@@ -54,7 +54,7 @@ void img_boot_plan(const img_boot_plan_in_t *in, img_boot_plan_t *out){
         out->verdict = IMG_PLAN_DENIED;
         snprintf(out->reason, sizeof out->reason, "%s", "BOOT-OS-NO-BCD");
         snprintf(out->detail, sizeof out->detail,
-                 "%s 用 NTLDR 引导，没有 BCD/bootmgr，本工具不支持", out->os_name);
+                 img_t("%s 用 NTLDR 引导，没有 BCD/bootmgr，本工具不支持"), out->os_name);
         return;
     }
     if(in->arch == IMG_PLAN_ARCH_X86 && in->want_gpt){
@@ -62,14 +62,13 @@ void img_boot_plan(const img_boot_plan_in_t *in, img_boot_plan_t *out){
         out->secure_boot = 2;
         snprintf(out->reason, sizeof out->reason, "%s", "BOOT-ARCH-NO-UEFI");
         snprintf(out->detail, sizeof out->detail,
-                 "32 位 %s 没有 UEFI 启动路径（固件位数必须匹配），只能用 MBR/BIOS", out->os_name);
+                 img_t("32 位 %s 没有 UEFI 启动路径（固件位数必须匹配），只能用 MBR/BIOS"), out->os_name);
         return;
     }
     if(in->arch == IMG_PLAN_ARCH_ARM64 && !in->want_gpt){
         out->verdict = IMG_PLAN_DENIED;
         snprintf(out->reason, sizeof out->reason, "%s", "BOOT-ARCH-NO-BIOS");
-        snprintf(out->detail, sizeof out->detail,
-                 "ARM64 Windows 只能 UEFI/GPT 启动，不能用 MBR/BIOS");
+        snprintf(out->detail, sizeof out->detail, "%s", img_t("ARM64 Windows 只能 UEFI/GPT 启动，不能用 MBR/BIOS"));
         return;
     }
 
@@ -79,8 +78,8 @@ void img_boot_plan(const img_boot_plan_in_t *in, img_boot_plan_t *out){
         out->secure_boot = 2;                   /* 实测：Win7 x64 UEFI 能起，但 SB 开就 Access Denied */
         snprintf(out->reason, sizeof out->reason, "%s", "BOOT-GPT-LEGACY-NEEDS-CONFIRM");
         snprintf(out->detail, sizeof out->detail,
-                 "%s 的 UEFI/GPT 启动微软支持有限：实测能起，但主板开 Secure Boot 会被固件"
-                 "验签拒绝；老机器固件也可能不认。确认要继续吗？", out->os_name);
+                 img_t("%s 的 UEFI/GPT 启动微软支持有限：实测能起，但主板开 Secure Boot 会被固件验签拒绝；老机器固件也可能不认。确认要继续吗？"),
+                 out->os_name);
         return;
     }
 
@@ -89,6 +88,7 @@ void img_boot_plan(const img_boot_plan_in_t *in, img_boot_plan_t *out){
     out->secure_boot = in->want_gpt ? 1 : 0;    /* BIOS 没有 Secure Boot 一说 */
     out->recommend_gpt = (b >= 9200);
     snprintf(out->reason, sizeof out->reason, "%s", in->want_gpt ? "BOOT-PLAN-OK-GPT" : "BOOT-PLAN-OK-MBR");
-    snprintf(out->detail, sizeof out->detail, "%s %s 可用",
-             out->os_name, in->want_gpt ? "的 UEFI/GPT 启动" : "的 BIOS/MBR 启动");
+    snprintf(out->detail, sizeof out->detail,
+             img_t(in->want_gpt ? "%s 的 UEFI/GPT 启动可用" : "%s 的 BIOS/MBR 启动可用"),
+             out->os_name);
 }

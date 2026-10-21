@@ -40,7 +40,7 @@ typedef struct {
 typedef struct {
     img_plan_verdict verdict;
     char reason[48];        /* 机器码：BOOT-ARCH-NO-UEFI / BOOT-GPT-LEGACY-NEEDS-CONFIRM ... */
-    char detail[220];       /* 中文说明（App 可以不显示，走自己的文案表） */
+    char detail[320];       /* 中文说明（App 可以不显示，走自己的文案表） */
     int  secure_boot;       /* 0=未知 1=可用 2=不可用（会被固件验签拒） */
     bool recommend_gpt;     /* 微软推荐用 GPT 的最低门槛是 Win8 */
     const char *os_name;    /* "Windows 7" / "Windows 8.1" ... 便于 App 直接显示 */

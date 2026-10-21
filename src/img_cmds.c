@@ -14,6 +14,7 @@
 #include "img_recovery.h"
 #include "img_identify.h"      /* boot.check 用 */
 #include "img_bootplan.h"      /* boot.plan / bcd.create 的分区表判定 */
+#include "img_text.h"        /* 进信封的人话：中英双份 */
 #include "img_io.h"
 #include "img_fat32.h"
 #include "img_fat32_fs.h"
@@ -1115,7 +1116,7 @@ static int cmd_ctl_cancel(img_ctx *ctx, const img_args *in, img_result *out){
     (void)ctx; (void)in;
     img_cancel();
     img_result_bool(out,"cancelled",true);
-    img_result_str(out,"note","已置取消标志；正在跑的操作会在下一个检查点退出");
+    img_result_str(out,"note",img_t("已置取消标志；正在跑的操作会在下一个检查点退出"));
     return IMG_OK;
 }
 
@@ -2117,7 +2118,7 @@ static int cmd_bcd_create(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_u64(out,"boot_lba",boot_lba);
     img_result_str(out,"path",uefi?"/EFI/Microsoft/Boot/BCD":"/Boot/BCD");
     img_result_u64(out,"bcd_bytes",bsz);
-    img_result_str(out,"note","BCD 只解决『引导配置』；bootmgr/bootmgfw.efi 与 MBR 引导码仍需 boot.repair 补");
+    img_result_str(out,"note",img_t("BCD 只解决『引导配置』；bootmgr/bootmgfw.efi 与 MBR 引导码仍需 boot.repair 补"));
     return IMG_OK;
 }
 
@@ -2202,7 +2203,8 @@ static int cmd_boot_plan(img_ctx *ctx, const img_args *in, img_result *out){
         if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在",NULL); return IMG_EINVAL; }
         img_winver_t v;
         if(img_win_version(q,lba,pb,&v,err,sizeof err)!=IMG_OK){
-            img_result_fail(out,rc,"PART-FS-BAD",NULL,err[0]?err:"读不出版本",NULL); return IMG_ENOENT;
+            img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",NULL,img_t("读不出版本（不是 NTFS 或没有系统）"),NULL);
+            return IMG_ESTATE;
         }
         maj = v.kernel_major ? v.kernel_major : atoi(v.current_version);
         min = v.kernel_minor;
@@ -2251,6 +2253,8 @@ static int cmd_boot_plan(img_ctx *ctx, const img_args *in, img_result *out){
         img_result_str(out,"gpt_verdict",img_boot_plan_verdict_name(pg.verdict));
         img_result_str(out,"gpt_reason",pg.reason);
         img_result_u64(out,"gpt_secure_boot",(uint64_t)pg.secure_boot);
+        img_result_str(out,"mbr_detail",img_t(pm.detail));
+        img_result_str(out,"gpt_detail",img_t(pg.detail));
         img_result_bool(out,"recommend_gpt",pg.recommend_gpt);
     }
     return IMG_OK;
@@ -2276,8 +2280,8 @@ static int cmd_qc_verify(img_ctx *ctx, const img_args *in, img_result *out){
     bool bad = sc.duplicate_refs || sc.out_of_range || sc.bad_l2;
     img_result_bool(out,"clean",!bad);
     if(bad)
-        img_result_str(out,"note","镜像里有别名/越界簇：能读，但别往里写（会串数据）。"
-                                  "重建或用 qemu-img check 看细节；我们写盘前已自动抬高分配水位。");
+        img_result_str(out,"note",img_t("镜像里有别名/越界簇：能读，但别往里写（会串数据）。"
+                                  "重建或用 qemu-img check 看细节；我们写盘前已自动抬高分配水位。"));
     return IMG_OK;
 }
 
@@ -2417,9 +2421,9 @@ static int cmd_win_version(img_ctx *ctx, const img_args *in, img_result *out){
     if(v.consensus_build) img_result_u64(out,"consensus_build",(uint64_t)v.consensus_build);
     img_result_bool(out,"mismatch",v.mismatch==1);
     if(v.mismatch)
-        img_result_str(out,"note","多个证据源互相矛盾 —— 这个镜像被改过（精简/换版本），别按文件名判断");
+        img_result_str(out,"note",img_t("多个证据源互相矛盾 —— 这个镜像被改过（精简/换版本），别按文件名判断"));
     else if(v.n_vote<=1)
-        img_result_str(out,"note","只有 1 个证据源可用（核心文件疑似被 WOF/CompactOS 压缩），结论可信度低");
+        img_result_str(out,"note",img_t("只有 1 个证据源可用（核心文件疑似被 WOF/CompactOS 压缩），结论可信度低"));
     return IMG_OK;
 }
 

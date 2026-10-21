@@ -3,6 +3,7 @@
 #endif
 /* img_bootcheck.c — 引导链自检 */
 #include "img_bootcheck.h"
+#include "img_text.h"
 #include "img_fat32.h"
 #include "img_ntfs_fmt.h"
 #include "img_ntfs_dev.h"
@@ -483,6 +484,7 @@ int img_bootcheck_json(const img_bootcheck_result_t *r, char *buf, int cap){
     for(int i=0;i<r->count;i++){
         const img_check_t *c=&r->items[i];
         char line[1024];
+        const char *label = img_t(c->name);   /* ★ 中英双份：中文原文即 key */
         const char *lvl = c->level==IMG_CK_REQUIRED?"required":
                           c->level==IMG_CK_WARN?"warn":"info";
         /* ⚠ c->id / c->name 是【指针】，sizeof 只有 8；必须用固定大缓冲。
@@ -490,7 +492,7 @@ int img_bootcheck_json(const img_bootcheck_result_t *r, char *buf, int cap){
         char id[128], nm[256], det[sizeof c->detail*2];
         #define ESC(dst,src) do{ int j=0; for(const char *p=(src); *p && j<(int)sizeof(dst)-2; p++){ \
             if(*p=='"'||*p=='\\'){ (dst)[j++]='\\'; } (dst)[j++]=*p; } (dst)[j]=0; }while(0)
-        ESC(id, c->id); ESC(nm, c->name); ESC(det, c->detail);
+        ESC(id, c->id); ESC(nm, label); ESC(det, c->detail);
         #undef ESC
         int m=snprintf(line,sizeof line,
             "{\"id\":\"%s\",\"name\":\"%s\",\"level\":\"%s\",\"pass\":%s,\"detail\":\"%s\"}\n",
@@ -511,12 +513,13 @@ int img_bootcheck_json_array(const img_bootcheck_result_t *r, char *buf, int cap
     for(int i=0;i<r->count;i++){
         const img_check_t *c=&r->items[i];
         char line[1024];
+        const char *label = img_t(c->name);   /* ★ 中英双份：中文原文即 key */
         const char *lvl = c->level==IMG_CK_REQUIRED?"required":
                           c->level==IMG_CK_WARN?"warn":"info";
         char id[128], nm[256], det[sizeof c->detail*2];
         #define ESC2(dst,src) do{ int j=0; for(const char *p=(src); *p && j<(int)sizeof(dst)-2; p++){ \
             if(*p=='"'||*p=='\\'){ (dst)[j++]='\\'; } (dst)[j++]=*p; } (dst)[j]=0; }while(0)
-        ESC2(id, c->id); ESC2(nm, c->name); ESC2(det, c->detail);
+        ESC2(id, c->id); ESC2(nm, label); ESC2(det, c->detail);
         #undef ESC2
         int m=snprintf(line,sizeof line,
             "%s{\"id\":\"%s\",\"name\":\"%s\",\"level\":\"%s\",\"pass\":%s,\"detail\":\"%s\"}",
@@ -540,6 +543,11 @@ int img_bootcheck_summary(const img_bootcheck_result_t *r, char *buf, int cap){
         default: info_n++; break;
         }
     }
+    if(img_lang_en())
+        return snprintf(buf,(size_t)cap,"%s · %s · required %d/%d · warnings %d/%d · %d checks",
+            r->is_uefi?"UEFI/GPT":"BIOS/MBR",
+            (req_n && r->n_required_fail==0) ? "boot chain complete" : "required checks failed - most likely not bootable",
+            req_ok, req_n, warn_ok, warn_n, r->count);
     return snprintf(buf,(size_t)cap,"%s · %s · 必需 %d/%d 通过 · 警告 %d/%d · 共 %d 项",
         r->is_uefi?"UEFI/GPT":"BIOS/MBR",
         req_n && r->n_required_fail==0 ? "引导链完整" : "★ 有必需项未通过 — 很可能无法启动",

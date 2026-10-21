@@ -103,7 +103,7 @@ int main(int argc, char **argv){
                 {"/Recovery/WindowsRE/winre.wim","/Windows/System32/Recovery/Winre.wim"},
                 {"/Recovery/WindowsRE/boot.sdi","/Windows/System32/Recovery/boot.sdi"},
                 {"/boot.sdi","/Windows/System32/Recovery/boot.sdi"}};
-            void *bufs[4]={0}; size_t lens[4]={0}; int slots[4]={-1,-1,-1,-1};
+            void *bufs[4]={0}; size_t lens[4]={0};
             for(int k=0;k<4;k++){
                 void *b=NULL; size_t n=0;
                 if(img_ntfs_read_file(fs2,CAND[k][0],&b,&n)==IMG_OK&&n){
@@ -111,9 +111,8 @@ int main(int argc, char **argv){
                     if(k>=2) slot=2;
                     if(k==1) slot=1;
                     if(bufs[slot]) free(bufs[slot]);
-                    bufs[slot]=b; lens[slot]=n; slots[slot]=slot;
+                    bufs[slot]=b; lens[slot]=n;
                     fprintf(stderr,"  读入 %s (%zu 字节)\n", CAND[k][0], n);
-                    if(k==0||k==2) break_unique: (void)0;
                 }
             }
             /* 简化槽位：0=wim(取第一个命中的) 2=sdi(取第一个命中的) */
