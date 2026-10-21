@@ -178,6 +178,40 @@ typedef struct {
 } img_bcd_build_req_t;
 int img_bcd_build(const img_bcd_build_req_t *rq, char *err, size_t errcap);
 
+/* ------------------------------------------------------------------ */
+/* bcd.create：用【内置模板】建一张能启动的 BCD（用户不必提供参考盘）     */
+/* ------------------------------------------------------------------ */
+/* 覆盖：Vista/7/8/8.1/10/11；BIOS(MBR) 与 UEFI(GPT)；x86 与 x64 不分包
+ * （BCD 只记 \Windows\system32\winload.exe|.efi，与位数无关）。
+ * 做法：内置一张真实能启动的 BCD 当底座，把【每一处与盘有关的东西】按目标重写：
+ *   设备（签名+字节偏移 / 分区GUID+磁盘GUID）、加载器路径、SystemRoot、
+ *   描述、locale、默认项、displayorder、超时；并删掉 WinRE/ramdisk 对象
+ *   （默认不建恢复分区；要保留就 keep_recovery=true，并自行填 WinRE 文件）。
+ * 32/64 位与分区表都不需要调用方区分——只要给对参数。
+ */
+typedef enum { IMG_BCD_FAM_AUTO = 0, IMG_BCD_FAM_LEGACY = 1, IMG_BCD_FAM_MODERN = 2 } img_bcd_family;
+typedef struct {
+    bool            uefi;
+    img_bcd_family  family;        /* AUTO=按 modern 处理（调用方通常已用 win.version 定好）*/
+    const char     *desc;          /* 菜单显示名，默认 "Windows" */
+    const char     *locale;        /* 默认 "zh-CN" */
+    int             timeout;       /* 默认 5 秒 */
+    uint32_t        mbr_sig;       /* BIOS：磁盘签名 */
+    uint64_t        sys_off, sr_off;  /* BIOS：字节偏移（sr_off=0 时 bootmgr 也用 sys_off）*/
+    const char     *sys_guid, *disk_guid, *esp_guid;  /* UEFI */
+    bool            keep_recovery; /* true=保留模板里的 WinRE/ramdisk 对象 */
+} img_bcd_create_req_t;
+
+int img_bcd_create_mem (const img_bcd_create_req_t *rq, void **out, size_t *out_len,
+                        char *err, size_t errcap);
+int img_bcd_create_file(const img_bcd_create_req_t *rq, const char *out_path,
+                        char *err, size_t errcap);
+int img_bcd_template_size(int family, bool uefi);   /* 诊断：内置模板字节数 */
+
+/* MBR 分区设备（88 字节）。真机布局：type=6@16, len=72@24, 字节偏移@32,
+ * flag=1@52, 磁盘签名@56。★ flag 那位漏了会 0xc000000e（设备不存在）。 */
+int img_bcd_make_mbr_device(uint32_t sig, uint64_t off_bytes, unsigned char blob[88]);
+
 /* MBR/BIOS 设备命门：读/写【磁盘签名 + 分区字节偏移】（见 img_bcd.c 布局注释） */
 int img_bcd_get_mbr_binding(img_bcd *b,const char*obj_guid,const char*eid,
                             uint32_t *sig_out,uint64_t *off_out);

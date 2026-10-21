@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <unistd.h>
 #include <stdlib.h>
 
@@ -998,10 +999,16 @@ int img_bcd_build(const img_bcd_build_req_t *rq, char *err, size_t errcap){
     /* ---- 设备元素 ---- */
     if(rq->uefi){
         unsigned char blob[88];
-        if(!rq->sys_guid || !rq->disk_guid){ img_bcd_close(b);
-            if(err) snprintf(err,errcap,"UEFI 构建需要 sys-guid 与 disk-guid"); return IMG_EINVAL; }
+        if(!rq->sys_guid || !rq->disk_guid){
+            img_bcd_close(b);
+            if(err) snprintf(err,errcap,"UEFI 构建需要 sys-guid 与 disk-guid");
+            return IMG_EINVAL;
+        }
         if(img_bcd_make_partition_device(rq->sys_guid,rq->disk_guid,blob)!=IMG_OK){
-            img_bcd_close(b); if(err) snprintf(err,errcap,"系统分区/磁盘 GUID 非法"); return IMG_EINVAL; }
+            img_bcd_close(b);
+            if(err) snprintf(err,errcap,"系统分区/磁盘 GUID 非法");
+            return IMG_EINVAL;
+        }
         img_bcd_set_element_binary(b,os_guid,"11000001",blob,sizeof blob);
         img_bcd_set_element_binary(b,os_guid,"21000001",blob,sizeof blob);
         if(rq->esp_guid){
@@ -1010,12 +1017,9 @@ int img_bcd_build(const img_bcd_build_req_t *rq, char *err, size_t errcap){
                 img_bcd_set_element_binary(b,IMG_BCD_GUID_BOOTMGR,"11000001",eb,sizeof eb);
         }
     } else {
-        /* MBR 分区设备：type=6@16 / size=72@24 / 分区字节偏移@32 / 磁盘签名@56 */
-        unsigned char dev[88]; memset(dev,0,sizeof dev);
-        uint32_t ty=6, sz=72;
-        memcpy(dev+16,&ty,4); memcpy(dev+24,&sz,4);
-        memcpy(dev+32,&rq->sys_off,8);
-        memcpy(dev+56,&rq->mbr_sig,4);
+        /* MBR 分区设备：type=6@16 / size=72@24 / 字节偏移@32 / flag=1@52 / 签名@56 */
+        unsigned char dev[88];
+        img_bcd_make_mbr_device(rq->mbr_sig, rq->sys_off, dev);
         img_bcd_set_element_binary(b,os_guid,"11000001",dev,sizeof dev);
         img_bcd_set_element_binary(b,os_guid,"21000001",dev,sizeof dev);
         if(rq->sr_off){
@@ -1045,5 +1049,268 @@ int img_bcd_build(const img_bcd_build_req_t *rq, char *err, size_t errcap){
     int rc=img_bcd_save(b,rq->out_path);
     img_bcd_close(b);
     if(rc!=IMG_OK){ if(err) snprintf(err,errcap,"BCD 落盘失败"); return rc; }
+    return IMG_OK;
+}
+
+/* ============================================================
+ * bcd.create —— 用【内置模板】建一张能启动的 BCD（不需要参考盘）
+ *
+ * 为什么是"模板 + 全量重写"而不是"从零拼元素"：
+ *   元素表（geoffchappell / BCD-FORMAT.md）只告诉你 ID 与格式，不告诉你
+ *   bootmgr 认哪些组合。我试过自己拼，得到 0xc0000034（元素非法）/
+ *   0xc000000f（找不到 winload）。所以底座用真实能启动的 BCD，
+ *   把【每一处与盘有关的东西】都按目标盘重写：
+ *     设备（磁盘签名/分区偏移 或 分区GUID/磁盘GUID）、加载器路径、
+ *     SystemRoot、菜单描述、locale、默认项、displayorder、超时。
+ *   模板里机器专属的部分在 reference/bcd-tpl-*.bin 生成时已被清零。
+ *
+ * 三代三包（用户要"一招鲜"，但不同代的 bootmgr 差异真实存在）：
+ *   legacy_bios  = Vista/7 BIOS     modern_bios = 8/8.1/10/11 BIOS
+ *   modern_uefi  = 8/8.1/10/11 UEFI（带 FirmwareVariable，BIOS 模板没有）
+ *   32/64 位不分开：BCD 只记 \Windows\system32\winload.exe|.efi，与位数无关。
+ * ============================================================ */
+#include "img_bcd_tpl.h"
+
+static const unsigned char *tpl_pick(const img_bcd_create_req_t *rq, size_t *len){
+    int fam = (int)rq->family;
+    if(fam == IMG_BCD_FAM_AUTO) fam = IMG_BCD_FAM_MODERN;    /* 调用方通常已按 win.version 定好 */
+    if(rq->uefi){
+        /* 6.x 的 UEFI 没有官方支持（Win7 的 bootmgfw.efi 走 UGA，现代 OVMF 只给 GOP）。
+         * 仍给一个包：legacy 模板改 UEFI 路径 —— 明确标注"实验，未验证"。*/
+        if(fam == IMG_BCD_FAM_LEGACY){ *len = sizeof IMG_BCD_TPL_LEGACY_BIOS; return IMG_BCD_TPL_LEGACY_BIOS; }
+        *len = sizeof IMG_BCD_TPL_MODERN_UEFI; return IMG_BCD_TPL_MODERN_UEFI;
+    }
+    if(fam == IMG_BCD_FAM_LEGACY){ *len = sizeof IMG_BCD_TPL_LEGACY_BIOS; return IMG_BCD_TPL_LEGACY_BIOS; }
+    *len = sizeof IMG_BCD_TPL_MODERN_BIOS; return IMG_BCD_TPL_MODERN_BIOS;
+}
+
+int img_bcd_template_size(int family, bool uefi){
+    img_bcd_create_req_t r; memset(&r, 0, sizeof r);
+    r.family = (img_bcd_family)family; r.uefi = uefi;
+    size_t n = 0; tpl_pick(&r, &n);
+    return (int)n;
+}
+
+/* 去掉花括号与填充，只留 GUID 文本（hive 里常带 {..}\0 尾巴）*/
+static void guid_trim(const char *in, char *out, size_t cap){
+    if(cap) out[0] = 0;
+    if(!in) return;
+    while(*in == '{' || *in == ' ' || *in == '\t') in++;
+    size_t i = 0;
+    for(; in[i] && in[i] != '}' && i + 1 < cap; i++){
+        unsigned char c = (unsigned char)in[i];
+        if(c <= 0x20) break;                 /* NUL/空格 之后都是垃圾 */
+        out[i] = (char)c;
+    }
+    out[i] = 0;
+}
+
+static int del_element(img_bcd *b, const char *guid, const char *eid){
+    hive_node_h o = find_object(b, guid);
+    if(!o) return IMG_ENOENT;
+    hive_node_h els = hivex_node_get_child(b->h, o, "Elements");
+    if(!els) return IMG_ENOENT;
+    hive_node_h el = hivex_node_get_child(b->h, els, eid);
+    if(!el) return IMG_OK;
+    return hivex_node_delete_child(b->h, el) == 0 ? IMG_OK : IMG_EIO;
+}
+
+static int del_object(img_bcd *b, const char *guid){
+    hive_node_h o = find_object(b, guid);
+    if(!o) return IMG_OK;
+    return hivex_node_delete_child(b->h, o) == 0 ? IMG_OK : IMG_EIO;
+}
+
+/* 恢复相关对象：WinRE 加载器（26000022=1 / 路径含 winre）、ramdisk options（含 32000004）*/
+static bool obj_is_recovery(img_bcd *b, const char *guid){
+    if(img_bcd_has_element(b, guid, "32000004")) return true;     /* ramdisk options */
+    char *p = img_bcd_get_string(b, guid, "12000002");
+    bool hit = false;
+    if(p){
+        for(char *s = p; *s; s++) *s = (char)tolower((unsigned char)*s);
+        if(strstr(p, "winre") || strstr(p, "boot.sdi")) hit = true;
+        free(p);
+    }
+    if(img_bcd_has_element(b, guid, "26000022")) hit = true;      /* PE / recovery 标志 */
+    return hit;
+}
+
+/* 88 字节分区设备（MBR：签名@56、字节偏移@32；GPT：GUID 对）*/
+int img_bcd_make_mbr_device(uint32_t sig, uint64_t off, unsigned char blob[88]){
+    memset(blob, 0, 88);
+    uint32_t ty = 6, sz = 72, one = 1;
+    memcpy(blob + 16, &ty, 4);      /* device type = 6 分区设备 */
+    memcpy(blob + 24, &sz, 4);      /* 结构长度 = 72（88-16）*/
+    memcpy(blob + 32, &off, 8);     /* 分区【字节】偏移 */
+    /* ★ [52..55] = 1：真机 BCD 全都有这一位，我漏了它 →
+     *    bootmgr 认得这个分区设备，回车就报 0xc000000e「指定的设备不存在」。 */
+    memcpy(blob + 52, &one, 4);
+    memcpy(blob + 56, &sig, 4);     /* NT 磁盘签名 */
+    return IMG_OK;
+}
+
+static int make_dev(const img_bcd_create_req_t *rq, bool use_sr, unsigned char blob[88]){
+    if(rq->uefi){
+        memset(blob, 0, 88);
+        const char *part = use_sr ? (rq->esp_guid && *rq->esp_guid ? rq->esp_guid : rq->sys_guid)
+                                  : rq->sys_guid;
+        if(!part || !rq->disk_guid) return IMG_EINVAL;
+        return img_bcd_make_partition_device(part, rq->disk_guid, blob);
+    }
+    return img_bcd_make_mbr_device(rq->mbr_sig, use_sr && rq->sr_off ? rq->sr_off : rq->sys_off, blob);
+}
+
+static int set_dev(img_bcd *b, const img_bcd_create_req_t *rq, const char *guid,
+                   const char *eid, bool use_sr){
+    unsigned char dev[88];
+    int rc = make_dev(rq, use_sr, dev);
+    if(rc != IMG_OK) return rc;
+    return img_bcd_set_element_binary(b, guid, eid, dev, sizeof dev);
+}
+
+/* 找"要启动的那个 Windows"：bootmgr 的 default 优先；其次扫 12000002 含 winload 的对象 */
+static void pick_osloader(img_bcd *b, char *out, size_t cap){
+    out[0] = 0;
+    char *v = img_bcd_get_string(b, IMG_BCD_GUID_BOOTMGR, "23000003");
+    if(v){ guid_trim(v, out, cap); free(v); }
+    if(out[0] && find_object(b, out)) return;
+    out[0] = 0;
+    char **guids = NULL; size_t n = 0;
+    if(img_bcd_list_objects(b, &guids, &n) == IMG_OK){
+        for(size_t i = 0; i < n && !out[0]; i++){
+            char *p = img_bcd_get_string(b, guids[i], "12000002");
+            if(!p) continue;
+            bool loader = strstr(p, "winload") != NULL;
+            free(p);
+            if(loader) snprintf(out, cap, "%s", guids[i]);
+        }
+        img_bcd_free_object_list(guids, n);
+    }
+}
+
+
+/* 把某个 GUID 写成「GUID 列表」元素（t=7）。displayorder/recoverysequence 必须是这个类型，
+ * 写成 REG_SZ 或 RAW(t=3) 都会让 bootmgr 判定"没有有效操作系统"→ 0xc0000098。 */
+static int set_list_element(img_bcd *b, const char *guid, const char *eid, const char *item){
+    hive_node_h o = find_object(b, guid);
+    if(!o) return IMG_ENOENT;
+    hive_node_h el = ensure_element(b, o, eid);
+    if(!el) return IMG_EIO;
+    return set_guid_list_element(b, el, item);
+}
+static bool blob_is_zero(const void *p, size_t n){
+    const unsigned char *q = (const unsigned char*)p;
+    for(size_t i = 0; i < n; i++) if(q[i]) return false;
+    return true;
+}
+
+int img_bcd_create_mem(const img_bcd_create_req_t *rq, void **out, size_t *out_len,
+                       char *err, size_t errcap){
+    if(err && errcap) err[0] = 0;
+    if(!rq || !out || !out_len) return IMG_EINVAL;
+    if(rq->uefi && (!rq->sys_guid || !rq->disk_guid)){
+        if(err) snprintf(err, errcap, "UEFI 需要 sys-guid 与 disk-guid");
+        return IMG_EINVAL;
+    }
+    if(!rq->uefi && (!rq->sys_off || !rq->mbr_sig)){
+        if(err) snprintf(err, errcap, "BIOS 需要磁盘签名与系统分区字节偏移");
+        return IMG_EINVAL;
+    }
+
+    size_t tlen = 0;
+    const unsigned char *tpl = tpl_pick(rq, &tlen);
+    img_bcd *b = img_bcd_open_mem(tpl, tlen);
+    if(!b){ if(err) snprintf(err, errcap, "内置模板打不开（内存不足或模板损坏）"); return IMG_EIO; }
+
+    const char *desc   = (rq->desc && *rq->desc) ? rq->desc : "Windows";
+    const char *locale = (rq->locale && *rq->locale) ? rq->locale : "zh-CN";
+    int timeout = rq->timeout > 0 ? rq->timeout : 5;
+
+    char osldr[80] = "", resume[80] = "";
+    pick_osloader(b, osldr, sizeof osldr);
+    { char *v = img_bcd_get_string(b, IMG_BCD_GUID_BOOTMGR, "23000006");
+      if(v){ guid_trim(v, resume, sizeof resume); free(v); } }
+
+    /* ---- 1. 删掉恢复相关对象（我们的政策：不建恢复分区）---- */
+    int dropped = 0;
+    char **guids = NULL; size_t n = 0;
+    if(img_bcd_list_objects(b, &guids, &n) == IMG_OK){
+        for(size_t i = 0; i < n; i++){
+            if(!strcmp(guids[i], IMG_BCD_GUID_BOOTMGR)) continue;
+            if(osldr[0] && !strcmp(guids[i], osldr)) continue;
+            if(resume[0] && !strcmp(guids[i], resume)) continue;
+            if(rq->keep_recovery) continue;
+            if(obj_is_recovery(b, guids[i])){ del_object(b, guids[i]); dropped++; }
+        }
+        img_bcd_free_object_list(guids, n);
+    }
+    if(!rq->keep_recovery){
+        del_element(b, IMG_BCD_GUID_BOOTMGR, "14000008");    /* recoverysequence */
+        if(osldr[0]) del_element(b, osldr, "14000008");
+    }
+
+    if(!osldr[0]){ img_bcd_close(b); if(err) snprintf(err, errcap, "模板里找不到 Windows 加载器对象"); return IMG_EFORMAT; }
+
+    /* ---- 2. 设备：bootmgr → 引导分区(SR/ESP)，加载器/resume → 系统分区 ---- */
+    set_dev(b, rq, IMG_BCD_GUID_BOOTMGR, "11000001", true);
+    if(resume[0]){ set_dev(b, rq, resume, "11000001", false); set_dev(b, rq, resume, "21000001", false); }
+    set_dev(b, rq, osldr, "11000001", false);
+    set_dev(b, rq, osldr, "21000001", false);
+    /* 模板里被清零的设备（memtest 等）按"库对象→引导分区"补上，
+     * 否则 bootmgr 读到一个全零设备会当成"没有分区"，菜单少项/报错。 */
+    { char **gs = NULL; size_t gn = 0;
+      if(img_bcd_list_objects(b, &gs, &gn) == IMG_OK){
+          for(size_t i = 0; i < gn; i++){
+              if(!strcmp(gs[i], IMG_BCD_GUID_BOOTMGR)) continue;
+              if(osldr[0] && !strcmp(gs[i], osldr)) continue;
+              if(resume[0] && !strcmp(gs[i], resume)) continue;
+              unsigned char cur[256]; size_t curlen = 0;
+              if(img_bcd_get_element_binary(b, gs[i], "11000001", cur, sizeof cur, &curlen) != IMG_OK) continue;
+              if(curlen != 88 || !blob_is_zero(cur, curlen)) continue;
+              set_dev(b, rq, gs[i], "11000001", true);
+          }
+          img_bcd_free_object_list(gs, gn);
+      }
+    }
+
+    /* ---- 3. 路径 / 描述 / locale / 默认项 / 超时 ---- */
+    const char *ldr_abs = rq->uefi ? "\\Windows\\system32\\winload.efi"
+                                   : "\\Windows\\system32\\winload.exe";
+    const char *bm_path = rq->uefi ? "\\EFI\\Microsoft\\Boot\\bootmgfw.efi" : "\\bootmgr";
+    img_bcd_set_string(b, osldr, "12000002", ldr_abs);
+    if(rq->family != IMG_BCD_FAM_MODERN) img_bcd_set_string(b, osldr, "42000002", ldr_abs + 8);  /* 6.x 的相对 Path */
+    img_bcd_set_string(b, osldr, "22000002", "\\Windows");     /* ★ 真机是大写；小写曾导致 0xc000000f */
+    img_bcd_set_string(b, osldr, "12000004", desc);
+    img_bcd_set_string(b, osldr, "12000005", locale);
+
+    img_bcd_set_string(b, IMG_BCD_GUID_BOOTMGR, "12000002", bm_path);
+    img_bcd_set_string(b, IMG_BCD_GUID_BOOTMGR, "12000004", "Windows Boot Manager");
+    img_bcd_set_string(b, IMG_BCD_GUID_BOOTMGR, "12000005", locale);
+    { char os_ref[72]; snprintf(os_ref, sizeof os_ref, "{%s}", osldr);
+      img_bcd_set_string(b, IMG_BCD_GUID_BOOTMGR, "23000003", os_ref); }   /* ★ 必须带花括号 */
+
+    set_list_element(b, IMG_BCD_GUID_BOOTMGR, "24000001", osldr);   /* displayorder 只留它 */
+    { uint64_t t = (uint64_t)timeout;
+      img_bcd_set_element_binary(b, IMG_BCD_GUID_BOOTMGR, "25000004", &t, 8); }
+
+    int rc = img_bcd_save_mem(b, out, out_len);
+    img_bcd_close(b);
+    if(rc != IMG_OK){ if(err) snprintf(err, errcap, "BCD 生成失败（hive 落盘）"); return rc; }
+    (void)dropped;
+    return IMG_OK;
+}
+
+int img_bcd_create_file(const img_bcd_create_req_t *rq, const char *out_path,
+                        char *err, size_t errcap){
+    if(!rq || !out_path) return IMG_EINVAL;
+    void *m = NULL; size_t n = 0;
+    int rc = img_bcd_create_mem(rq, &m, &n, err, errcap);
+    if(rc != IMG_OK) return rc;
+    FILE *fp = fopen(out_path, "wb");
+    if(!fp){ free(m); if(err) snprintf(err, errcap, "写不了 %s", out_path); return IMG_EIO; }
+    size_t w = fwrite(m, 1, n, fp);
+    fclose(fp);
+    free(m);
+    if(w != n){ if(err) snprintf(err, errcap, "写入不完整（%zu/%zu 字节）", w, n); return IMG_EIO; }
     return IMG_OK;
 }

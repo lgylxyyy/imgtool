@@ -54,6 +54,9 @@ if [ -x "$ROOT/build/tests/ebr_test" ]; then
   run "ebr_test（MBR 扩展/逻辑分区 EBR 链往返）" "$ROOT/build/tests/ebr_test"
 else skipped=$((skipped+1)); echo "  ⏭ 跳过 ebr_test（没编进构建）"; fi
 run "identify_test（版本多源投票 12 条）" "$ROOT/build/tests/identify_test"
+if [ -x "$ROOT/build/tests/bcdcreate_test" ]; then
+  run "bcdcreate_test（内置模板建 BCD）" "$ROOT/build/tests/bcdcreate_test"
+else skipped=$((skipped+1)); echo "  ⏭ 跳过 bcdcreate_test（没编进构建）"; fi
 run "boot-repair-test（BIOS 一键修复）" bash "$ROOT/tests/boot-repair-test.sh"
 run "genbcd-test（UEFI BCD 定制）"      bash "$ROOT/tests/genbcd-test.sh"
 if [ -x "$ROOT/build/tests/recovery_bcd_test" ]; then

@@ -75,5 +75,11 @@ add_executable(ebr_test ebr_test.c)
 target_link_libraries(ebr_test PRIVATE imgtool)
 
 # 版本识别"多源投票"（纯逻辑，不需要真盘）
+if(HIVEX_INC AND HIVEX_LIB)
+  add_executable(bcdcreate_test bcdcreate_test.c)
+  target_include_directories(bcdcreate_test PRIVATE ${HIVEX_INC})
+  target_link_libraries(bcdcreate_test PRIVATE imgtool ${HIVEX_LIB})
+endif()
+
 add_executable(identify_test identify_test.c)
 target_link_libraries(identify_test PRIVATE imgtool)

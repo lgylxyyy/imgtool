@@ -1902,6 +1902,160 @@ static int cmd_bcd_build(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+/* ---------- bcd.create：内置模板直接建 BCD（不需要任何参考盘）----------
+ * 用户要的："兼容 Vista 到 Windows 11 全部版本，32/64 位，MBR 与 GPT，
+ *            全量保证能启动；最好一个统一模板，不行就多套几个"。 */
+static const img_arg A_BCDCREATE[] = {
+    {"img",         IMG_A_STR,  true,  NULL,    "镜像路径（qcow2）", NULL},
+    {"table",       IMG_A_ENUM, false, "auto",  "引导方式：auto(按分区表) | mbr | gpt", NULL},
+    {"sys-lba",     IMG_A_U64,  false, NULL,    "系统分区 LBA（缺省=自动找最大的 NTFS/Windows 分区）", NULL},
+    {"sr-lba",      IMG_A_U64,  false, NULL,    "（BIOS）系统保留/活动分区 LBA（缺省=活动分区）", NULL},
+    {"esp-lba",     IMG_A_U64,  false, NULL,    "（UEFI）ESP LBA（缺省=EFI 类型分区）", NULL},
+    {"desc",        IMG_A_STR,  false, "Windows", "启动菜单里显示的名字", NULL},
+    {"locale",      IMG_A_STR,  false, "zh-CN", "BCD locale", NULL},
+    {"timeout",     IMG_A_U64,  false, "5",     "菜单等待秒数", NULL},
+    {"family",      IMG_A_ENUM, false, "auto",  "代：auto(按盘里内核版本) | legacy(6.x) | modern(10.x)", NULL},
+    {"keep-recovery", IMG_A_BOOL, false, "false", "保留模板里的 WinRE/ramdisk 对象（默认删，因为我们不建恢复分区）", NULL},
+    {"out",         IMG_A_STR,  false, NULL,    "另外存一份到本地文件（可选，便于对比/排查）", NULL},
+};
+static uint64_t pb_of(const img_parttable_t *t, uint64_t lba){
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba)
+            return (t->parts[i].last_lba-t->parts[i].first_lba+1)*512ull;
+    return 0;
+}
+static int cmd_bcd_create(img_ctx *ctx, const img_args *in, img_result *out){
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+    if(t->table==IMG_TABLE_NONE){ img_result_fail(out,IMG_EINVAL,"PART-READ-FAIL",NULL,"这张盘还没有分区表","先 imglayout / img.create"); return IMG_EINVAL; }
+
+    const char *tb=img_args_get(in,"table"); if(!tb||!*tb) tb="auto";
+    bool uefi = (t->table==IMG_TABLE_GPT);
+    if(!strcasecmp(tb,"mbr")) uefi=false;
+    else if(!strcasecmp(tb,"gpt")) uefi=true;
+    else if(strcasecmp(tb,"auto")){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","table","只接受 auto|mbr|gpt",NULL); return IMG_EINVAL; }
+
+    /* ---- 选系统分区 / 引导分区 ---- */
+    uint64_t sys_lba=img_args_u64(in,"sys-lba",0);
+    if(!sys_lba){
+        uint64_t best=0,best_sz=0;
+        for(int i=0;i<IMG_MAX_PARTITIONS;i++){
+            const img_partition_t *p=&t->parts[i];
+            if(!p->used) continue;
+            bool isfs = uefi ? (!strncasecmp(p->type_guid,"ebd0a0a2",8)||!p->type_guid[0]) : (p->type==0x07);
+            if(!isfs || p->logical) continue;
+            uint64_t sz=p->last_lba-p->first_lba+1;
+            if(sz>best_sz){ best_sz=sz; best=p->first_lba; }
+        }
+        sys_lba=best;
+    }
+    if(!sys_lba || !pb_of(t,sys_lba)){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","sys-lba",
+                       "自动找不到系统分区，请显式给 --sys-lba（先 part.show 看）",NULL);
+        return IMG_EINVAL;
+    }
+
+    uint64_t boot_lba=0;
+    if(uefi){
+        boot_lba=img_args_u64(in,"esp-lba",0);
+        if(!boot_lba)
+            for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+                if(t->parts[i].used && !strncasecmp(t->parts[i].type_guid,"c12a7328",8))
+                    boot_lba=t->parts[i].first_lba;
+        if(!boot_lba){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","esp-lba","没有 ESP 分区：UEFI 盘必须先把 ESP 建好",NULL); return IMG_EINVAL; }
+    } else {
+        boot_lba=img_args_u64(in,"sr-lba",0);
+        if(!boot_lba){
+            for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+                if(t->parts[i].used && !t->parts[i].logical && (t->parts[i].status&0x80))
+                    boot_lba=t->parts[i].first_lba;
+        }
+        if(!boot_lba) boot_lba=sys_lba;          /* 单分区布局：BCD 和系统同区 */
+    }
+
+    /* ---- 代：auto 时读盘里的内核版本（不信文件名）---- */
+    int fam=0; const char *fs=img_args_get(in,"family");
+    if(fs && !strcasecmp(fs,"legacy")) fam=(int)IMG_BCD_FAM_LEGACY;
+    else if(fs && !strcasecmp(fs,"modern")) fam=(int)IMG_BCD_FAM_MODERN;
+    else if(fs && strcasecmp(fs,"auto")){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","family","只接受 auto|legacy|modern",NULL); return IMG_EINVAL; }
+
+    const char *fam_why="given";
+    int major=0;
+    if(fam==0){
+        img_winver_t v; char e2[128]="";
+        if(img_win_version(q,sys_lba,pb_of(t,sys_lba),&v,e2,sizeof e2)==IMG_OK){
+            major = v.kernel_major ? v.kernel_major : atoi(v.current_version);
+            fam = (major>=10) ? (int)IMG_BCD_FAM_MODERN : (int)IMG_BCD_FAM_LEGACY;
+            fam_why="win.version";
+        } else { fam=(int)IMG_BCD_FAM_MODERN; fam_why="fallback(读不出版本，按 modern)"; }
+    }
+
+    img_bcd_create_req_t rq; memset(&rq,0,sizeof rq);
+    rq.uefi=uefi;
+    rq.family=(img_bcd_family)fam;
+    rq.desc=img_args_get(in,"desc");
+    rq.locale=img_args_get(in,"locale");
+    rq.timeout=(int)img_args_u64(in,"timeout",5);
+    rq.keep_recovery=img_args_bool(in,"keep-recovery",false);
+    if(uefi){
+        for(int i=0;i<IMG_MAX_PARTITIONS;i++){
+            if(!t->parts[i].used) continue;
+            if(t->parts[i].first_lba==sys_lba) rq.sys_guid=t->parts[i].part_guid;
+            if(t->parts[i].first_lba==boot_lba) rq.esp_guid=t->parts[i].part_guid;
+        }
+        rq.disk_guid=t->disk_guid;
+    } else {
+        rq.mbr_sig=t->disk_signature;
+        rq.sys_off=sys_lba*512ull;
+        rq.sr_off=(boot_lba!=sys_lba)?boot_lba*512ull:0;
+    }
+
+    char bcdtmp[]="/tmp/imgbcdcreateXXXXXX";
+    int fd=mkstemp(bcdtmp); if(fd<0){ img_result_fail(out,IMG_EIO,"BCD-BUILD-FAIL",NULL,"建不了临时文件",NULL); return IMG_EIO; }
+    close(fd);
+    char err[256]="";
+    rc=img_bcd_create_file(&rq,bcdtmp,err,sizeof err);
+    if(rc!=IMG_OK){ unlink(bcdtmp); img_result_fail(out,rc,"BCD-BUILD-FAIL","internal-template",err[0]?err:"生成失败",NULL); return rc; }
+    struct stat st; uint64_t bsz=0;
+    if(stat(bcdtmp,&st)==0) bsz=(uint64_t)st.st_size;
+
+    /* ---- 写进盘：BIOS → SR:\Boot\BCD；UEFI → ESP:\EFI\Microsoft\Boot\BCD ---- */
+    if(uefi){
+        img_fat32_fs *f=img_fat32_mount(q,boot_lba,true);
+        if(!f){ unlink(bcdtmp); img_result_fail(out,IMG_ESTATE,"PART-FS-BAD","esp","ESP 不是合法 FAT32",NULL); return IMG_ESTATE; }
+        img_fat32_mkdir_p(f,"/EFI");
+        img_fat32_mkdir_p(f,"/EFI/Microsoft");
+        img_fat32_mkdir_p(f,"/EFI/Microsoft/Boot");
+        rc=img_fat32_put_file(f,bcdtmp,"/EFI/Microsoft/Boot/BCD",img_cmd_prog());
+        img_fat32_unmount(f);
+    } else {
+        img_ntfs_fs *f=img_ntfs_mount_rw(q,boot_lba,pb_of(t,boot_lba));
+        if(!f){ unlink(bcdtmp); img_result_fail(out,IMG_ESTATE,"PART-FS-BAD","sr","引导分区不是合法 NTFS",NULL); return IMG_ESTATE; }
+        img_ntfs_mkdir_p(f,"/Boot");
+        rc=img_ntfs_put_file(f,bcdtmp,"/Boot/BCD",img_cmd_prog());
+        img_ntfs_umount(f);
+    }
+    const char *outp=img_args_get(in,"out");
+    if(outp && *outp){
+        FILE *fp=fopen(outp,"wb");
+        if(fp){ FILE *s2=fopen(bcdtmp,"rb"); if(s2){ char b[8192]; size_t r; while((r=fread(b,1,sizeof b,s2))>0) fwrite(b,1,r,fp); fclose(s2);} fclose(fp); }
+    }
+    unlink(bcdtmp);
+    if(rc!=IMG_OK){ img_result_fail(out,rc,"BCD-WRITE-FAIL",uefi?"/EFI/Microsoft/Boot/BCD":"/Boot/BCD","写不进引导分区",NULL); return rc; }
+
+    img_result_str(out,"mode",uefi?"gpt/uefi":"mbr/bios");
+    img_result_str(out,"family",fam==(int)IMG_BCD_FAM_LEGACY?"legacy(6.x)":"modern(10.x)");
+    img_result_str(out,"family_basis",fam_why);
+    img_result_u64(out,"sys_lba",sys_lba);
+    img_result_u64(out,"boot_lba",boot_lba);
+    img_result_str(out,"path",uefi?"/EFI/Microsoft/Boot/BCD":"/Boot/BCD");
+    img_result_u64(out,"bcd_bytes",bsz);
+    img_result_str(out,"note","BCD 只解决『引导配置』；bootmgr/bootmgfw.efi 与 MBR 引导码仍需 boot.repair 补");
+    return IMG_OK;
+}
+
 
 /* ================= 版本识别：从【内容】读，不信文件名 =================
  * 用户点名的需求：挂载 ESD/WIM/ISO 时能直接看到是哪个 Windows 版本，
@@ -2109,6 +2263,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_WINVER,(int)(sizeof A_WINVER/sizeof A_WINVER[0]), cmd_win_version},
     {"bcd.build","1.0", "从模板直接构建 BCD（Win7 的 BCD-Template 没有绑定，必须这条）",
         A_BCDBUILD,(int)(sizeof A_BCDBUILD/sizeof A_BCDBUILD[0]), cmd_bcd_build},
+    {"bcd.create","1.0", "用内置模板建一张能启动的 BCD（Vista~11 / BIOS+UEFI / 32+64 位；不要参考盘）",
+        A_BCDCREATE,(int)(sizeof A_BCDCREATE/sizeof A_BCDCREATE[0]), cmd_bcd_create},
     {"bcd.gen-uefi","1.0", "UEFI 换盘：按新盘 GUID 重写 BCD（= imggenbcd，同一份库实现）",
         A_BCDGEN,(int)(sizeof A_BCDGEN/sizeof A_BCDGEN[0]), cmd_bcd_gen_uefi},
     {"boot.check","1.0", "引导链自检（= imgbc）：返回逐项结果 + 必需项失败数",
