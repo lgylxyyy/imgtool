@@ -1940,16 +1940,33 @@ static int cmd_bcd_create(img_ctx *ctx, const img_args *in, img_result *out){
     /* ---- 选系统分区 / 引导分区 ---- */
     uint64_t sys_lba=img_args_u64(in,"sys-lba",0);
     if(!sys_lba){
-        uint64_t best=0,best_sz=0;
+        /* ★ 不能只挑"最大的 NTFS 分区"：实测 Win11 盘上数据分区 78 GiB 比系统分区 50 GiB 大，
+         *   按大小挑会挑到数据盘，写出来的 BCD 指着空分区 → 起不来（而且 family 也判成 fallback）。
+         *   正确做法：按大小逐个试，**能读到 \Windows\System32\winload.* 的才是系统分区**。*/
+        uint64_t cand[IMG_MAX_PARTITIONS]; int nc=0;
         for(int i=0;i<IMG_MAX_PARTITIONS;i++){
             const img_partition_t *p=&t->parts[i];
-            if(!p->used) continue;
+            if(!p->used || p->logical) continue;
             bool isfs = uefi ? (!strncasecmp(p->type_guid,"ebd0a0a2",8)||!p->type_guid[0]) : (p->type==0x07);
-            if(!isfs || p->logical) continue;
-            uint64_t sz=p->last_lba-p->first_lba+1;
-            if(sz>best_sz){ best_sz=sz; best=p->first_lba; }
+            if(!isfs) continue;
+            cand[nc++]=(uint64_t)i;
         }
-        sys_lba=best;
+        /* 按大小从大到小 */
+        for(int a=0;a<nc;a++) for(int b=a+1;b<nc;b++){
+            const img_partition_t *pa=&t->parts[cand[a]], *pb=&t->parts[cand[b]];
+            if((pb->last_lba-pb->first_lba) > (pa->last_lba-pa->first_lba)){ uint64_t tmp=cand[a]; cand[a]=cand[b]; cand[b]=tmp; }
+        }
+        for(int a=0;a<nc && !sys_lba;a++){
+            const img_partition_t *p=&t->parts[cand[a]];
+            uint64_t pb=(p->last_lba-p->first_lba+1)*512ull;
+            img_ntfs_fs *f=img_ntfs_mount_rw(q,p->first_lba,pb);
+            if(!f) continue;
+            bool iswin = img_ntfs_path_exists(f,"/Windows/System32/winload.exe")==true
+                      || img_ntfs_path_exists(f,"/Windows/System32/winload.efi")==true;
+            img_ntfs_umount(f);
+            if(iswin) sys_lba=p->first_lba;
+        }
+        if(!sys_lba && nc) sys_lba=t->parts[cand[0]].first_lba;   /* 兜底：最大那个 */
     }
     if(!sys_lba || !pb_of(t,sys_lba)){
         img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","sys-lba",
