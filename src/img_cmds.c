@@ -1932,6 +1932,7 @@ static int cmd_wim_identify(img_ctx *ctx, const img_args *in, img_result *out){
 
     img_wim_image_t imgs[32]; int n=0; char err[256]="";
     char container[8]="wim", inner[64]="";
+    const char *inner_kind=NULL;
 
     size_t sl=strlen(src);
     bool is_iso = (sl>4 && !strcasecmp(src+sl-4,".iso"));
@@ -1950,8 +1951,11 @@ static int cmd_wim_identify(img_ctx *ctx, const img_args *in, img_result *out){
                 "ISO 里没有 sources\\install.wim / install.esd",NULL);
             return IMG_ENOENT;
         }
-        snprintf(container,sizeof container,"%s", strstr(hit,".esd")||strstr(hit,"ESD")?"esd":"wim");
+        /* container 说的是【外层容器】：ISO 就报 iso，别把里面的 install.wim 当容器
+         * （App 的文案是"容器 = 光盘镜像 / ESD / WIM"）*/
+        snprintf(container,sizeof container,"iso");
         snprintf(inner,sizeof inner,"%s",hit);
+        inner_kind = (strstr(hit,".esd")||strstr(hit,"ESD")) ? "esd" : "wim";
         rd_iso_t r={iso,hit};
         rc=img_wim_identify(rd_iso,&r,imgs,32,&n,err,sizeof err);
         const char *vol=img_iso_volume_id(iso);
@@ -1988,6 +1992,7 @@ static int cmd_wim_identify(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_str(out,"container",container);
     img_result_str(out,"source",src);
     if(inner[0]) img_result_str(out,"inner_path",inner);
+    if(inner_kind) img_result_str(out,"inner_kind",inner_kind);
     img_result_u64(out,"count",(uint64_t)emitted);
     img_result_raw(out,"images",jb);
     return IMG_OK;
