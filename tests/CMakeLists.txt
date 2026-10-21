@@ -81,6 +81,9 @@ if(HIVEX_INC AND HIVEX_LIB)
   target_link_libraries(bcdcreate_test PRIVATE imgtool ${HIVEX_LIB})
 endif()
 
+add_executable(bootplan_test bootplan_test.c)
+target_link_libraries(bootplan_test PRIVATE imgtool)
+
 add_executable(qcscan_test qcscan_test.c)
 target_include_directories(qcscan_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(qcscan_test PRIVATE imgtool)

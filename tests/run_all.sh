@@ -55,6 +55,7 @@ if [ -x "$ROOT/build/tests/ebr_test" ]; then
 else skipped=$((skipped+1)); echo "  ⏭ 跳过 ebr_test（没编进构建）"; fi
 run "ntfs-case-test（NTFS 路径大小写不敏感 6 条）" bash "$ROOT/tests/ntfs-case-test.sh"
 run "qcscan_test（qcow2 别名/越界 + kill -9 续写）" "$ROOT/build/tests/qcscan_test"
+run "bootplan_test（分区表/固件兼容判定 19 条）" "$ROOT/build/tests/bootplan_test"
 run "identify_test（版本多源投票 12 条）" "$ROOT/build/tests/identify_test"
 if [ -x "$ROOT/build/tests/bcdcreate_test" ]; then
   run "bcdcreate_test（内置模板建 BCD）" "$ROOT/build/tests/bcdcreate_test"

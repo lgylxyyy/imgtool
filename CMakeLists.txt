@@ -48,6 +48,7 @@ set(IMG_SOURCES
   src/img_iso.c          # ISO/UDF 只读（自研解析；抽 install.wim）
   src/img_recovery.c     # 恢复分区/WinRE（查/填/设属性）
   src/img_identify.c     # 从内容读 Windows 版本（WIM XML / SOFTWARE hive）
+  src/img_bootplan.c     # 分区表/固件与 Windows 版本的兼容判定（boot.plan）
 )
 
 # ---- zlib（qcow2 压缩簇必需；安卓 NDK 自带或可交叉编译）----

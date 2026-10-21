@@ -13,6 +13,7 @@
 #include "img_iso.h"
 #include "img_recovery.h"
 #include "img_identify.h"      /* boot.check 用 */
+#include "img_bootplan.h"      /* boot.plan / bcd.create 的分区表判定 */
 #include "img_io.h"
 #include "img_fat32.h"
 #include "img_fat32_fs.h"
@@ -35,6 +36,17 @@ static int feat_unavail(img_result *out, const char *feat, const char *howto){
 #include "img_ntfs_fmt.h"
  #include "img_clone.h"
 #include "img_ntfs_fs.h"   /* part.scan / ntfs.list / ntfs.rename */
+typedef struct { img_io *io; } rd_io_t;
+static int rd_io(void *ud, uint64_t off, void *buf, size_t len){
+    rd_io_t *r=(rd_io_t*)ud;
+    return img_io_read_full(r->io,off,buf,len);
+}
+typedef struct { img_iso *iso; const char *path; } rd_iso_t;
+static int rd_iso(void *ud, uint64_t off, void *buf, size_t len){
+    rd_iso_t *r=(rd_iso_t*)ud;
+    return img_iso_read_range(r->iso,r->path,off,buf,len);
+}
+
 #include "img_host.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -1916,6 +1928,7 @@ static const img_arg A_BCDCREATE[] = {
     {"timeout",     IMG_A_U64,  false, "5",     "菜单等待秒数", NULL},
     {"family",      IMG_A_ENUM, false, "auto",  "代：auto(按盘里内核版本) | legacy(6.x) | modern(10.x)", NULL},
     {"keep-recovery", IMG_A_BOOL, false, "false", "保留模板里的 WinRE/ramdisk 对象（默认删，因为我们不建恢复分区）", NULL},
+    {"force",       IMG_A_BOOL, false, "false", "跳过分区表兼容性拦截（App 弹框确认后才传 true）", NULL},
     {"out",         IMG_A_STR,  false, NULL,    "另外存一份到本地文件（可选，便于对比/排查）", NULL},
 };
 static uint64_t pb_of(const img_parttable_t *t, uint64_t lba){
@@ -1999,17 +2012,49 @@ static int cmd_bcd_create(img_ctx *ctx, const img_args *in, img_result *out){
     else if(fs && strcasecmp(fs,"auto")){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","family","只接受 auto|legacy|modern",NULL); return IMG_EINVAL; }
 
     const char *fam_why="given";
-    if(fam==0){
-        img_winver_t v; char e2[128]="";
-        if(img_win_version(q,sys_lba,pb_of(t,sys_lba),&v,e2,sizeof e2)==IMG_OK){
-            int major = v.kernel_major ? v.kernel_major : atoi(v.current_version);
-            int minor = v.kernel_major ? v.kernel_minor : 0;
-            /* 分代不是"Win10 以上"：Vista=6.0、7=6.1 用 legacy；
-             * 8=6.2、8.1=6.3、10/11=10.0 都用 modern（BCD 元素相容，bootmgr 版本是 6.2+）。*/
-            bool legacy = (major < 6) || (major==6 && minor < 2);
-            fam = legacy ? (int)IMG_BCD_FAM_LEGACY : (int)IMG_BCD_FAM_MODERN;
-            fam_why="win.version";
-        } else { fam=(int)IMG_BCD_FAM_MODERN; fam_why="fallback(读不出版本，按 modern)"; }
+
+    /* ★ 读一次盘里的"真相"（版本 + 位数），既用来定 BCD 代，也用来做分区表拦截 */
+    int omaj=0, omin=0, obld=0; img_plan_arch oarch=IMG_PLAN_ARCH_UNKNOWN;
+    { img_winver_t v; char e2[128]="";
+      if(img_win_version(q,sys_lba,pb_of(t,sys_lba),&v,e2,sizeof e2)==IMG_OK){
+          omaj = v.kernel_major ? v.kernel_major : atoi(v.current_version);
+          omin = v.kernel_major ? v.kernel_minor : 0;
+          obld = v.consensus_build ? v.consensus_build : v.current_build;
+          img_ntfs_fs *fs=img_ntfs_mount_rw(q,sys_lba,pb_of(t,sys_lba));
+          if(fs){
+              oarch = (img_ntfs_path_exists(fs,"/Windows/SysWOW64/ntdll.dll")==true)
+                    ? IMG_PLAN_ARCH_X64 : IMG_PLAN_ARCH_X86;
+              img_ntfs_umount(fs);
+          }
+          if(fam==0){
+              /* 分代不是"Win10 以上"：Vista=6.0、7=6.1 用 legacy；
+               * 8=6.2、8.1=6.3、10/11=10.0 都用 modern（BCD 元素相容，bootmgr 是 6.2+）。*/
+              bool legacy = (omaj < 6) || (omaj==6 && omin < 2);
+              fam = legacy ? (int)IMG_BCD_FAM_LEGACY : (int)IMG_BCD_FAM_MODERN;
+              fam_why="win.version";
+          }
+      } else if(fam==0){ fam=(int)IMG_BCD_FAM_MODERN; fam_why="fallback(读不出版本，按 modern)"; }
+    }
+
+    /* ★ 分区表拦截（三层里的前两层）：
+     *    做不到 → 直接拒；能做到但危险 → 要 --force（App 弹框后才给）。
+     *    读不出版本时不拦（新盘还没灌系统，用户自己选的格式，工具不该猜）。*/
+    if(obld>0){
+        img_boot_plan_in_t pin; memset(&pin,0,sizeof pin);
+        pin.os_major=omaj; pin.os_minor=omin; pin.os_build=obld;
+        pin.arch=oarch; pin.want_gpt=uefi;
+        img_boot_plan_t pl; memset(&pl,0,sizeof pl);
+        img_boot_plan(&pin,&pl);
+        if(pl.verdict==IMG_PLAN_DENIED){
+            img_result_fail(out,IMG_EINVAL,"BOOT-FORMAT-UNSUPPORTED",uefi?"table=gpt":"table=mbr",
+                            pl.detail,"换分区表重来（img.create --table=...）");
+            return IMG_EINVAL;
+        }
+        if(pl.verdict==IMG_PLAN_NEEDS_CONFIRM && !img_args_bool(in,"force",false)){
+            img_result_fail(out,IMG_ENOTSUP,"BOOT-FORMAT-NEEDS-CONFIRM",uefi?"table=gpt":"table=mbr",
+                            pl.detail,"用户确认后带 --force=true 再调一次");
+            return IMG_ENOTSUP;
+        }
     }
 
     img_bcd_create_req_t rq; memset(&rq,0,sizeof rq);
@@ -2078,6 +2123,139 @@ static int cmd_bcd_create(img_ctx *ctx, const img_args *in, img_result *out){
 
 
 
+
+/* ================= boot.plan：装前/装后问一句"这套组合行不行" =================
+ * 设计（用户 2026-10-21 拍板）：
+ *   ① 做不到的（32 位 + UEFI、XP 没有 BCD）→ 工具直接拒，给稳定错误码；
+ *   ② 能做到但有风险的（Vista/7 的 UEFI）→ 回 needs_confirm，让 App 弹框，
+ *      用户确认后 App 再带 --force 调 bcd.create；
+ *   ③ 政策与文案在 App 层，库里零文案（只出 reason 码 + 一句中文 detail 便于调试）。
+ */
+static const img_arg A_BOOTPLAN[] = {
+    {"iso",   IMG_A_STR,  false, NULL,   "ISO / WIM / ESD 路径（装之前问）", NULL},
+    {"index", IMG_A_U64,  false, "0",    "只看第 N 个映像（0=第一个）", NULL},
+    {"img",   IMG_A_STR,  false, NULL,   "已装好的镜像（装之后问；与 --lba 一起给）", NULL},
+    {"lba",   IMG_A_U64,  false, NULL,   "系统分区起始 LBA", NULL},
+    {"table", IMG_A_ENUM, false, "auto", "要判定的分区表：gpt | mbr | auto(两种都答)", NULL},
+};
+
+/* 从 ISO/WIM/ESD 里读第一个（或第 N 个）映像的版本与架构 */
+static int plan_probe_src(const char *src, int want_index,
+                          int *maj, int *min, int *bld, img_plan_arch *arch,
+                          char *err, size_t errcap){
+    *maj=*min=*bld=0; *arch=IMG_PLAN_ARCH_UNKNOWN;
+    img_wim_image_t imgs[32]; int n=0;
+    size_t sl=strlen(src);
+    bool is_iso = (sl>4 && !strcasecmp(src+sl-4,".iso"));
+    int rc;
+    if(is_iso){
+        img_iso *iso=NULL;
+        rc=img_iso_open_path(&iso,src,err,errcap);
+        if(rc!=IMG_OK) return rc;
+        const char *cands[2]={"/sources/install.wim","/sources/install.esd"};
+        const char *hit=NULL; uint64_t fsz=0; bool d=false;
+        for(int i=0;i<2;i++) if(img_iso_stat(iso,cands[i],&fsz,&d)==IMG_OK && !d){ hit=cands[i]; break; }
+        if(!hit){ img_iso_close(iso); snprintf(err,errcap,"ISO 里没有 sources\\install.wim"); return IMG_ENOENT; }
+        rd_iso_t r={iso,hit};
+        rc=img_wim_identify(rd_iso,&r,imgs,32,&n,err,errcap);
+        img_iso_close(iso);
+    } else {
+        img_io *io=img_io_open_existing(src,false);
+        if(!io){ snprintf(err,errcap,"文件打不开：%s",src); return IMG_ENOENT; }
+        rd_io_t r={io};
+        rc=img_wim_identify(rd_io,&r,imgs,32,&n,err,errcap);
+        img_io_close(io);
+    }
+    if(rc!=IMG_OK || n<=0) return rc!=IMG_OK?rc:IMG_ENOENT;
+    const img_wim_image_t *pick=&imgs[0];
+    if(want_index>0){
+        for(int i=0;i<n;i++) if(imgs[i].index==want_index){ pick=&imgs[i]; break; }
+    }
+    *maj=pick->major; *min=pick->minor; *bld=pick->build;
+    *arch=img_boot_plan_arch_from_wim(pick->arch);
+    return IMG_OK;
+}
+
+static int cmd_boot_plan(img_ctx *ctx, const img_args *in, img_result *out){
+    const char *iso=img_args_get(in,"iso"), *imgp=img_args_get(in,"img");
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *tb=img_args_get(in,"table"); if(!tb||!*tb) tb="auto";
+    if((!iso||!*iso) && (!imgp||!*imgp)){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","iso/img","要么给 --iso（装前问），要么给 --img+--lba（装后问）",NULL);
+        return IMG_EINVAL;
+    }
+    int maj=0,min=0,bld=0; img_plan_arch arch=IMG_PLAN_ARCH_UNKNOWN;
+    char err[256]="";
+    if(iso && *iso){
+        if(plan_probe_src(iso,(int)img_args_u64(in,"index",0),&maj,&min,&bld,&arch,err,sizeof err)!=IMG_OK){
+            img_result_fail(out,IMG_ENOENT,"WIM-NOTFOUND",iso,err[0]?err:"读不到映像版本",NULL); return IMG_ENOENT;
+        }
+    } else {
+        if(!lba){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","--img 要配 --lba",NULL); return IMG_EINVAL; }
+        img_qcow2 *q=img_ctx_qcow2(ctx);
+        if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+        img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+        if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+        uint64_t pb=0;
+        for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+            if(t->parts[i].used && t->parts[i].first_lba==lba) pb=(t->parts[i].last_lba-t->parts[i].first_lba+1)*512;
+        if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在",NULL); return IMG_EINVAL; }
+        img_winver_t v;
+        if(img_win_version(q,lba,pb,&v,err,sizeof err)!=IMG_OK){
+            img_result_fail(out,rc,"PART-FS-BAD",NULL,err[0]?err:"读不出版本",NULL); return IMG_ENOENT;
+        }
+        maj = v.kernel_major ? v.kernel_major : atoi(v.current_version);
+        min = v.kernel_minor;
+        bld = v.consensus_build ? v.consensus_build : v.current_build;
+        /* 架构：x64/arm64 一定有 SysWOW64，x86 没有（够用的判据，且便宜） */
+        img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
+        if(fs){
+            arch = (img_ntfs_path_exists(fs,"/Windows/SysWOW64/ntdll.dll")==true)
+                 ? IMG_PLAN_ARCH_X64 : IMG_PLAN_ARCH_X86;
+            img_ntfs_umount(fs);
+        }
+    }
+
+    const char *archname = arch==IMG_PLAN_ARCH_X86?"x86" : arch==IMG_PLAN_ARCH_X64?"x64"
+                        : arch==IMG_PLAN_ARCH_ARM64?"arm64" : "unknown";
+    char osver[32]; snprintf(osver,sizeof osver,"%d.%d.%d",maj,min,bld);
+    img_boot_plan_in_t pin; memset(&pin,0,sizeof pin);
+    pin.os_major=maj; pin.os_minor=min; pin.os_build=bld; pin.arch=arch;
+
+    img_boot_plan_t pm, pg; memset(&pm,0,sizeof pm); memset(&pg,0,sizeof pg);
+    pin.want_gpt=false; img_boot_plan(&pin,&pm);
+    pin.want_gpt=true;  img_boot_plan(&pin,&pg);
+
+    img_result_str(out,"os_version",osver);
+    img_result_str(out,"os_arch",archname);
+    if(bld>0){
+        img_boot_plan_t tmp; memset(&tmp,0,sizeof tmp);
+        pin.want_gpt=(tb && !strcasecmp(tb,"gpt")); img_boot_plan(&pin,&tmp);
+        if(tmp.os_name) img_result_str(out,"os_name",tmp.os_name);
+    }
+    if(tb && !strcasecmp(tb,"gpt")){
+        img_result_str(out,"asked","gpt");
+        img_result_str(out,"verdict",img_boot_plan_verdict_name(pg.verdict));
+        img_result_str(out,"reason",pg.reason);
+        img_result_u64(out,"secure_boot",(uint64_t)pg.secure_boot);
+    } else if(tb && !strcasecmp(tb,"mbr")){
+        img_result_str(out,"asked","mbr");
+        img_result_str(out,"verdict",img_boot_plan_verdict_name(pm.verdict));
+        img_result_str(out,"reason",pm.reason);
+        img_result_u64(out,"secure_boot",(uint64_t)pm.secure_boot);
+    } else {
+        img_result_str(out,"asked","auto");
+        /* auto：两种都答，App 照着灰按钮 */
+        img_result_str(out,"mbr_verdict",img_boot_plan_verdict_name(pm.verdict));
+        img_result_str(out,"mbr_reason",pm.reason);
+        img_result_str(out,"gpt_verdict",img_boot_plan_verdict_name(pg.verdict));
+        img_result_str(out,"gpt_reason",pg.reason);
+        img_result_u64(out,"gpt_secure_boot",(uint64_t)pg.secure_boot);
+        img_result_bool(out,"recommend_gpt",pg.recommend_gpt);
+    }
+    return IMG_OK;
+}
+
 /* ---------- qc.verify：qcow2 结构自检（别名/越界/坏 L2）---------- */
 static const img_arg A_QCVERIFY[] = {
     {"img", IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
@@ -2109,16 +2287,6 @@ static int cmd_qc_verify(img_ctx *ctx, const img_args *in, img_result *out){
  * ⚠ WIM 的 <NAME>/<VERSION> 是文本，第三方可以改；所以 win.version 还会去读
  *   盘里 ntoskrnl.exe 的 PE 版本资源（改了就开不了机）做交叉验证。*/
 
-typedef struct { img_io *io; } rd_io_t;
-static int rd_io(void *ud, uint64_t off, void *buf, size_t len){
-    rd_io_t *r=(rd_io_t*)ud;
-    return img_io_read_full(r->io,off,buf,len);
-}
-typedef struct { img_iso *iso; const char *path; } rd_iso_t;
-static int rd_iso(void *ud, uint64_t off, void *buf, size_t len){
-    rd_iso_t *r=(rd_iso_t*)ud;
-    return img_iso_read_range(r->iso,r->path,off,buf,len);
-}
 
 static const img_arg A_WIMID[] = {
     {"src",   IMG_A_STR, true,  NULL, "WIM / ESD / ISO 路径（ISO 会自动找 sources\\install.wim|esd）", NULL},
@@ -2315,6 +2483,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_QCVERIFY,(int)(sizeof A_QCVERIFY/sizeof A_QCVERIFY[0]), cmd_qc_verify},
     {"bcd.gen-uefi","1.0", "UEFI 换盘：按新盘 GUID 重写 BCD（= imggenbcd，同一份库实现）",
         A_BCDGEN,(int)(sizeof A_BCDGEN/sizeof A_BCDGEN[0]), cmd_bcd_gen_uefi},
+    {"boot.plan","1.0", "判定『这个系统能不能用 GPT/MBR 启动』（只读，不写盘；App 灰按钮/弹框的依据）",
+        A_BOOTPLAN,(int)(sizeof A_BOOTPLAN/sizeof A_BOOTPLAN[0]), cmd_boot_plan},
     {"boot.check","1.0", "引导链自检（= imgbc）：返回逐项结果 + 必需项失败数",
         A_BOOTCHECK,(int)(sizeof A_BOOTCHECK/sizeof A_BOOTCHECK[0]), cmd_boot_check},
     {"part.attr","1.0", "设 GPT 分区属性（恢复分区官方要求 0x8000000000000001）",
