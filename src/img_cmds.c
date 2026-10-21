@@ -1982,12 +1982,15 @@ static int cmd_bcd_create(img_ctx *ctx, const img_args *in, img_result *out){
     else if(fs && strcasecmp(fs,"auto")){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","family","只接受 auto|legacy|modern",NULL); return IMG_EINVAL; }
 
     const char *fam_why="given";
-    int major=0;
     if(fam==0){
         img_winver_t v; char e2[128]="";
         if(img_win_version(q,sys_lba,pb_of(t,sys_lba),&v,e2,sizeof e2)==IMG_OK){
-            major = v.kernel_major ? v.kernel_major : atoi(v.current_version);
-            fam = (major>=10) ? (int)IMG_BCD_FAM_MODERN : (int)IMG_BCD_FAM_LEGACY;
+            int major = v.kernel_major ? v.kernel_major : atoi(v.current_version);
+            int minor = v.kernel_major ? v.kernel_minor : 0;
+            /* 分代不是"Win10 以上"：Vista=6.0、7=6.1 用 legacy；
+             * 8=6.2、8.1=6.3、10/11=10.0 都用 modern（BCD 元素相容，bootmgr 版本是 6.2+）。*/
+            bool legacy = (major < 6) || (major==6 && minor < 2);
+            fam = legacy ? (int)IMG_BCD_FAM_LEGACY : (int)IMG_BCD_FAM_MODERN;
             fam_why="win.version";
         } else { fam=(int)IMG_BCD_FAM_MODERN; fam_why="fallback(读不出版本，按 modern)"; }
     }

@@ -123,6 +123,46 @@ static bool to_ntfs(const char *s, ntfschar **out, size_t *outlen){
 }
 
 /* 逐级查找（不创建）。返回找到的 inode（调用方 ntfs_inode_close），NULL=不存在 */
+
+/* ---------- 子项查找：先精确，再忽略大小写 ----------
+ * Windows 路径不区分大小写，而 ntfs_inode_lookup_by_name() 是精确匹配。
+ * 实测：Win7 装完是 \Windows\Boot、\Windows\System32；写 /Windows/boot 直接
+ *       FAT-LS-FAIL（看起来像"盘坏了/版本读不出"，其实是大小写）。
+ * 第三方精简镜像大小写更乱，所以这里兜一层：精确失败就扫一遍目录，
+ * 用 NTFS 自己的 upcase 表比较（对 Unicode 也正确，不是只认 ASCII）。 */
+typedef struct {
+    const ntfschar *want; size_t want_len;
+    const ntfschar *upcase; u32 upcase_len;
+    MFT_REF ref; int found;
+} ci_ctx;
+
+static int ci_fill(void *ud, const ntfschar *name, const int name_len, const int name_type,
+                   const s64 pos, const MFT_REF mref, const unsigned dt_type){
+    (void)pos; (void)dt_type;
+    ci_ctx *c=(ci_ctx*)ud;
+    if(c->found || !name || name_len<=0) return 0;
+    if(name_type==FILE_NAME_DOS) return 0;          /* 跳过 8.3 短名 */
+    if(ntfs_names_are_equal(c->want,(size_t)c->want_len, name,(size_t)name_len,
+                            1, c->upcase, c->upcase_len)){
+        c->ref=mref; c->found=1;
+    }
+    return 0;
+}
+
+static bool lookup_child(ntfs_volume *vol, ntfs_inode *dir,
+                         const ntfschar *u, size_t ul, MFT_REF *out){
+    errno=0;
+    MFT_REF ref=ntfs_inode_lookup_by_name(dir, u, ul);
+    if(mftref_ok(ref)){ *out=ref; return true; }
+    if(!vol || !vol->upcase || !vol->upcase_len) return false;
+    ci_ctx c; memset(&c,0,sizeof c);
+    c.want=u; c.want_len=ul; c.upcase=vol->upcase; c.upcase_len=vol->upcase_len;
+    s64 pos=0;
+    if(ntfs_readdir(dir,&pos,&c,ci_fill)<0 && !c.found) return false;
+    if(!c.found) return false;
+    *out=c.ref; return true;
+}
+
 static ntfs_inode *lookup(ntfs_volume *vol, const char *path, ntfs_inode **parent_out){
     ntfs_inode *cur = ntfs_inode_open(vol, FILE_root);
     if(parent_out) *parent_out = NULL;
@@ -134,10 +174,11 @@ static ntfs_inode *lookup(ntfs_volume *vol, const char *path, ntfs_inode **paren
         ntfschar *u=NULL; size_t ul=0;
         if(!to_ntfs(comp,&u,&ul)){ ntfs_inode_close(cur); return NULL; }
         errno=0;
-        MFT_REF ref = ntfs_inode_lookup_by_name(cur, u, ul);
-        int lerr = (ref==(MFT_REF)-1) ? errno : 0;
+        MFT_REF ref = 0;
+        bool got = lookup_child(vol, cur, u, ul, &ref);
+        int lerr = got ? 0 : (errno?errno:ENOENT);
         free(u);
-        if(!mftref_ok(ref)){
+        if(!got){
             ntfs_inode_close(cur);
             if(parent_out && *parent_out){ ntfs_inode_close(*parent_out); *parent_out=NULL; }
             if(lerr!=0 && lerr!=ENOENT && getenv("IMG_NTFS_FS_DEBUG"))
@@ -195,8 +236,9 @@ int img_ntfs_mkdir_p(img_ntfs_fs *fs, const char *abs_path){
             ntfs_inode_close(cur); return IMG_EINVAL;
         }
         errno=0;
-        MFT_REF ref = ntfs_inode_lookup_by_name(cur, u, ul);
-        int lerr = (ref==(MFT_REF)-1) ? errno : 0;
+        MFT_REF ref = 0;
+        bool got = lookup_child(fs->vol, cur, u, ul, &ref);
+        int lerr = got ? 0 : (errno?errno:ENOENT);
         ntfs_inode *next = NULL;
         if(getenv("IMG_NTFS_FS_DEBUG"))
             fprintf(stderr,"  [dbg] idx=%d comp='%s' ref=%llu errno=%d\n",
