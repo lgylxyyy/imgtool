@@ -106,6 +106,32 @@ int img_qcow2_expand(img_qcow2 *q, uint64_t new_size, img_prog *prog);
 /* 把信息渲染成 JSON（前端面板直接用） */
 int img_qcow2_info_json(const img_qcow2 *q, char *buf, int cap);
 
+/* ------------------------------------------------------------------ */
+/* qcow2 一致性扫描（qc.verify / 写前自检）                             */
+/* ------------------------------------------------------------------ */
+/* 为什么要有它：进程被杀（手机上必然发生）时，qcow2 的 L1/L2/refcount 可能
+ * 只写了一半。下次打开再往里写，如果分配水位算错、或 L2 里已经有指向新簇的
+ * 条目，就会出现"两个 guest 区指向同一个 host 簇"（别名）——
+ * 表现是 NTFS 说"索引块签名错误"（实测 Win8 x86 灌 WIM 撞过一次）。
+ * 我们不猜，直接扫一遍 L1/L2：别名、越界、L2 表本身不可读，都能查出来。
+ *
+ * scan 的 O(#L2 表)：128 GiB 镜像 ≈ 256 张 L2 表 ≈ 16 MB 读 —— 打开一次可接受。*/
+typedef struct {
+    uint64_t guest_bytes;        /* 虚拟大小 */
+    uint64_t guest_clusters;     /* 虚拟簇数 */
+    uint64_t l2_tables;          /* 实际存在的 L2 表数 */
+    uint64_t referenced;         /* 被引用的 host 簇数（含 L2 表自身）*/
+    uint64_t max_ref_end;        /* 被引用簇的最大结束偏移 → 分配水位下限 */
+    uint64_t duplicate_refs;     /* ★两个 guest 簇指向同一 host 簇（别名）*/
+    uint64_t out_of_range;       /* 指向文件外 / 未对齐 */
+    uint64_t bad_l2;             /* L2 表读不出来（偏移非法/读失败）*/
+} img_qcow2_scan_t;
+
+/* 扫描（只读，不改文件）。返回 IMG_OK 表示扫完了；扫描结果里的计数才是结论。*/
+int img_qcow2_scan(img_qcow2 *q, img_qcow2_scan_t *out);
+
+
+
 #ifdef __cplusplus
 }
 #endif

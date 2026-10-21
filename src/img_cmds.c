@@ -2060,6 +2060,32 @@ static int cmd_bcd_create(img_ctx *ctx, const img_args *in, img_result *out){
 }
 
 
+
+/* ---------- qc.verify：qcow2 结构自检（别名/越界/坏 L2）---------- */
+static const img_arg A_QCVERIFY[] = {
+    {"img", IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
+};
+static int cmd_qc_verify(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)in;
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    img_qcow2_scan_t sc; int rc=img_qcow2_scan(q,&sc);
+    if(rc!=IMG_OK){ img_result_fail(out,rc,"QC-OPEN-FAIL",img_ctx_path(ctx),"扫描失败",NULL); return rc; }
+    img_result_u64(out,"guest_bytes",sc.guest_bytes);
+    img_result_u64(out,"guest_clusters",sc.guest_clusters);
+    img_result_u64(out,"l2_tables",sc.l2_tables);
+    img_result_u64(out,"referenced",sc.referenced);
+    img_result_u64(out,"duplicate_refs",sc.duplicate_refs);
+    img_result_u64(out,"out_of_range",sc.out_of_range);
+    img_result_u64(out,"bad_l2",sc.bad_l2);
+    bool bad = sc.duplicate_refs || sc.out_of_range || sc.bad_l2;
+    img_result_bool(out,"clean",!bad);
+    if(bad)
+        img_result_str(out,"note","镜像里有别名/越界簇：能读，但别往里写（会串数据）。"
+                                  "重建或用 qemu-img check 看细节；我们写盘前已自动抬高分配水位。");
+    return IMG_OK;
+}
+
 /* ================= 版本识别：从【内容】读，不信文件名 =================
  * 用户点名的需求：挂载 ESD/WIM/ISO 时能直接看到是哪个 Windows 版本，
  * 从而判断"这张盘/这个镜像到底是不是我以为的那个"。
@@ -2268,6 +2294,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_BCDBUILD,(int)(sizeof A_BCDBUILD/sizeof A_BCDBUILD[0]), cmd_bcd_build},
     {"bcd.create","1.0", "用内置模板建一张能启动的 BCD（Vista~11 / BIOS+UEFI / 32+64 位；不要参考盘）",
         A_BCDCREATE,(int)(sizeof A_BCDCREATE/sizeof A_BCDCREATE[0]), cmd_bcd_create},
+    {"qc.verify","1.0", "qcow2 结构自检（别名/越界/坏 L2）—— 进程被杀后怀疑盘坏了就跑它",
+        A_QCVERIFY,(int)(sizeof A_QCVERIFY/sizeof A_QCVERIFY[0]), cmd_qc_verify},
     {"bcd.gen-uefi","1.0", "UEFI 换盘：按新盘 GUID 重写 BCD（= imggenbcd，同一份库实现）",
         A_BCDGEN,(int)(sizeof A_BCDGEN/sizeof A_BCDGEN[0]), cmd_bcd_gen_uefi},
     {"boot.check","1.0", "引导链自检（= imgbc）：返回逐项结果 + 必需项失败数",

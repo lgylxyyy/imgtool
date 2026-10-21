@@ -118,10 +118,66 @@ img_qcow2 *img_qcow2_open(img_io *io, const img_qcow2_opts_t *o){
 
 void img_qcow2_close(img_qcow2 *q){
     if(!q) return;
+    /* ★ 关盘前落盘：UI 说"完成"的时候，数据必须真的在介质上。
+     *   手机上进程被杀是常态，不做这步，"done" 就只是"写进了页缓存"。*/
+    if(q->writable && q->io) img_io_sync(q->io);
     free(q->l1); free(q->l2_cache); free(q);
 }
 const img_qcow2_header_t *img_qcow2_header(const img_qcow2 *q){ return q?&q->h:NULL; }
 uint64_t img_qcow2_size(const img_qcow2 *q){ return q?q->h.size:0; }
+
+
+/* ---------- 一致性扫描（qc.verify / 写前自检） ---------- */
+int img_qcow2_scan(img_qcow2 *q, img_qcow2_scan_t *out){
+    if(!q || !out || !q->io) return IMG_EINVAL;
+    memset(out, 0, sizeof *out);
+    uint64_t cs = q->h.cluster_size;
+    if(!cs) return IMG_EFORMAT;
+    uint64_t fsz = img_io_size(q->io);
+    out->guest_bytes = q->h.size;
+    out->guest_clusters = (q->h.size + cs - 1) / cs;
+
+    uint64_t ncl = fsz / cs + 2;
+    uint8_t *seen = calloc(1, (size_t)((ncl + 7) / 8 ? (ncl + 7) / 8 : 1));
+    uint8_t *tbl  = malloc((size_t)cs);
+    if(!seen || !tbl){ free(seen); free(tbl); return IMG_ENOMEM; }
+
+    uint64_t l2n = cs / 8;
+    for(uint64_t i = 0; i < q->h.l1_size; i++){
+        uint64_t e = be64(q->l1 + i * 8);
+        uint64_t l2 = e & QCOW2_OFFSET_MASK;
+        if(!l2) continue;
+        out->l2_tables++;
+        /* 记一个 host 簇（L2 表本身也算），顺带查别名/越界 */
+        #define MARK_CLUSTER(off) do{                                       \
+            uint64_t _o = (off);                                            \
+            if((_o % cs) != 0 || _o + cs > fsz){ out->out_of_range++; }     \
+            else {                                                          \
+                uint64_t _i = _o / cs;                                      \
+                if(_i < ncl){                                               \
+                    if(seen[_i >> 3] & (uint8_t)(1u << (_i & 7))) out->duplicate_refs++; \
+                    else seen[_i >> 3] |= (uint8_t)(1u << (_i & 7));         \
+                    out->referenced++;                                      \
+                    if(_o + cs > out->max_ref_end) out->max_ref_end = _o + cs; \
+                } else out->out_of_range++;                                 \
+            }                                                               \
+        }while(0)
+        MARK_CLUSTER(l2);
+        if((l2 % cs) || l2 + cs > fsz){ out->bad_l2++; continue; }
+        if(img_io_read_full(q->io, l2, tbl, (size_t)cs) != IMG_OK){ out->bad_l2++; continue; }
+        for(uint64_t k = 0; k < l2n; k++){
+            uint64_t le = be64(tbl + k * 8);
+            if(!le) continue;
+            if(le & QCOW2_COMPRESSED_BIT) continue;   /* 压缩簇：偏移字段另有含义 */
+            uint64_t d = le & QCOW2_OFFSET_MASK;
+            if(!d) continue;
+            MARK_CLUSTER(d);
+        }
+        #undef MARK_CLUSTER
+    }
+    free(seen); free(tbl);
+    return IMG_OK;
+}
 
 /* ---------- 读取 ---------- */
 

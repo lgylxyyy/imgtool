@@ -13,6 +13,7 @@
  *   overwrite → sha256 应恰好变成新值
  */
 #include "img_qcow2_int.h"
+#include "img_event.h"
 #include "img_host.h"
 #include <stdlib.h>
 #include <string.h>
@@ -262,6 +263,31 @@ int img_qcow2_write_init(img_qcow2 *q){
     q->alloc_next = align_up(img_io_size(q->io), cs);
     if(q->alloc_next == 0) q->alloc_next = cs;
     q->total_clusters = (img_io_size(q->io) + cs - 1) / cs;
+
+    /* ★ 写前自检：扫一遍 L1/L2。
+     *   ① 分配水位不能只看文件尾 —— 如果进程被杀时"数据簇写了、文件却短了一截"，
+     *      继续从文件尾追加就会覆盖别处引用到的簇（别名）→ 上层看到"索引块签名错"。
+     *      改成 max(文件尾, 已引用簇末尾)。
+     *   ② 已经有别名/越界的镜像，先在日志里喊一声，别让它静默扩散。*/
+    img_qcow2_scan_t sc;
+    if(img_qcow2_scan(q, &sc) == IMG_OK){
+        q->scan_done = true;
+        q->scan_dup = sc.duplicate_refs;
+        q->scan_oor = sc.out_of_range + sc.bad_l2;
+        q->scan_max_end = sc.max_ref_end;
+        if(sc.max_ref_end > q->alloc_next) q->alloc_next = align_up(sc.max_ref_end, cs);
+        if(sc.duplicate_refs || q->scan_oor){
+            img_ev e;
+            if(img_ev_init(&e, IMG_LV_WARN, "qcow2", "inconsistent", IMG_OK,
+                           "镜像里有别名/越界簇：写入前已把分配水位抬高，避免继续写坏"))
+            {
+                img_ev_u64(&e, "duplicate_refs", sc.duplicate_refs);
+                img_ev_u64(&e, "out_of_range", q->scan_oor);
+                img_ev_u64(&e, "l2_tables", sc.l2_tables);
+                img_ev_emit(&e);
+            }
+        }
+    }
     q->writable = true;
     return IMG_OK;
 }

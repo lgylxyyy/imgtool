@@ -35,6 +35,9 @@ struct img_qcow2 {
     uint64_t entries_per_rc_block;  /* cluster_size / (refcount_bits/8) */
     uint64_t alloc_next;            /* 下一个可分配 host 偏移（cluster 对齐，= 追加式分配水位）*/
     uint64_t total_clusters;        /* 已用 host 簇数（用于 refcount 布局推算） */
+    /* 写前自检结果（img_qcow2_write_init 里扫一遍 L1/L2 得到）*/
+    bool     scan_done;
+    uint64_t scan_dup, scan_oor, scan_max_end;
 };
 
 /* 内部工具（img_qcow2.c 提供） */
