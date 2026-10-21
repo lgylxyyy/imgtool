@@ -127,7 +127,7 @@ static bool to_ntfs(const char *s, ntfschar **out, size_t *outlen){
 /* ---------- 子项查找：先精确，再忽略大小写 ----------
  * Windows 路径不区分大小写，而 ntfs_inode_lookup_by_name() 是精确匹配。
  * 实测：Win7 装完是 \Windows\Boot、\Windows\System32；写 /Windows/boot 直接
- *       FAT-LS-FAIL（看起来像"盘坏了/版本读不出"，其实是大小写）。
+ *       FAT-LS-FAIL（看起来像"盘坏了/版本无法读取"，其实是大小写）。
  * 第三方精简镜像大小写更乱，所以这里兜一层：精确失败就扫一遍目录，
  * 用 NTFS 自己的 upcase 表比较（对 Unicode 也正确，不是只认 ASCII）。 */
 typedef struct {

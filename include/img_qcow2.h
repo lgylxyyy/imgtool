@@ -124,7 +124,7 @@ typedef struct {
     uint64_t max_ref_end;        /* 被引用簇的最大结束偏移 → 分配水位下限 */
     uint64_t duplicate_refs;     /* ★两个 guest 簇指向同一 host 簇（别名）*/
     uint64_t out_of_range;       /* 指向文件外 / 未对齐 */
-    uint64_t bad_l2;             /* L2 表读不出来（偏移非法/读失败）*/
+    uint64_t bad_l2;             /* L2 表无法读取来（偏移非法/读失败）*/
 } img_qcow2_scan_t;
 
 /* 扫描（只读，不改文件）。返回 IMG_OK 表示扫完了；扫描结果里的计数才是结论。*/

@@ -21,7 +21,7 @@ int main(int argc,char**argv){
     img_log_cli(argc, argv, "imgfixboot");
     if(argc<3){ fprintf(stderr,"用法: %s <dst> <lba> [--tpl <img> <lba>] [--verify]\n",argv[0]); return 2; }
     uint64_t dlba=strtoull(argv[2],NULL,0);
-    img_qcow2 *d=op(argv[1]); if(!d){printf("❌ 打不开 dst\n");return 1;}
+    img_qcow2 *d=op(argv[1]); if(!d){printf("❌ 无法打开 dst\n");return 1;}
     const char *tp=NULL; uint64_t tlba=0; bool verify=false;
     for(int i=3;i<argc;i++){
         if(!strcmp(argv[i],"--tpl") && i+2<argc){ tp=argv[i+1]; tlba=strtoull(argv[i+2],NULL,0); i+=2; }
@@ -29,14 +29,14 @@ int main(int argc,char**argv){
     }
     if(verify){
         if(!tp){ printf("❌ --verify 需要 --tpl\n"); return 2; }
-        img_qcow2 *t=op(tp); if(!t){printf("❌ 打不开 tpl\n");return 1;}
+        img_qcow2 *t=op(tp); if(!t){printf("❌ 无法打开 tpl\n");return 1;}
         char det[256];
         int rc=img_fixboot_verify(d,dlba,t,tlba,det,sizeof det);
         printf("%s  %s\n", rc==IMG_OK?"✅ 引导代码与模板一致":"❌ 不一致", det);
         return rc==IMG_OK?0:1;
     }
     if(!tp){ printf("❌ 需要 --tpl <img> <lba>\n"); return 2; }
-    img_qcow2 *t=op(tp); if(!t){printf("❌ 打不开 tpl\n");return 1;}
+    img_qcow2 *t=op(tp); if(!t){printf("❌ 无法打开 tpl\n");return 1;}
     img_span sp;
     img_span_prep(&sp,"fixboot","write","写入 NTFS 引导代码（$Boot 0..9）");
     img_span_kv_u64(&sp,"dst_lba",dlba);

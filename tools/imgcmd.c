@@ -20,7 +20,7 @@
 #include <string.h>
 #include <unistd.h>   /* isatty / write */
 #include <fcntl.h>    /* open */
-#include <sys/stat.h> /* stat：判断日志到底落没落盘 */
+#include <sys/stat.h> /* stat：判断日志到底落尚未写入介质 */
 
 /* ================= CLI 专用文案表（中/英） ================= */
 static char g_lang[8] = "zh";
@@ -51,12 +51,12 @@ static const ETX E_TEXT[] = {                      /* 错误码 → 原因 / 建
     {"FAT-DIR-NOTFOUND","目录不存在","Directory does not exist",
                  "核对路径（FAT 不区分大小写，但要写全名）","Check the path (case-insensitive, but needs the full name)"},
     {"FAT-ENTRY-NOTFOUND","要操作的名字不在目录里（可能已被移动或拼写有误）","The entry does not exist (moved already, or a typo)",
-                 "先用 ntfs.list 看一眼目录里有什么","List the directory first (ntfs.list) to see what's there"},
+                 "先用 ntfs.list 查看目录里有什么","List the directory first (ntfs.list) to see what's there"},
     {"FAT-RM-FAIL","删除失败","Failed to delete",
                  "只允许删空目录；非空请先删掉里面的文件","Only empty directories can be removed"},
-    {"SRC-NOTFOUND","源文件打不开（不存在或无权限）","Cannot open the source file",
+    {"SRC-NOTFOUND","源文件无法打开（不存在或无权限）","Cannot open the source file",
                  "检查路径与权限","Check the path and permissions"},
-    {"IMG-OPEN-FAIL","镜像打不开","Cannot open the image",
+    {"IMG-OPEN-FAIL","镜像无法打开","Cannot open the image",
                  "检查路径/权限，确认文件存在","Check path/permission, make sure the file exists"},
     {"QC-OPEN-FAIL","不是合法的 qcow2（魔数或版本不符）","Not a valid qcow2",
                  "确认是本工具创建的镜像；或先用 imgq2test 校验","Created by this tool? Or verify with imgq2test"},
@@ -68,7 +68,7 @@ static const ETX E_TEXT[] = {                      /* 错误码 → 原因 / 建
                  "检查参数名/类型；用 --help=<命令> 看用法","Check names/types; see --help=<command>"},
     {"CMD-FAILED","命令执行失败","Command failed",
                  "看日志里的失败行","See the fail line in the log"},
-    {"WIM-NOTFOUND","WIM/ESD 打不开","Cannot open the WIM/ESD",
+    {"WIM-NOTFOUND","WIM/ESD 无法打开","Cannot open the WIM/ESD",
                  "先用 imgwimls 列出索引","List indexes first with imgwimls"},
     {"WIM-IDX-INVALID","镜像索引不存在","Image index does not exist",
                  "先用 imgwimls 列出索引，再带 --index=N","List indexes first, then pass --index=N"},
@@ -87,12 +87,12 @@ static const ETX E_TEXT[] = {                      /* 错误码 → 原因 / 建
     {"CMD-CANCELLED","操作已取消（用户点了停止）","Operation cancelled by the user",
                  "目标分区/文件可能停在半写状态，请重做该步骤","The target may be half-written; redo this step"},
     /* ↓ 2026-10-20 补齐：这些码由命令表返回，之前 CLI 卡片只会显示"操作失败/重试" */
-    {"HOST-OPEN-FAIL","宿主文件打不开（不存在或无权限）","Cannot open the host file (missing or no permission)",
+    {"HOST-OPEN-FAIL","宿主文件无法打开（不存在或无权限）","Cannot open the host file (missing or no permission)",
                  "检查路径与权限；Android 上 assets 里的参考件要先解到 cacheDir","Check the path/permission; extract asset references to cacheDir first"},
-    {"IMG-FORMAT","镜像格式不对或已损坏（能打开但读不出/写不了）","Invalid or corrupt image (opens but won't read/write)",
+    {"IMG-FORMAT","镜像格式不对或已损坏（能打开但无法读取/写不了）","Invalid or corrupt image (opens but won't read/write)",
                  "用 qemu-img check / imgq2test 校验镜像，必要时换备份","Verify with qemu-img check / imgq2test; fall back to a backup"},
     {"PART-WRITE-FAIL","分区表写入失败","Failed to write the partition table",
-                 "确认镜像可写（没带 --ro）、宿主空间足够、文件没被占用","Make sure the image is writable (no --ro), has free space, and isn't in use"},
+                 "确认镜像可写（缺少 --ro）、宿主空间足够、文件没被占用","Make sure the image is writable (no --ro), has free space, and isn't in use"},
     {"PART-FS-BAD","目标分区的文件系统不对（未格式化或不是预期类型）","The target partition has the wrong filesystem",
                  "先格式化该分区（NTFS 用 imgntfsfs format / FAT32 用 imgmkfs），再重试","Format the partition first (imgntfsfs format / imgmkfs), then retry"},
     {"PART-JSON-FAIL","分区表序列化失败（分区太多装不下，内部错误）","Failed to render the partition table JSON (too many entries; internal error)",
@@ -105,7 +105,7 @@ static const ETX E_TEXT[] = {                      /* 错误码 → 原因 / 建
                  "确认参考件完整未损坏（reference/bcd-reference-bios-win11.bin），并把日志发回来","Make sure the reference is intact (reference/bcd-reference-bios-win11.bin) and report the log"},
     {"BCD-WRITE-FAIL","写入 \\Boot\\BCD 失败","Failed to write \\Boot\\BCD",
                  "确认系统保留分区是 NTFS 且有空间","Make sure the system reserved partition is NTFS with free space"},
-    {"BOOT-FORMAT-UNSUPPORTED","这个 Windows 版本做不到用该分区表启动","This Windows version cannot boot from the requested partition table",
+    {"BOOT-FORMAT-UNSUPPORTED","该 Windows 版本不支持使用此分区表启动","This Windows version does not support booting from the requested partition table",
                  "32 位 Windows 没有 UEFI 启动路径；改用 MBR/BIOS（img.create --table=mbr）","32-bit Windows has no UEFI boot path; use MBR/BIOS (img.create --table=mbr)"},
     {"BOOT-FORMAT-NEEDS-CONFIRM","技术上能启动，但风险要用户确认（老系统的 UEFI/GPT）","Technically bootable, but the risk needs the user's confirmation (legacy OS on UEFI/GPT)",
                  "弹框让用户确认；确认后带 --force=true 再调一次","Ask the user to confirm, then retry with --force=true"},
@@ -178,7 +178,7 @@ static void on_event(const img_ev *e, void *ud){
                    lang_en()?"cancelled":"已取消");
         if(ms>=0) n+=snprintf(b+n,sizeof b-(size_t)n," (%lld ms)",ms);
     } else if(!strcmp(e->ev,"alive")){
-        if(ev_num_fld(e,"stuck_ms",-1)>=0) return;   /* 疑似卡死：不刷屏 */
+        if(ev_num_fld(e,"stuck_ms",-1)>=0) return;   /* 疑似无响应：不刷屏 */
         n=snprintf(b,sizeof b,"%s %s %s (iterations=%llu)",
                    lang_en()?"...":"…", lang_en()?"still running":"仍在进行", act,
                    (unsigned long long)ev_num_fld(e,"iterations",0));
@@ -358,7 +358,7 @@ int main(int argc, char **argv){
         if(logmax){ uint64_t v=strtoull(logmax,NULL,0); if(v>0) mb=(size_t)v; }
         int rc = !strcmp(log,"-") ? img_log_open_fd(2,img_log_level(),mb,1)
                                   : img_log_open(log,img_log_level(),mb,1);
-        if(rc!=IMG_OK) fprintf(stderr,"警告：日志打不开（%s），继续执行\n",log);
+        if(rc!=IMG_OK) fprintf(stderr,"警告：日志无法打开（%s），继续执行\n",log);
         else img_log_session("imgcmd", cmd, img_args_get(args,"img"), 0);   /* 会话头（工具/命令/镜像）*/
     }
 

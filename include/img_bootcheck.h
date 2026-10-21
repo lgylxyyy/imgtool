@@ -21,7 +21,7 @@ extern "C" {
 
 typedef enum {
     IMG_CK_INFO = 0,   /* 仅提示，不影响判定 */
-    IMG_CK_REQUIRED,   /* 不过 = 镜像大概率起不来 */
+    IMG_CK_REQUIRED,   /* 不过 = 镜像大概率无法启动 */
     IMG_CK_WARN,       /* 不过 = 能起但功能缺失 */
 } img_ck_level_t;
 
@@ -46,11 +46,11 @@ typedef enum { IMG_BOOT_AUTO = 0, IMG_BOOT_UEFI, IMG_BOOT_BIOS } img_boot_mode_t
 
 /* 检查项开关（默认 0）*/
 /* ★ 默认【不把"没有恢复分区"当失败/警告】—— 恢复分区是用户显式勾选才做的
- *   （DESIGN-OUTPUT.md §十一、手册 §15）。只有调用方明确"这张盘应当带恢复分区"时
+ *   （DESIGN-OUTPUT.md §十一、手册 §15）。只有调用方明确"该镜像应当带恢复分区"时
  *   才传这个位，此时缺恢复分区 = REQUIRED 未通过（rec.present）。*/
 #define IMG_BOOTCHK_EXPECT_RECOVERY  1u
 
-/* 跑完整检查。prog 可为 NULL。等价于 img_bootcheck_ex(q,mode,0,out,prog)。*/
+/* 运行完成整检查。prog 可为 NULL。等价于 img_bootcheck_ex(q,mode,0,out,prog)。*/
 int img_bootcheck(img_qcow2 *q, img_boot_mode_t mode, img_bootcheck_result_t *out, img_prog *prog);
 int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
                      img_bootcheck_result_t *out, img_prog *prog);

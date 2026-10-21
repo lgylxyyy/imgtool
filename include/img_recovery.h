@@ -2,7 +2,7 @@
  *
  * 层归属（DESIGN-OUTPUT.md §十一）：
  *   工具只提供"在 WIM/ESD 里找 WinRE、往分区里填、设 GPT 属性"这些机制；
- *   "建不建、多大、找不到怎么办"全归 App（默认不建 —— 用户 2026-10-19 定的政策）。
+ *   "建不建、多大、未找到怎么办"全归 App（默认不建 —— 用户 2026-10-19 定的政策）。
  */
 #ifndef IMG_RECOVERY_H
 #define IMG_RECOVERY_H
@@ -27,7 +27,7 @@ typedef struct {
 /* 在 WIM/ESD 里找 WinRE。
  *   index = 0 → 扫全部映像；>0 → 只看该索引。
  * 搜索顺序：\Windows\System32\Recovery\Winre.wim → \Recovery\WindowsRE\Winre.wim
- * 返回：IMG_OK（info->found 可能为 false）/ IMG_ENOENT（WIM 打不开）/ IMG_EINVAL。
+ * 返回：IMG_OK（info->found 可能为 false）/ IMG_ENOENT（WIM 无法打开）/ IMG_EINVAL。
  * ★ 只读：不落盘、不改源文件。*/
 int img_winre_find(const char *wim_path, int index, img_winre_info_t *info);
 

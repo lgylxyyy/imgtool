@@ -278,7 +278,7 @@ img_ctx *img_ctx_open(const char *image_path, bool writable, bool check_size,
      *   过去会留下 0 字节垃圾镜像 + 报 QC-OPEN-FAIL（像"镜像损坏"）。现在直接 IMG-OPEN-FAIL。
      *   建盘是 imglayout mk / img_clone 的职责，它们仍用 img_io_open_path()。*/
     c->io=img_io_open_existing(c->path,writable);
-    if(!c->io){ if(err) snprintf(err,errcap,"打不开镜像：%s（不存在或不是普通文件）",c->path); free(c); return NULL; }
+    if(!c->io){ if(err) snprintf(err,errcap,"无法打开镜像：%s（不存在或不是普通文件）",c->path); free(c); return NULL; }
     return c;
 }
 void img_ctx_close(img_ctx *c){
@@ -332,7 +332,7 @@ int img_cmd_exec(const char *name, img_ctx *ctx, const img_args *in, img_result 
         return IMG_ENOENT;
     }
     /* ★ 镜像路径的权威来源是 ctx（App 先打开镜像再调命令）。
-     *   所以：ctx 存在而 args 里没给 img 时，自动注入 —— 否则每个命令都得让
+     *   所以：ctx 存在而 args 里未提供 img 时，自动注入 —— 否则每个命令都得让
      *   App 重复传一遍路径，还会出现"ctx 是 A 盘、--img 是 B 盘"的不一致。*/
     img_args *tmp=NULL;
     const img_args *use=in;
@@ -405,7 +405,7 @@ int img_cmd_list_json(char *buf,int cap){
         if(w.p<w.end)*w.p++='}';
     }
     /* ★ 装不下就明确失败：以前会吐半截 JSON（App 解析直接报错，
-     *   用户看到的是"命令表导出失败"这种莫名其妙的东西）。*/
+     *   用户看到的是"命令表导出失败"此类莫名其妙的东西）。*/
     if(w.p >= w.end-1) return 0;
     *w.p++=']';
     *w.p++='}';

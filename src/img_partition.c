@@ -606,7 +606,7 @@ int img_partition_add_logical(img_parttable_t *t, uint64_t first_lba, uint64_t s
             break;
         }
     }
-    if(ex<0) return IMG_ESTATE;                            /* 还没建扩展分区 */
+    if(ex<0) return IMG_ESTATE;                            /* 还未创建扩展分区 */
     if(first_lba<2048) return IMG_EINVAL;
     int slot=-1;
     for(int i=0;i<IMG_MAX_PARTITIONS;i++) if(!t->parts[i].used){ slot=i; break; }
@@ -721,7 +721,7 @@ int img_parttable_json(const img_parttable_t *t, char *buf, int cap){
         first=false;
         /* ★ logical 字段必须导出：App 靠它区分"MBR 主表项"与"EBR 里的逻辑分区"，
          *   否则会按数组下标/数量猜（4 主槽限制、扩展容器包住逻辑分区都得猜）。
-         *   内存结构 img_partition_t.logical 一直有，只是没写进 JSON（手册 §13.9）。 */
+         *   内存结构 img_partition_t.logical 一直有，只是未写入进 JSON（手册 §13.9）。 */
         k+=snprintf(buf+k,(size_t)(cap-k),
             "{\"i\":%d,\"first\":%llu,\"last\":%llu,\"sectors\":%llu,"
             "\"mbri\":%u,\"active\":%s,\"logical\":%s,\"typeGuid\":\"%s\",\"partGuid\":\"%s\","

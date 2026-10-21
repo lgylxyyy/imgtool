@@ -314,7 +314,7 @@ int img_qcow2_write(img_qcow2 *q, uint64_t off, const void *buf, size_t len){
     }
     /* ★ 越界判定必须防加法溢出：原写法 `off + len > size` 在
      *   off=UINT64_MAX-4096/len=4096 时会回绕成 0 → 判定通过 → 真的按巨大偏移写，
-     *   把 L2/头部写坏（实测把镜像 size 字段搞成 UINT64_MAX，qemu-img 从此打不开）。*/
+     *   把 L2/头部写坏（实测把镜像 size 字段搞成 UINT64_MAX，qemu-img 从此无法打开）。*/
     if(off > q->h.size || (uint64_t)len > q->h.size - off) return IMG_EFULL;   /* 越界 → 需先 expand */
 
     const uint8_t *src = (const uint8_t*)buf;
@@ -400,7 +400,7 @@ int img_qcow2_expand(img_qcow2 *q, uint64_t new_size, img_prog *prog){
     if(new_size == q->h.size) return IMG_OK;           /* 同尺寸：幂等成功 */
     if(new_size <  q->h.size) return IMG_EINVAL;       /* 阶段1 不支持缩容 */
     /* ★ 硬上限 + 防乘法溢出。不设限的后果实测：expand(UINT64_MAX) 会被照做，
-     *   头部 size 变成 UINT64_MAX → 镜像彻底损坏（qemu-img 都打不开）——
+     *   头部 size 变成 UINT64_MAX → 镜像彻底损坏（qemu-img 都无法打开）——
      *   一次坏参数就毁掉用户数据。上限依据我们的布局：L1 表放在一个簇里，
      *   每项 8 字节 → 最多 cluster_size/8 项；每项覆盖 l1_span_bytes。*/
     {

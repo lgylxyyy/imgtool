@@ -56,14 +56,14 @@ int img_wim_identify(img_rd_fn rd, void *ud,
     if(!rd || !out) return IMG_EINVAL;
 
     uint8_t hdr[208];
-    if(rd(ud,0,hdr,sizeof hdr)!=IMG_OK){ if(err) snprintf(err,errcap,"读不到 WIM 头"); return IMG_EIO; }
+    if(rd(ud,0,hdr,sizeof hdr)!=IMG_OK){ if(err) snprintf(err,errcap,"无法读取 WIM 头"); return IMG_EIO; }
     if(memcmp(hdr,"MSWIM\0\0\0",8)!=0){ if(err) snprintf(err,errcap,"不是 WIM/ESD（魔数不符）"); return IMG_EFORMAT; }
 
     uint64_t xoff=g64(hdr+0x50), xsize=g64(hdr+0x58);
     if(xsize==0 || xsize>4u*1024*1024){ if(err) snprintf(err,errcap,"WIM XML 位置异常"); return IMG_EFORMAT; }
     uint8_t *raw=malloc((size_t)xsize+2);
     if(!raw) return IMG_ENOMEM;
-    if(rd(ud,xoff,raw,(size_t)xsize)!=IMG_OK){ free(raw); if(err) snprintf(err,errcap,"读不到 WIM XML"); return IMG_EIO; }
+    if(rd(ud,xoff,raw,(size_t)xsize)!=IMG_OK){ free(raw); if(err) snprintf(err,errcap,"无法读取 WIM XML"); return IMG_EIO; }
 
     /* UTF-16LE → ASCII（够解析标签；非 ASCII 变 '?'）*/
     size_t tn=(size_t)xsize*2;           /* UTF-8 最多是 UTF-16 的 2 倍 */
@@ -277,6 +277,7 @@ int img_win_version(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
                     snprintf(out->kernel_description,sizeof out->kernel_description,"%s",tmpv.kernel_description);
                     out->kernel_major=tmpv.kernel_major; out->kernel_minor=tmpv.kernel_minor;
                     out->kernel_build=tmpv.kernel_build;
+                    out->pe_machine=tmpv.pe_machine;      /* ★ 位数：从内核 PE 头带出来 */
                 }
             }
         }
@@ -302,7 +303,7 @@ int img_win_version(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
     img_winver_vote(out);
 
     if(!out->product_name[0] && !out->kernel_file_version[0]){
-        if(err) snprintf(err,errcap,"读不出版本（SOFTWARE 与 ntoskrnl 都没拿到）");
+        if(err) snprintf(err,errcap,"无法读取版本（SOFTWARE 与 ntoskrnl 都没拿到）");
         return IMG_ENOENT;
     }
     return IMG_OK;
@@ -351,6 +352,7 @@ int img_pe_version(const uint8_t *buf, size_t len, img_winver_t *out){
     if(buf[0]!='M' || buf[1]!='Z') return IMG_EFORMAT;
     uint32_t pe=r32(buf+0x3C);
     if(pe+0x18>len || memcmp(buf+pe,"PE\0\0",4)!=0){ PEDBG("bad PE sig pe=%u len=%zu\n",pe,len); return IMG_EFORMAT; }
+    if(out) out->pe_machine = r16(buf+pe+4);   /* ★ 位数最硬的证据：PE 头 Machine 字段 */
     uint16_t nsec=r16(buf+pe+6);
     uint16_t optsz=r16(buf+pe+20);
     const uint8_t *opt=buf+pe+24;

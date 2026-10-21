@@ -29,7 +29,7 @@ int main(int argc,char**argv){
         uint64_t sz = strtoull(argv[3],NULL,0);
         img_io_opts_t io={0}; io.writable=true; io.initial_size=0;
         img_io *f = img_io_open_path(argv[2],&io);
-        if(!f){ fprintf(stderr,"❌ 打不开输出文件\n"); return 1; }
+        if(!f){ fprintf(stderr,"❌ 无法打开输出文件\n"); return 1; }
         img_qcow2_create_opts_t co={0};
         co.size = sz; co.cluster_bits = 16; co.compressed=false;
         int rc = img_qcow2_create(f,&co);
@@ -42,7 +42,7 @@ int main(int argc,char**argv){
     if(!strcmp(argv[1],"write")||!strcmp(argv[1],"roundtrip")){
         img_io_opts_t io={0}; io.writable=true;
         img_io *f = img_io_open_path(argv[2],&io);
-        if(!f){ fprintf(stderr,"❌ 打不开\n"); return 1; }
+        if(!f){ fprintf(stderr,"❌ 无法打开\n"); return 1; }
         img_qcow2_opts_t qo={0}; qo.cb=on_prog;
         img_qcow2 *q = img_qcow2_open(f,&qo);
         if(!q){ fprintf(stderr,"❌ 不是 qcow2\n"); img_io_close(f); return 1; }
@@ -93,7 +93,7 @@ int main(int argc,char**argv){
     if(!strcmp(argv[1],"expand")){
         img_io_opts_t io={0}; io.writable=true;
         img_io *f = img_io_open_path(argv[2],&io);
-        if(!f){ fprintf(stderr,"❌ 打不开\n"); return 1; }
+        if(!f){ fprintf(stderr,"❌ 无法打开\n"); return 1; }
         img_qcow2_opts_t qo={0};
         img_qcow2 *q = img_qcow2_open(f,&qo);
         if(!q){ fprintf(stderr,"❌ 不是 qcow2\n"); return 1; }

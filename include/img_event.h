@@ -1,7 +1,7 @@
 /* img_event.h — 事件流（一处打点，多处消费）
  *
  * 契约见 DESIGN-OUTPUT.md。三条铁律：
- *   ① 不许三处各自打点（日志/屏幕/错误卡片必须同源，否则必然分叉）
+ *   ① 不允许三处各自打点（日志/屏幕/错误卡片必须同源，否则必然分叉）
  *   ② 日志只写【里程碑 + 错误】；过程事件只进内存环形缓冲（出错时随卡片交出）
  *   ③ 错误行任何级别都写、且立即 write（不 fsync）→ 崩溃/被杀也已在盘上
  *
@@ -43,7 +43,7 @@ int  img_log_open_fd(int fd,          img_lv_t lv, size_t max_bytes, int keep);
 void img_log_close  (void);
 /* 真正打开着的日志路径；没开日志 / 用 fd 模式 → NULL。
  * ★ 失败卡片的"日志："这一行必须用它，不能自己拼 <img>.imgtool.log —— 那样
- *   --log=/别的路径 时卡片会印错，而"卡片里印的路径打不开"会让用户以为附件漏发。*/
+ *   --log=/别的路径 时卡片会印错，而"卡片里印的路径无法打开"会让用户以为附件漏发。*/
 const char *img_log_path(void);
 void img_log_set_level(img_lv_t lv);
 img_lv_t img_log_level(void);
@@ -159,7 +159,7 @@ void img_error_report(int rc, const char *code, const char *mod, const char *op,
  *   内容含：工具/版本/命令/镜像指纹 / 失败位置 / 错误码 / 原因 / 建议 / 事件尾部。
  *   App 侧可以直接把它塞进"复制到剪贴板"按钮。*/
 /* ---------- I/O 看门狗（无进展超时）----------
- * 语义：【连续 N 毫秒没有任何一次磁盘读写完成】→ 视为卡死：
+ * 语义：【连续 N 毫秒没有任何一次磁盘读写完成】→ 视为无响应：
  *   1) 记一条 E 级日志（code=IO-TIMEOUT，任何日志级别都写）
  *   2) 触发取消（协作式检查点退出）
  *   ★ 它不能打断"卡在内核/JNI 里的那一次调用"，但能让【随后的每一次 I/O】立刻失败、

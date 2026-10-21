@@ -41,7 +41,7 @@ int main(int argc,char**argv){
     if(argc<4){ fprintf(stderr,"用法见文件头\n"); return 2; }
     uint64_t lba=strtoull(argv[2],NULL,0);
     img_qcow2 *q=open_q(argv[1]);
-    if(!q){ printf("❌ 打不开\n"); return 1; }
+    if(!q){ printf("❌ 无法打开\n"); return 1; }
     img_parttable_t t; img_parttable_read(q,&t,0);
     uint64_t pb=0;
     for(int i=0;i<IMG_MAX_PARTITIONS;i++)

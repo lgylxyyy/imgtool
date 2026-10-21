@@ -24,7 +24,7 @@ extern "C" {
 
 #define IMG_HOST_MIN_FREE  (32ull*1024*1024)   /* 写中底线：低于它就停止写 */
 
-/* 宿主剩余可用字节（拿不到时返回 0 = 未知，调用方要用 App 传入的值兜底） */
+/* 宿主剩余可用字节（无法获取时返回 0 = 未知，调用方要用 App 传入的值兜底） */
 uint64_t img_host_free_bytes_fd(int fd);
 uint64_t img_host_free_bytes_path(const char *path);
 uint64_t img_host_free_bytes(const img_io *io);   /* 自动选 fd / 路径 */

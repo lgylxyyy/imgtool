@@ -81,7 +81,7 @@ img_qcow2 *img_qcow2_open(img_io *io, const img_qcow2_opts_t *o){
             q->h.refcount_order = be32(ext+24);   /* 96-99  */
             q->h.header_length  = be32(ext+28);   /* 100-103 */
         } else {
-            q->h.refcount_order = 4;              /* 读不到就按默认 16 位 */
+            q->h.refcount_order = 4;              /* 无法读取就按默认 16 位 */
             q->h.header_length  = 104;
         }
         if(q->h.header_length > 104){             /* 104: compression_type */

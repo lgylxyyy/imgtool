@@ -38,7 +38,7 @@ int main(int argc,char**argv){
 
     if(!strcmp(argv[1],"show")){
         img_qcow2 *q=open_rw(argv[2]);
-        if(!q){ fprintf(stderr,"❌ 打不开\n"); return 1; }
+        if(!q){ fprintf(stderr,"❌ 无法打开\n"); return 1; }
         show(q); img_qcow2_close(q); return 0;
     }
 
@@ -47,7 +47,7 @@ int main(int argc,char**argv){
         bool gpt = argc>4 && !strcmp(argv[4],"gpt");
         img_io_opts_t io={0}; io.writable=true;
         img_io *f=img_io_open_path(argv[2],&io);
-        if(!f){ fprintf(stderr,"❌ 打不开输出\n"); return 1; }
+        if(!f){ fprintf(stderr,"❌ 无法打开输出\n"); return 1; }
         img_qcow2_create_opts_t co={0}; co.size=sz; co.cluster_bits=16;
         int rc=img_qcow2_create(f,&co);
         if(rc){ fprintf(stderr,"❌ create: %s\n",img_strerror(rc)); return 1; }
@@ -86,7 +86,7 @@ int main(int argc,char**argv){
 
     if(!strcmp(argv[1],"add")){
         img_qcow2 *q=open_rw(argv[2]);
-        if(!q){ fprintf(stderr,"❌ 打不开\n"); return 1; }
+        if(!q){ fprintf(stderr,"❌ 无法打开\n"); return 1; }
         img_parttable_t t;
         int rc=img_parttable_read(q,&t,0);
         if(rc){ fprintf(stderr,"❌ 读分区表: %s\n",img_strerror(rc)); return 1; }
@@ -113,7 +113,7 @@ int main(int argc,char**argv){
     if(!strcmp(argv[1],"attr")){
         if(argc<5){ fprintf(stderr,"用法: %s attr <img> <index> <hex64>\n",argv[0]); return 2; }
         img_qcow2 *q=open_rw(argv[2]);
-        if(!q){ fprintf(stderr,"❌ 打不开\n"); return 1; }
+        if(!q){ fprintf(stderr,"❌ 无法打开\n"); return 1; }
         img_parttable_t t;
         int rc=img_parttable_read(q,&t,0);
         if(rc){ fprintf(stderr,"❌ 读分区表: %s\n",img_strerror(rc)); return 1; }

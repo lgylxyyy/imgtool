@@ -19,7 +19,7 @@ int main(int argc,char**argv){
     }
     img_io_opts_t o={0}; o.writable=false;
     img_io *io = img_io_open_path(argv[1],&o);
-    if(!io){ fprintf(stderr,"打不开: %s\n",argv[1]); return 1; }
+    if(!io){ fprintf(stderr,"无法打开: %s\n",argv[1]); return 1; }
 
     img_qcow2_opts_t qo={0}; qo.read_only=true; qo.cb=NULL;
     img_qcow2 *q = img_qcow2_open(io,&qo);

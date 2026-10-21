@@ -77,7 +77,7 @@ int main(int argc,char**argv){
         /* 先建 qcow2 */
         img_io_opts_t io={0}; io.writable=true;
         img_io *f=img_io_open_path(argv[2],&io);
-        if(!f){ fprintf(stderr,"❌ 打不开输出\n"); return 1; }
+        if(!f){ fprintf(stderr,"❌ 无法打开输出\n"); return 1; }
         img_qcow2_create_opts_t co={0}; co.size=sz; co.cluster_bits=16;
         int rc=img_qcow2_create(f,&co);
         img_io_close(f);

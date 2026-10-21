@@ -12,7 +12,7 @@ int main(int argc,char**argv){
     if(argc<2){ fprintf(stderr,"用法: %s <image.qcow2>\n",argv[0]); return 2; }
     img_io_opts_t io={0};
     img_io *f=img_io_open_path(argv[1],&io);
-    if(!f){ fprintf(stderr,"❌ 打不开\n"); return 1; }
+    if(!f){ fprintf(stderr,"❌ 无法打开\n"); return 1; }
     img_qcow2_opts_t qo={0};
     img_qcow2 *q=img_qcow2_open(f,&qo);
     if(!q){ fprintf(stderr,"❌ 不是 qcow2\n"); img_io_close(f); return 1; }

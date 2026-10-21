@@ -31,7 +31,7 @@ img_io *img_io_open_path(const char *path, const img_io_opts_t *o);
  *   用户在 App 里选错或手输一个不存在的路径时，会在盘上留下一个 0 字节的 *.qcow2 垃圾，
  *   并且报的是 QC-OPEN-FAIL（看起来像"镜像损坏"）而不是"文件不存在"。
  *   本函数先 stat（必须是普通文件或块设备）再不带 O_CREAT 打开：
- *     · 路径不存在/是目录/fd 拿不到 → 返回 NULL（调用方报 IMG-OPEN-FAIL）
+ *     · 路径不存在/是目录/fd 无法获取 → 返回 NULL（调用方报 IMG-OPEN-FAIL）
  *     · 绝不产生新文件 */
 img_io *img_io_open_existing(const char *path, bool writable);
 img_io *img_io_open_fd(int fd, bool take_ownership, const img_io_opts_t *o);

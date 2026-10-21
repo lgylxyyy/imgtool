@@ -70,7 +70,7 @@ int main(int argc,char**argv){
     if(wimlib_global_init(0)!=0){ printf("❌ wimlib init\n"); return 1; }
     WIMStruct *w=NULL;
     int r = wimlib_open_wim(argv[1], 0, &w);
-    if(r){ printf("❌ 打不开: %s\n", wimlib_get_error_string(r)); return 1; }
+    if(r){ printf("❌ 无法打开: %s\n", wimlib_get_error_string(r)); return 1; }
     struct wimlib_wim_info wi;
     wimlib_get_wim_info(w,&wi);
     printf("  镜像数 %u · 压缩 %s\n", wi.image_count,

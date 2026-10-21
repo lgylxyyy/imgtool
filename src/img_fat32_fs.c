@@ -419,7 +419,7 @@ static int dir_make_room(img_fat32_fs *fs, uint32_t dirclus, int nslots, uint64_
     /* 目录链已走完仍不够 → 给目录追加一个簇
      * ★ 追加【之前】必须把上一个簇尾部的空槽改成 0xE5（"已删除"标记）：
      *   那里的 0x00 会被读方当成【目录结束】—— 于是新簇里的项全都
-     *   读不到（实测症状：目录项数卡在 16/每簇不再增长，文件"写成功"却消失）。
+     *   无法读取（实测症状：目录项数卡在 16/每簇不再增长，文件"写成功"却消失）。
      *   0xE5 与 0x00 在读方眼里都是空槽，但不会终止目录。*/
     if(prev>=2 && prev<FAT32_EOC){
         uint64_t poff = clus_off(fs, prev);
@@ -475,7 +475,7 @@ static int dir_add_entry(img_fat32_fs *fs, uint32_t dirclus, const char *name,
 
     /* ★ LFN 项的字节13 必须是 8.3 名的校验和 —— mtools 等严格实现会校验，
      *   不对就【整条 LFN 丢弃】（表现为名字退化成截断的 8.3，如 MICROSOF）。
-     *   （我自己踩过：实现宽松能读，但外部工具读不到）*/
+     *   （我自己踩过：实现宽松能读，但外部工具无法读取）*/
     uint8_t sum = lfn_checksum(n83);
     /* 写 LFN（按【倒序】：磁盘上是 ord N..1，紧跟 8.3 之前的是 ord1）*/
     for(int ord=lfn_slots; ord>=1; ord--){

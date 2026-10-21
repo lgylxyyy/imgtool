@@ -25,7 +25,7 @@ int main(int argc,char**argv){
     if(argc<5){ fprintf(stderr,"用法: %s <qcow2> <part_lba> mkdir|put|get|export|ls|rm|exists ...\n",argv[0]); return 2; }
     uint64_t lba=strtoull(argv[2],NULL,0);
     img_qcow2 *q=op(argv[1]);
-    if(!q){ printf("❌ 打不开\n"); return 1; }
+    if(!q){ printf("❌ 无法打开\n"); return 1; }
     img_fat32_fs *fs=img_fat32_mount(q,lba,true);
     if(!fs){ printf("❌ 不是合法 FAT32\n"); return 1; }
     const char *cmd=argv[3]; int rc=0;

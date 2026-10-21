@@ -239,7 +239,7 @@ static int find_os_partition(img_qcow2 *q, const img_parttable_t *t, int guess){
            ntfs_path_exists(q,lba,sz,"/Windows/System32/winload.efi"))
             return i;
     }
-    return guess;   /* 都没找到就保持原判断，让检查项自己报红 */
+    return guess;   /* 都未找到就保持原判断，让检查项自己报红 */
 }
 
 /* ---------- 主检查 ---------- */
@@ -337,7 +337,7 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
         img_ntfs_info_t niB;
         int nrcB = img_ntfs_probe(q,lbaB,&niB);
         add(out,"ntfs.boot","NTFS $Boot 扇区",IMG_CK_REQUIRED,nrcB==IMG_OK,
-            nrcB==IMG_OK? "OEM=NTFS spc=%u 总扇区=%llu (LBA %llu)":"读不到或签名不对 (%s)",
+            nrcB==IMG_OK? "OEM=NTFS spc=%u 总扇区=%llu (LBA %llu)":"无法读取或签名不对 (%s)",
             nrcB==IMG_OK?(unsigned)niB.sectors_per_cluster:0,
             nrcB==IMG_OK?(unsigned long long)niB.total_sectors:0ULL,
             (unsigned long long)lbaB, nrcB!=IMG_OK?img_strerror(nrcB):"");
@@ -380,7 +380,7 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
         fat_ent e1 = fat32_find(q,lba,sz,"EFI/Microsoft/Boot/bootmgfw.efi");
         add(out,"esp.bootmgfw","\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
             IMG_CK_REQUIRED, e1.found,
-            e1.found? "存在，%u 字节": "不存在 — UEFI 找不到 Windows 启动管理器",
+            e1.found? "存在，%u 字节": "不存在 — UEFI 未找到 Windows 启动管理器",
             e1.size);
         fat_ent e2 = fat32_find(q,lba,sz,"EFI/Boot/bootx64.efi");
         add(out,"esp.fallback","\\EFI\\Boot\\bootx64.efi",IMG_CK_WARN,e2.found,
@@ -397,7 +397,7 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
         int actp = -1;
         for(int i=0;i<IMG_MAX_PARTITIONS;i++)
             if(t.parts[i].used && t.parts[i].status==0x80){ actp=i; break; }
-        /* 活动分区没找到引导文件就退到系统分区再试一次 */
+        /* 活动分区未找到引导文件就退到系统分区再试一次 */
         int bp = actp>=0 ? actp : ntp;
         uint64_t lba = bp>=0 ? t.parts[bp].first_lba : 0;
         uint64_t sz  = bp>=0 ? (t.parts[bp].last_lba-t.parts[bp].first_lba+1)*512 : 0;
@@ -419,7 +419,7 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
     if(P.rec<0 && (flags & IMG_BOOTCHK_EXPECT_RECOVERY)){
         /* 只在调用方明确要求时才算缺失（默认策略：不建恢复分区不是错） */
         add(out,"rec.present","存在恢复分区",IMG_CK_REQUIRED,false,
-            "分区表里没有 de94bba4 类型的恢复分区 —— 建盘时没带 --rec，或分区表被重写过");
+            "分区表里没有 de94bba4 类型的恢复分区 —— 建盘时缺少 --rec，或分区表被重写过");
     }
     if(P.rec>=0){
         uint64_t lba=t.parts[P.rec].first_lba;
@@ -546,7 +546,7 @@ int img_bootcheck_summary(const img_bootcheck_result_t *r, char *buf, int cap){
     if(img_lang_en())
         return snprintf(buf,(size_t)cap,"%s · %s · required %d/%d · warnings %d/%d · %d checks",
             r->is_uefi?"UEFI/GPT":"BIOS/MBR",
-            (req_n && r->n_required_fail==0) ? "boot chain complete" : "required checks failed - most likely not bootable",
+            (req_n && r->n_required_fail==0) ? "boot chain complete" : "required checks failed - may fail to start",
             req_ok, req_n, warn_ok, warn_n, r->count);
     return snprintf(buf,(size_t)cap,"%s · %s · 必需 %d/%d 通过 · 警告 %d/%d · 共 %d 项",
         r->is_uefi?"UEFI/GPT":"BIOS/MBR",

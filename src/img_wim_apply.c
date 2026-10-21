@@ -29,10 +29,10 @@ static enum wimlib_progress_status on_progress(enum wimlib_progress_msg msg,
      * 空窗的真正原因是【解压】：这张 ESD 是 LZMS 压缩（1.87 GB → 6.86 GB，3.7×），
      * wimlib 解某个固实 resource 的那段时间是纯 CPU 活，**期间不产生任何一次 qcow2 写**
      * ——实测连续 260 秒。而 I/O 看门狗按"完成过一次读写"计时，于是把"在解压"
-     * 误判成"卡死"，发出 IO-TIMEOUT(gap=260886ms) 并取消（rc=-13 CMD-CANCELLED），
+     * 误判成"无响应"，发出 IO-TIMEOUT(gap=260886ms) 并取消（rc=-13 CMD-CANCELLED），
      * 6.86 GB 的盘根本灌不完。
      * 进度回调本身就是"还活着"的证据：这里 touch 之后，看门狗才真正等价于
-     * "完全没有任何进展"（而不是"这一会儿没写盘"）。*/
+     * "完全没有任何进展"（而不是"这一会儿未写入盘"）。*/
     img_io_touch();
     struct cb_ctx *c = ctx;
     if(!c || !c->p) return 0;

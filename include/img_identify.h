@@ -1,4 +1,4 @@
-/* img_identify.h — 从【内容】判断 Windows 版本（文件名会骗人） */
+/* img_identify.h — 从【内容】判断 Windows 版本（文件名会不准确） */
 #ifndef IMG_IDENTIFY_H
 #define IMG_IDENTIFY_H
 #include "img_types.h"
@@ -51,8 +51,9 @@ typedef struct {
 
     /* ③ 版本证据：\Windows\System32\spp\tokens\skus 下的目录名（Professional 等）*/
     char skus[160];
+    uint16_t pe_machine;          /* 内核 PE 的 Machine：0x14c=x86 0x8664=x64 0xAA64=arm64 */
     char servicing_version[40];   /* \Windows\servicing\Version\<x.y.build.rev> */
-    char skipped[120];            /* 文件存在但读不出版本（WOF/CompactOS 压缩）的核心文件 */
+    char skipped[120];            /* 文件存在但无法读取版本（WOF/CompactOS 压缩）的核心文件 */
 
     /* ④ 多方法投票（每个证据源报一个 build；不一致就说明被改过）*/
     struct { char src[24]; int build; char ver[40]; } vote[6];

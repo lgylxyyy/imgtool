@@ -19,7 +19,7 @@ uint64_t img_host_free_bytes_fd(int fd){
 #else
     if(fd<0) return 0;
     struct statfs v;
-    /* ★ 用 fstatfs 而不是 fstatvfs：后者只收路径，fd 模式（Android SAF）拿不到；
+    /* ★ 用 fstatfs 而不是 fstatvfs：后者只收路径，fd 模式（Android SAF）无法获取；
      *   fstatfs(fd) 对"路径模式"和"fd 模式"都适用。*/
     if(fstatfs(fd,&v)<0) return 0;         /* 0 = 未知（如管道类 fd）*/
     /* ★ f_bavail 才是"本进程真能用的"：f_blocks 含 root 保留块，两者能差几个 G */

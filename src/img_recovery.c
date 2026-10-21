@@ -1,5 +1,5 @@
 /* img_recovery.c — 恢复分区 / WinRE：查（WIM 内定位）、填（写 NTFS）、设属性
- * 只做机制；建不建、多大、找不到怎么办归 App（见头文件注释）。
+ * 只做机制；建不建、多大、未找到怎么办归 App（见头文件注释）。
  */
 #define _DEFAULT_SOURCE
 #include "img_recovery.h"
@@ -74,7 +74,7 @@ int img_winre_extract_file(const char *wim_path, int index, const char *internal
     if(err && errcap) err[0]=0;
     if(!wim_path||!internal_path||!dst_path) return IMG_EINVAL;
     WIMStruct *w=NULL;
-    if(wimlib_open_wim(wim_path,0,&w)!=0){ if(err) snprintf(err,errcap,"WIM/ESD 打不开"); return IMG_ENOENT; }
+    if(wimlib_open_wim(wim_path,0,&w)!=0){ if(err) snprintf(err,errcap,"WIM/ESD 无法打开"); return IMG_ENOENT; }
 
     /* 先抽到一个临时目录（wimlib 只按目录抽单文件），再搬到 dst */
     const char *tmp=getenv("IMGTOOL_TMPDIR"); if(!tmp||!*tmp) tmp=getenv("TMPDIR");
@@ -102,7 +102,7 @@ int img_winre_extract_file(const char *wim_path, int index, const char *internal
             if(in) fclose(in);
             if(out) fclose(out);
             rmdir(dir);
-            if(err) snprintf(err,errcap,"临时文件搬不过去：%s",dst_path);
+            if(err) snprintf(err,errcap,"临时文件无法移动：%s",dst_path);
             return IMG_EIO;
         }
         char buf[1<<20]; size_t n;

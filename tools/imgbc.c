@@ -26,7 +26,7 @@ int main(int argc,char**argv){
     }
     img_io_opts_t io={0}; io.writable=true;
     img_io *f=img_io_open_path(argv[1],&io);
-    if(!f){ fprintf(stderr,"❌ 打不开 %s\n",argv[1]); return 1; }
+    if(!f){ fprintf(stderr,"❌ 无法打开 %s\n",argv[1]); return 1; }
     img_qcow2_opts_t qo={0};
     img_qcow2 *q=img_qcow2_open(f,&qo);
     if(!q){ fprintf(stderr,"❌ 不是 qcow2\n"); return 1; }
@@ -34,7 +34,7 @@ int main(int argc,char**argv){
 
 #if !IMG_WITH_NTFS3G
     (void)mode;
-    fprintf(stderr,"⚠ 本构建没带 libntfs-3g → 17 项启动自检不可用（重编译开启 IMG_WITH_NTFS3G）\n");
+    fprintf(stderr,"⚠ 本构建缺少 libntfs-3g → 17 项启动自检不可用（重编译开启 IMG_WITH_NTFS3G）\n");
     return 1;
 #else
     img_bootcheck_result_t r;

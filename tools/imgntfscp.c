@@ -17,7 +17,7 @@ int main(int argc,char**argv){
     if(argc<5){ fprintf(stderr,"用法: %s <img> <part_lba> <src> <dst>\n",argv[0]); return 2; }
     uint64_t lba=strtoull(argv[2],NULL,0);
     img_io_opts_t io={0}; io.writable=true;
-    img_io *f=img_io_open_path(argv[1],&io); if(!f){printf("❌ 打不开\n");return 1;}
+    img_io *f=img_io_open_path(argv[1],&io); if(!f){printf("❌ 无法打开\n");return 1;}
     img_qcow2_opts_t qo={0}; img_qcow2 *q=img_qcow2_open(f,&qo);
     if(!q||img_qcow2_write_init(q)!=IMG_OK){printf("❌ qcow2\n");return 1;}
     img_parttable_t t; img_parttable_read(q,&t,0);
@@ -25,7 +25,7 @@ int main(int argc,char**argv){
     for(int i=0;i<IMG_MAX_PARTITIONS;i++)
         if(t.parts[i].used && t.parts[i].first_lba==lba)
             pb=(t.parts[i].last_lba-t.parts[i].first_lba+1)*512;
-    if(!pb){printf("❌ 找不到该分区\n");return 1;}
+    if(!pb){printf("❌ 未找到该分区\n");return 1;}
 
     img_ntfs_ctx_activate(q,lba,pb);
     /* ntfs_mount() 内部对设备名调 realpath() → 造同名空文件 */

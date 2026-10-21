@@ -162,7 +162,7 @@ int img_bcd_remap(img_bcd *b, const img_bcd_remap_req_t *req,
 /* 从模板"直接构建" BCD（不需要参考盘的旧 GUID）                        */
 /* ------------------------------------------------------------------ */
 /* 场景：Win7/8 光盘里的 BCD-Template 没有任何分区绑定（实测 0 个），
- *       boot.repair / imggenbcd 那种"读旧值再映射"的路子用不了。
+ *       boot.repair / imggenbcd 那类"读旧值再映射"的路子用不了。
  * 入参：template_path 模板 hive；out_path 输出；uefi=1 用 bootmgfw.efi/winload.efi，
  *       否则 bootmgr/winload.exe。MBR 需要 mbr_sig + sys_off + sr_off（字节偏移）；
  *       GPT 需要 sys_guid + disk_guid（esp_guid 可选）。

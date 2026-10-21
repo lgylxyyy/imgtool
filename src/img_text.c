@@ -27,17 +27,17 @@ static const char *const T[][2] = {
      "Cancellation requested; the running operation stops at the next checkpoint"},
     {"BCD 只解决『引导配置』；bootmgr/bootmgfw.efi 与 MBR 引导码仍需 boot.repair 补",
      "BCD only covers the boot configuration; bootmgr/bootmgfw.efi and the MBR boot code still need boot.repair"},
-    {"镜像里有别名/越界簇：能读，但别往里写（会串数据）。"
+    {"镜像里有别名/越界簇：能读，但请勿写入（会导致数据错乱）。"
      "重建或用 qemu-img check 看细节；我们写盘前已自动抬高分配水位。",
      "The image has aliased/out-of-range clusters: readable, but do not write (data would overlap). "
      "Rebuild it or run qemu-img check; the allocator watermark was already raised before writing."},
-    {"多个证据源互相矛盾 —— 这个镜像被改过（精简/换版本），别按文件名判断",
-     "Evidence sources disagree — this image was modified (stripped/relabelled); do not trust its file name"},
+    {"多个证据源互相矛盾 —— 该镜像被改过（精简/换版本），请勿依据文件名判断",
+     "Evidence sources disagree — this image was modified (stripped/relabelled); do not rely on the file name"},
     {"只有 1 个证据源可用（核心文件疑似被 WOF/CompactOS 压缩），结论可信度低",
      "Only one evidence source was readable (core files likely WOF/CompactOS-compressed); low confidence"},
 
     /* ---- boot.plan 的 detail（整句一个 key，%s 填系统名） ---- */
-    {"没读到系统版本，不做判定（不拦你，但请自己确认）",
+    {"未能读取系统版本，不做判定（不拦你，但请自己确认）",
      "Windows version unknown; no judgement made (nothing is blocked - please verify yourself)"},
     {"%s 用 NTLDR 引导，没有 BCD/bootmgr，本工具不支持",
      "%s boots via NTLDR; there is no BCD/bootmgr - this tool does not support it"},
@@ -45,9 +45,9 @@ static const char *const T[][2] = {
      "32-bit %s has no UEFI boot path (firmware bitness must match); use MBR/BIOS only"},
     {"ARM64 Windows 只能 UEFI/GPT 启动，不能用 MBR/BIOS",
      "ARM64 Windows boots only via UEFI/GPT, not MBR/BIOS"},
-    {"%s 的 UEFI/GPT 启动微软支持有限：实测能起，但主板开 Secure Boot 会被固件验签拒绝；老机器固件也可能不认。确认要继续吗？",
-     "%s on UEFI/GPT boots in our tests, but firmware with Secure Boot on rejects it (signature check), "
-     "and older firmware may not accept it. Continue anyway?"},
+    {"%s 采用 UEFI/GPT 启动时微软支持有限：实测可正常启动，但主板开启 Secure Boot 会被固件验签拒绝；较旧设备的固件也可能不支持。是否确认继续？",
+     "%s on UEFI/GPT verified to start during testing, but firmware with Secure Boot on rejects it (signature check), "
+     "and older firmware may not support it. Confirm to continue?"},
     {"%s 的 UEFI/GPT 启动可用","%s boots via UEFI/GPT"},
     {"%s 的 BIOS/MBR 启动可用","%s boots via BIOS/MBR"},
 
@@ -74,13 +74,13 @@ static const char *const T[][2] = {
     {"恢复分区类型 GUID de94bba4","recovery partition type GUID de94bba4"},
     {"GPT 属性 0x8000000000000001","GPT attribute 0x8000000000000001"},
     {"系统文件 \\Windows\\system32\\winload","system file \\Windows\\system32\\winload"},
-    {"★ 有必需项未通过 — 很可能无法启动","★ required checks failed — most likely not bootable"},
+    {"★ 有必需项未通过 — 很可能无法启动","★ required checks failed — may fail to start"},
 
     /* ---- 其它常见短语 ---- */
     {"镜像路径（qcow2）","image path (qcow2)"},
     {"分区不存在","partition not found"},
     {"不是合法 NTFS","not a valid NTFS volume"},
-    {"读不出版本","cannot read the Windows version"},
+    {"无法读取版本","cannot read the Windows version"},
     {NULL,NULL}
 };
 

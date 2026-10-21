@@ -3,7 +3,7 @@
  *
  *  做的事：把参考 BCD 里所有「分区设备对象」写死的源盘 GUID，
  *         按【旧系统分区 → 新系统分区】【旧 ESP → 新 ESP】逐对象替换。
- *         漏改任何一处，bootmgr 就找不到设备（0xc000000e / 0xc0000098）。
+ *         漏改任何一处，bootmgr 就未找到设备（0xc000000e / 0xc0000098）。
  *
  *  ★ 为什么要遍历【全部对象】而不是只改 OS 加载器：
  *    参考件实测有 5 个分区设备对象 —— bootmgr/memtest 指 ESP，
@@ -34,7 +34,7 @@ int main(int argc,char**argv){
      *   它内部做：GUID 合法性前置校验 → 读参考件旧 GUID（系统/ESP/磁盘/恢复）
      *   → 按 hive 结构全对象映射 → 兜底改两个加载器 → 返回改动处数。*/
     img_bcd *b = img_bcd_open_file(argv[1]);
-    if(!b){ printf("❌ 打不开参考 BCD（%s）\n", argv[1]); return 1; }
+    if(!b){ printf("❌ 无法打开参考 BCD（%s）\n", argv[1]); return 1; }
 
     img_bcd_remap_req_t rq;
     rq.sys_guid     = argv[3];

@@ -35,7 +35,7 @@ typedef enum {
     IMG_MBR_FAT32_LBA = 0x0c,
     IMG_MBR_FAT16_LBA = 0x0e,
     IMG_MBR_EXTENDED_L=0x0f,
-    IMG_MBR_RECOVERY  = 0x27,   /* ★ 微软官方：恢复分区用 0x27，别用 0x07 */
+    IMG_MBR_RECOVERY  = 0x27,   /* ★ 微软官方：恢复分区用 0x27，请勿使用 0x07 */
     IMG_MBR_ESP       = 0xef,
     IMG_MBR_LINUX     = 0x83,
     IMG_MBR_GPT_PROT  = 0xee,   /* GPT 保护 MBR */

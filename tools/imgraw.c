@@ -15,7 +15,7 @@ int main(int argc,char**argv){
     const char *mode=argv[1];
     img_io_opts_t io={0}; io.writable = strcmp(mode,"read")&&strcmp(mode,"seek") ? true : true;
     img_io *f=img_io_open_path(argv[2],&io);
-    if(!f){ printf("❌ 打不开\n"); return 1; }
+    if(!f){ printf("❌ 无法打开\n"); return 1; }
     img_qcow2_opts_t qo={0}; img_qcow2 *q=img_qcow2_open(f,&qo);
     if(!q||img_qcow2_write_init(q)!=IMG_OK){ printf("❌ qcow2\n"); return 1; }
     uint64_t off=strtoull(argv[3],NULL,0);
@@ -26,7 +26,7 @@ int main(int argc,char**argv){
         fwrite(b,1,len,stdout); free(b);
     } else if(!strcmp(mode,"write")){
         FILE *fp=fopen(argv[4],"rb");
-        if(!fp){ printf("❌ 打不开输入文件\n"); return 1; }
+        if(!fp){ printf("❌ 无法打开输入文件\n"); return 1; }
         fseek(fp,0,SEEK_END); long n=ftell(fp); fseek(fp,0,SEEK_SET);
         unsigned char *b=malloc((size_t)n);
         if(!b||fread(b,1,(size_t)n,fp)!=(size_t)n){ printf("❌ 读输入失败\n"); return 1; }

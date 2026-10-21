@@ -118,7 +118,7 @@ void img_io_close(img_io *io){
 }
 
 int img_io_read(img_io *io, uint64_t off, void *buf, size_t len, size_t *done){
-    if(img_io_timed_out()) return IMG_ETIMEDOUT;   /* 看门狗：卡死后后续 I/O 立刻失败 */
+    if(img_io_timed_out()) return IMG_ETIMEDOUT;   /* 看门狗：无响应后后续 I/O 立刻失败 */
     if(!io||!buf) return IMG_EINVAL;
     size_t got = 0;
     while(got < len){
@@ -136,7 +136,7 @@ int img_io_read(img_io *io, uint64_t off, void *buf, size_t len, size_t *done){
 }
 
 int img_io_write(img_io *io, uint64_t off, const void *buf, size_t len, size_t *done){
-    if(img_io_timed_out()) return IMG_ETIMEDOUT;   /* 看门狗：卡死后后续 I/O 立刻失败 */
+    if(img_io_timed_out()) return IMG_ETIMEDOUT;   /* 看门狗：无响应后后续 I/O 立刻失败 */
     if(!io||!buf) return IMG_EINVAL;
     if(!io->writable) return IMG_EINVAL;
     size_t put = 0;

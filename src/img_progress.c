@@ -69,7 +69,7 @@ static void do_emit(img_prog *p, int force){
     }
     p->cur.item = p->item_buf;
     p->cur.msg  = p->msg_buf;
-    img_io_touch();               /* 有进度 = 没卡死（长循环里可能很久不写盘）*/
+    img_io_touch();               /* 有进度 = 没无响应（长循环里可能很久不写盘）*/
     p->cb(p->ud, &p->cur);
 }
 

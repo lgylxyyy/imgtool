@@ -360,7 +360,7 @@ int img_bcd_displayorder_add(img_bcd *b, const char *guid){
  * ============================================================ */
 static int u16len(const char *s){ int n=0; while(s[n]) n++; return n; }
 
-/* 在 blob 里扫描 UTF-16 ASCII 串（我们的路径都是 ASCII），返回起始偏移，0=没找到 */
+/* 在 blob 里扫描 UTF-16 ASCII 串（我们的路径都是 ASCII），返回起始偏移，0=未找到 */
 static size_t find_u16_ascii(const unsigned char *d, size_t len){
     /* 从后往前找最长的连续可打印 UTF-16（低字节可打印、高字节0）段 */
     size_t best=0, bestlen=0, i=0;
@@ -477,7 +477,7 @@ int img_bcd_get_device_wimpath(img_bcd *b, const char *guid, const char *eid,
  * ★ 为什么需要它：ramdiskoptions 的 ramdisksdidevice(31000003) 在官方 ISO 里是
  *   type=5「本地设备」(GUID 全零)，含义是"跟着 BCD 所在分区"。ISO 的 BCD/boot.sdi/
  *   boot.wim 全在同一分区所以能用；而我们 winre.wim 在【独立的恢复分区】上，
- *   用「本地设备」会让 bootmgr 去 ESP 找 → 找不到 → 0xc0000098。
+ *   用「本地设备」会让 bootmgr 去 ESP 找 → 未找到 → 0xc0000098。
  * ============================================================ */
 static bool guid_text_to_bytes(const char *txt, uint8_t out[16]){
     /* 去掉横线取 32 个十六进制字符，再按 GUID 内存布局重排：
@@ -909,11 +909,11 @@ int img_bcd_remap(img_bcd *b, const img_bcd_remap_req_t *req,
     bool have_do = (img_bcd_get_display_order_first(b, order, sizeof order)==IMG_OK);
     if(have_do) remap_trim_guid(order, obj, sizeof obj);
     if(!have_do && !req->esp_guid){
-        if(err) snprintf(err,errcap,"参考 BCD 没有 DisplayOrder，且没给 ESP GUID —— 无从下手");
+        if(err) snprintf(err,errcap,"参考 BCD 没有 DisplayOrder，且未提供 ESP GUID —— 无从下手");
         return IMG_EFORMAT;
     }
 
-    /* ★ 必须【改之前】先记下参考盘的旧 GUID：改完就读不到了 */
+    /* ★ 必须【改之前】先记下参考盘的旧 GUID：改完就无法读取了 */
     char old_os[40]={0}, old_esp[40]={0}, old_disk[40]={0}, td[40]={0};
     if(obj[0]){
         if(img_bcd_get_device_guids(b, obj, IMG_BCD_EL_WIM_DEVICE, old_os, old_disk)!=IMG_OK)
@@ -926,7 +926,7 @@ int img_bcd_remap(img_bcd *b, const img_bcd_remap_req_t *req,
         if(!old_disk[0] && td[0]) snprintf(old_disk,sizeof old_disk,"%s",td);
     }
     if(!old_os[0] && !old_esp[0]){
-        if(err) snprintf(err,errcap,"参考件里找不到可映射的分区设备（不是 UEFI BCD？）");
+        if(err) snprintf(err,errcap,"参考件里未找到可映射的分区设备（不是 UEFI BCD？）");
         return IMG_EFORMAT;
     }
 
@@ -970,7 +970,7 @@ int img_bcd_build(const img_bcd_build_req_t *rq, char *err, size_t errcap){
     if(err && errcap) err[0]=0;
     if(!rq || !rq->template_path || !rq->out_path) return IMG_EINVAL;
     img_bcd *b=img_bcd_open_file(rq->template_path);
-    if(!b){ if(err) snprintf(err,errcap,"模板 BCD 打不开或不是合法 hive"); return IMG_EFORMAT; }
+    if(!b){ if(err) snprintf(err,errcap,"模板 BCD 无法打开或不是合法 hive"); return IMG_EFORMAT; }
 
     /* ★ 选"要填的那个启动项"：优先 {bootmgr} 的 default（23000003），
      *   再退 DisplayOrder。Win7 的 BCD-Template 没有 DisplayOrder，
@@ -1058,7 +1058,7 @@ int img_bcd_build(const img_bcd_build_req_t *rq, char *err, size_t errcap){
  * 为什么是"模板 + 全量重写"而不是"从零拼元素"：
  *   元素表（geoffchappell / BCD-FORMAT.md）只告诉你 ID 与格式，不告诉你
  *   bootmgr 认哪些组合。我试过自己拼，得到 0xc0000034（元素非法）/
- *   0xc000000f（找不到 winload）。所以底座用真实能启动的 BCD，
+ *   0xc000000f（未找到 winload）。所以底座用真实能启动的 BCD，
  *   把【每一处与盘有关的东西】都按目标盘重写：
  *     设备（磁盘签名/分区偏移 或 分区GUID/磁盘GUID）、加载器路径、
  *     SystemRoot、菜单描述、locale、默认项、displayorder、超时。
@@ -1220,7 +1220,7 @@ int img_bcd_create_mem(const img_bcd_create_req_t *rq, void **out, size_t *out_l
     size_t tlen = 0;
     const unsigned char *tpl = tpl_pick(rq, &tlen);
     img_bcd *b = img_bcd_open_mem(tpl, tlen);
-    if(!b){ if(err) snprintf(err, errcap, "内置模板打不开（内存不足或模板损坏）"); return IMG_EIO; }
+    if(!b){ if(err) snprintf(err, errcap, "内置模板无法打开（内存不足或模板损坏）"); return IMG_EIO; }
 
     const char *desc   = (rq->desc && *rq->desc) ? rq->desc : "Windows";
     const char *locale = (rq->locale && *rq->locale) ? rq->locale : "zh-CN";
@@ -1249,7 +1249,7 @@ int img_bcd_create_mem(const img_bcd_create_req_t *rq, void **out, size_t *out_l
         if(osldr[0]) del_element(b, osldr, "14000008");
     }
 
-    if(!osldr[0]){ img_bcd_close(b); if(err) snprintf(err, errcap, "模板里找不到 Windows 加载器对象"); return IMG_EFORMAT; }
+    if(!osldr[0]){ img_bcd_close(b); if(err) snprintf(err, errcap, "模板里未找到 Windows 加载器对象"); return IMG_EFORMAT; }
 
     /* ---- 2. 设备：bootmgr → 引导分区(SR/ESP)，加载器/resume → 系统分区 ---- */
     set_dev(b, rq, IMG_BCD_GUID_BOOTMGR, "11000001", true);

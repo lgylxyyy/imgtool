@@ -24,7 +24,7 @@ int main(int argc,char**argv){
     img_log_cli(argc, argv, "imgmkfs");
     if(argc<3){ fprintf(stderr,"用法: %s <image> --mkfs <lba> [label] | --check <lba> | --mkfs-latest\n",argv[0]); return 2; }
     img_qcow2 *q = openq(argv[1]);
-    if(!q){ fprintf(stderr,"❌ 打不开\n"); return 1; }
+    if(!q){ fprintf(stderr,"❌ 无法打开\n"); return 1; }
 
     if(!strcmp(argv[2],"--check")){
         uint64_t lba=strtoull(argv[3],NULL,0);
@@ -44,7 +44,7 @@ int main(int argc,char**argv){
 
     uint64_t lba;
     /* ★ 参数错位修复：用法写的是 `--mkfs <lba>`，但原代码只判 --check/--mkfs-latest，
-     *   把 "--mkfs" 当 LBA 解析（strtoull 得 0）→ 一直报"找不到该分区"。*/
+     *   把 "--mkfs" 当 LBA 解析（strtoull 得 0）→ 一直报"未找到该分区"。*/
     if(!strcmp(argv[2],"--mkfs")){
         if(argc<4){ fprintf(stderr,"❌ --mkfs 需要 <lba>\n"); return 2; }
         lba = strtoull(argv[3],NULL,0);
@@ -80,7 +80,7 @@ int main(int argc,char**argv){
             if(t.parts[i].used && t.parts[i].first_lba==lba)
                 o.partition_bytes=(t.parts[i].last_lba-t.parts[i].first_lba+1)*512;
     }
-    if(!o.partition_bytes){ fprintf(stderr,"❌ 找不到该分区\n"); return 1; }
+    if(!o.partition_bytes){ fprintf(stderr,"❌ 未找到该分区\n"); return 1; }
 
     img_fat32_layout_t L;
     img_prog *pr=img_prog_new(onprog,NULL,200);

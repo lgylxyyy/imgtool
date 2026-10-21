@@ -47,7 +47,7 @@ int main(int argc, char **argv){
     uint64_t lba = strtoull(argv[2],NULL,0);
     /* ★ --winre-auto 模式（2026-10-19 用户定的新 WinRE 方案）：
        winre.wim+boot.sdi 放进系统分区 \Windows\System32\Recovery\（Windows 原生
-       机制：reagentc /enable 找不到 RE 分区时默认从这里取），RunOnce 跑
+       机制：reagentc /enable 未找到 RE 分区时默认从这里取），RunOnce 跑
        reagentc /enable —— 不依赖恢复分区检测（旧方案 RE 分区系统认不到）。
        用法: imgrunonce <qcow2> <系统分区lba> --winre-auto [--winre-from=<qcow2>:<RE分区lba>] */
     int winre_auto = (argc>3 && !strcmp(argv[3],"--winre-auto"));
@@ -66,7 +66,7 @@ int main(int argc, char **argv){
     /* 打开镜像 + 挂载 NTFS */
     img_io_opts_t io={0}; io.writable=true;
     img_io *fh = img_io_open_path(img,&io);
-    if(!fh) die("镜像打不开", IMG_ENOENT);
+    if(!fh) die("镜像无法打开", IMG_ENOENT);
     img_qcow2_opts_t qo={0};
     img_qcow2 *q = img_qcow2_open(fh,&qo);
     if(!q || img_qcow2_write_init(q)!=IMG_OK) die("qcow2", IMG_EFORMAT);
@@ -141,7 +141,7 @@ int main(int argc, char **argv){
                 if(rc==IMG_OK) got++;
                 free(bufs[sl]); bufs[sl]=NULL;
             }
-            if(!got){ img_ntfs_umount(fs); die("源分区里找不到 winre.wim", IMG_ENOENT); }
+            if(!got){ img_ntfs_umount(fs); die("源分区里未找到 winre.wim", IMG_ENOENT); }
             fprintf(stderr,"  ⚠ 未给 --winre-from：只写启用脚本（假定 Recovery 文件夹已有 Winre.wim）\n");
         }
         static const char SCRIPT[]="@echo off\r\nreagentc /enable\r\ndel \"%~f0\"\r\n";
@@ -163,7 +163,7 @@ int main(int argc, char **argv){
     /* ② 读 SOFTWARE hive → 临时文件 */
     void *hive=NULL; size_t hn=0;
     int rc=img_ntfs_read_file(fs, "/Windows/System32/config/SOFTWARE", &hive, &hn);
-    if(rc!=IMG_OK){ img_ntfs_umount(fs); die("SOFTWARE hive 读不出", rc); }
+    if(rc!=IMG_OK){ img_ntfs_umount(fs); die("SOFTWARE hive 无法读取", rc); }
     char tmpl[]="/tmp/imgrunonce_XXXXXX";
     int tfd=mkstemp(tmpl);
     if(tfd<0){ free(hive); img_ntfs_umount(fs); die("临时文件", IMG_EIO); }

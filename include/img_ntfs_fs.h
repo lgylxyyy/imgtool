@@ -7,7 +7,7 @@
  *   · 用 libntfs-3g（LGPL-2.1+，已链接）：ntfs_create / ntfs_attr_pwrite /
  *     ntfs_index_add_filename 等为公开 API，20 年生产代码全球在用 → 风险【低】
  *   → 选 libntfs-3g 做【内部实现】，但接口层是【本项目自有】的，
- *     上游只出现在这里，App 侧看不到。
+ *     上游只出现在这里，App 侧无法查看。
  *
  * 设备后端仍是我们 qcow2 的 10 个回调（无 loop / 无 FUSE / 无 root / 无临时文件）。
  */

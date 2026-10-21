@@ -10,7 +10,7 @@
  *      这样"用户只开了 info"也能在出错卡片里看到过程细节
  *  · 轮转：单文件到上限 → 改名 .1（旧的删）→ 占用恒定；轮转后补写会话头
  *  · 心跳退避：正常 2s/条，原地不动 2→4→8…→60s（卡住时反而更省，
- *    且"最后一条 alive 的时间"本身就是卡死证据）
+ *    且"最后一条 alive 的时间"本身就是无响应证据）
  */
 #include "img_event.h"
 #include "img_types.h"
@@ -199,7 +199,7 @@ static void *wd_main(void *ud){
         long long gap=now_ms()-last;
         if(gap >= tmo && !g_io_timed_out){
             g_io_timed_out=1;
-            /* ★ E 级：任何日志级别都不丢（卡死是必须留痕的事件）*/
+            /* ★ E 级：任何日志级别都不丢（无响应是必须留痕的事件）*/
             img_ev e;
             if(img_ev_init(&e, IMG_LV_ERROR, "io", "fail", IMG_ETIMEDOUT, "I/O 无进展超时")){
                 img_ev_str(&e,"error_code","IO-TIMEOUT");
@@ -513,7 +513,7 @@ void img_span_end(img_span *s,int rc){
     if(g_depth>0) g_depth--;
     /* ★ 三种收尾，语义分开（用户取消既不是"完成"也不是"出错"）：
      *   rc==0          → event=done   （INFO）
-     *   rc==ECANCELLED → event=cancel （WARN；且任何日志级别都不丢 —— 操作没做完必须留痕）
+     *   rc==ECANCELLED → event=cancel （WARN；且任何日志级别都不丢 —— 操作未执行完必须留痕）
      *   其它           → event=fail   （ERROR）
      *   调用方（CLI/App）据此区分"用户点了停止"和"真的坏了"。*/
     img_lv_t    lv  = (rc==0) ? IMG_LV_INFO  : (rc==IMG_ECANCELLED ? IMG_LV_WARN : IMG_LV_ERROR);
@@ -537,7 +537,7 @@ void img_hb(const char *mod,const char *op,const char *where,uint64_t iter){
     }
     if(t-G.hb_last_ms < G.hb_interval_ms) return;
     bool moved = (iter!=G.hb_iter)||(where!=G.hb_where)||(op!=G.hb_op);
-    if(!moved){                                   /* 原地不动 = 疑似卡死 → 拉长间隔 */
+    if(!moved){                                   /* 原地不动 = 疑似无响应 → 拉长间隔 */
         G.hb_interval_ms*=2;
         if(G.hb_interval_ms>HB_MAX_MS) G.hb_interval_ms=HB_MAX_MS;
     } else G.hb_interval_ms=HB_STEP_MS;
@@ -593,7 +593,7 @@ int img_log_cli(int argc, char **argv, const char *tool){
         else return 0;                                          /* 没要日志：什么都不做 */
     }
     if(!path && plain){
-        /* 默认放镜像旁边：<argv[1]>.imgtool.log（拿不到参数就用 cwd 下的名字）*/
+        /* 默认放镜像旁边：<argv[1]>.imgtool.log（无法获取参数就用 cwd 下的名字）*/
         const char *seed = (argc>1 && argv[1] && argv[1][0]!='-') ? argv[1] : "imgtool";
         static char def[480];
         snprintf(def,sizeof def,"%s.imgtool.log",seed);

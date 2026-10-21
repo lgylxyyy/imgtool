@@ -38,7 +38,7 @@ int main(int argc,char**argv){
     img_log_cli(argc, argv, "imgresize");
     if(argc<3){ fprintf(stderr,"用法: %s <image> show|resize|fill ...\n",argv[0]); return 2; }
     img_qcow2 *q=open_rw(argv[1]);
-    if(!q){ fprintf(stderr,"❌ 打不开\n"); return 1; }
+    if(!q){ fprintf(stderr,"❌ 无法打开\n"); return 1; }
     img_parttable_t t;
     if(img_parttable_read(q,&t,0)!=IMG_OK){ fprintf(stderr,"❌ 读分区表\n"); return 1; }
 

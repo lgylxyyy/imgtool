@@ -262,7 +262,7 @@ int img_iso_open_path(img_iso **out, const char *path, char *err, size_t errcap)
     if(err && errcap) err[0]=0;
     if(!out || !path || !*path){ if(err) snprintf(err,errcap,"路径为空"); return IMG_EINVAL; }
     img_io *io=img_io_open_existing(path,false);      /* 只读；绝不创建 */
-    if(!io){ if(err) snprintf(err,errcap,"打不开 ISO：%s（不存在或不是普通文件）",path); return IMG_ENOENT; }
+    if(!io){ if(err) snprintf(err,errcap,"无法打开 ISO：%s（不存在或不是普通文件）",path); return IMG_ENOENT; }
     int rc=img_iso_open_io(out,io,err,errcap);
     if(rc!=IMG_OK){ img_io_close(io); return rc; }
     (*out)->own_io=true;
