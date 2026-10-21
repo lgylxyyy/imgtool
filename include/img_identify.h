@@ -51,12 +51,24 @@ typedef struct {
 
     /* ③ 版本证据：\Windows\System32\spp\tokens\skus 下的目录名（Professional 等）*/
     char skus[160];
+    char servicing_version[40];   /* \Windows\servicing\Version\<x.y.build.rev> */
+    char skipped[120];            /* 文件存在但读不出版本（WOF/CompactOS 压缩）的核心文件 */
 
-    /* ④ 判定：注册表 vs 内核 */
-    int  mismatch;          /* 1 = 不一致（疑似被改过/精简过）*/
+    /* ④ 多方法投票（每个证据源报一个 build；不一致就说明被改过）*/
+    struct { char src[24]; int build; char ver[40]; } vote[6];
+    int  n_vote;
+    int  consensus_build;   /* 多数票的 build（0=没有足够证据）*/
+    int  mismatch;          /* 1 = 多个来源互相矛盾 */
 } img_winver_t;
 int img_win_version(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
                     img_winver_t *out, char *err, size_t errcap);
+
+/* build 的"代"（19041/19045 → 1904；7601 → 760）。Win10 起启用包升级会让
+ * 注册表 CurrentBuild(19045) 与核心文件版本(10.0.19041.x) 不一致，那是正常的。*/
+int  img_build_family(int build);
+/* 多源投票（读盘时由 img_win_version 调用；单测也直接用它）：
+ * 按"代"取众数写 consensus_build，跨代不一致则 mismatch=1。*/
+void img_winver_vote(img_winver_t *v);
 
 /* 纯函数：从内存里的 PE 文件解析版本资源（给 ntoskrnl.exe 用）。
  * 不读盘、不依赖库 —— 便于单独测试。*/

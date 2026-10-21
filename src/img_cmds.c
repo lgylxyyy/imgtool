@@ -1862,7 +1862,7 @@ static int cmd_recovery_populate_system(img_ctx *ctx, const img_args *in, img_re
 
 /* ---------- bcd.build（从模板直接构建；Win7 的 BCD-Template 没有绑定，只能这么来）---------- */
 static const img_arg A_BCDBUILD[] = {
-    {"template", IMG_A_STR, true,  NULL,   "模板 BCD（如 Win7 的 \Windows\System32\config\BCD-Template）", NULL},
+    {"template", IMG_A_STR, true,  NULL,   "模板 BCD（如 Win7 的 \\Windows\\System32\\config\\BCD-Template）", NULL},
     {"out",      IMG_A_STR, true,  NULL,   "输出 BCD 文件路径", NULL},
     {"table",    IMG_A_ENUM,false, "mbr",  "引导方式：mbr(BIOS) | gpt(UEFI)", NULL},
     {"desc",     IMG_A_STR, false, "Windows","菜单里显示的名字", NULL},
@@ -2029,9 +2029,24 @@ static int cmd_win_version(img_ctx *ctx, const img_args *in, img_result *out){
         if(v.kernel_description[0]) img_result_str(out,"kernel.description",v.kernel_description);
     }
     if(v.skus[0]) img_result_str(out,"skus",v.skus);
+    if(v.servicing_version[0]) img_result_str(out,"servicing_version",v.servicing_version);
+    if(v.skipped[0]) img_result_str(out,"unreadable",v.skipped);   /* 存在但读不到版本（WOF）*/
+
+    /* 多方法投票结果：App 可以直接把这张表显示给用户 */
+    { static char ev[2048]; size_t k=0; k+=(size_t)snprintf(ev+k,sizeof ev-k,"[");
+      for(int i=0;i<v.n_vote && k<sizeof ev-256;i++)
+          k+=(size_t)snprintf(ev+k,sizeof ev-k,"%s{\"source\":\"%s\",\"build\":%d,\"version\":\"%s\"}",
+                              i?",":"", v.vote[i].src, v.vote[i].build, v.vote[i].ver);
+      k+=(size_t)snprintf(ev+k,sizeof ev-k,"]");
+      img_result_u64(out,"evidence_count",(uint64_t)v.n_vote);
+      img_result_raw(out,"evidence",ev); }
+
+    if(v.consensus_build) img_result_u64(out,"consensus_build",(uint64_t)v.consensus_build);
     img_result_bool(out,"mismatch",v.mismatch==1);
     if(v.mismatch)
-        img_result_str(out,"note","注册表与内核构建号不一致 —— 这个镜像被改过（精简/换版本），别按文件名判断");
+        img_result_str(out,"note","多个证据源互相矛盾 —— 这个镜像被改过（精简/换版本），别按文件名判断");
+    else if(v.n_vote<=1)
+        img_result_str(out,"note","只有 1 个证据源可用（核心文件疑似被 WOF/CompactOS 压缩），结论可信度低");
     return IMG_OK;
 }
 

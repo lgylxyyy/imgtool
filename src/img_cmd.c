@@ -132,7 +132,7 @@ void img_result_begin(img_result *r, const char *cmd){
     r->ok=true; r->cmd=cmd; r->t0_ms=now_ms();
 }
 static int slot(img_result *r){
-    if(r->nf>=IMG_RES_FIELDS) return -1;
+    if(r->nf>=IMG_RES_FIELDS){ r->nf_drop++; return -1; }   /* ★ 不静默丢：渲染时会带 _overflow */
     return r->nf++;
 }
 void img_result_str(img_result *r,const char *k,const char *v){
@@ -224,6 +224,7 @@ int img_result_json(const img_result *r, char *buf, int cap){
             else if(r->f[i].ty==4) wraw(&dw,r->f[i].k,r->f[i].raw?r->f[i].raw:"null");
             else wraw(&dw,r->f[i].k,r->f[i].b?"true":"false");
         }
+        if(r->nf_drop>0) wnum(&dw,"_overflow",r->nf_drop);
         w.p=dw.p;
         if(w.p<w.end)*w.p++='}';
     } else {

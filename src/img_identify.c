@@ -104,6 +104,19 @@ int img_wim_identify(img_rd_fn rd, void *ud,
     return IMG_OK;
 }
 
+/* \Windows\servicing\Version\<a.b.build.rev> —— 注意它是【目录】，不是文件。
+ * 同目录里还有一个 8.3 短名（实测为 617601~1.175），必须按"四段数字"校验排除。*/
+typedef struct { char *p; size_t cap; int got; } svc_acc;
+static void svc_cb(void *ud, const char *nm, bool isdir, uint64_t sz){
+    (void)sz;
+    svc_acc *c=(svc_acc*)ud;
+    if(c->got || !nm || !*nm || !isdir) return;
+    int a=0,b=0,d=0,e=0;
+    if(sscanf(nm,"%d.%d.%d.%d",&a,&b,&d,&e)!=4 || d<=0) return;
+    snprintf(c->p,c->cap,"%s",nm);
+    c->got=1;
+}
+
 /* skus 目录名收集（edition 证据）*/
 typedef struct { char *p; size_t cap, len; } skus_acc;
 static void skus_cb(void *ud, const char *nm, bool isdir, uint64_t sz){
@@ -134,6 +147,32 @@ static int hive_str(hive_h *h, hive_node_h node, const char *name, char *out, si
     return 0;
 }
 
+/* build 的"代"：19041/19045 → 1904；7600/7601 → 760；22000 → 2200；760 → 760 */
+int img_build_family(int b){
+    if(b<=0) return 0;
+    return b>=1000 ? b/10 : b;
+}
+
+/* 投票：按"代"取众数（详见头文件注释）。分离成公开函数是为了能单测。 */
+void img_winver_vote(img_winver_t *v){
+    if(!v) return;
+    v->consensus_build=0; v->mismatch=0;
+    if(v->n_vote<=0) return;
+    int best=0,bestn=0,bestreg=0;
+    for(int i=0;i<v->n_vote;i++){
+        int cnt=0;
+        for(int j=0;j<v->n_vote;j++)
+            if(img_build_family(v->vote[j].build)==img_build_family(v->vote[i].build)) cnt++;
+        int isreg=!strcmp(v->vote[i].src,"registry");
+        /* 平票时取注册表那一票：用户看到的"系统版本"就是它 */
+        if(cnt>bestn || (cnt==bestn && isreg && !bestreg)){
+            bestn=cnt; best=v->vote[i].build; bestreg=isreg;
+        }
+    }
+    v->consensus_build=best;
+    if(bestn < v->n_vote) v->mismatch=1;
+}
+
 int img_win_version(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
                     img_winver_t *out, char *err, size_t errcap){
     if(err && errcap) err[0]=0;
@@ -142,23 +181,48 @@ int img_win_version(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
 
     const char *tmp=getenv("IMGTOOL_TMPDIR"); if(!tmp||!*tmp) tmp=getenv("TMPDIR");
     if(!tmp||!*tmp) tmp="/tmp";
-    char tf_sw[600], tf_kn[600];
+    char tf_sw[600];
     snprintf(tf_sw,sizeof tf_sw,"%s/imgtool-software-%ld",tmp,(long)getpid());
-    snprintf(tf_kn,sizeof tf_kn,"%s/imgtool-ntos-%ld.exe",tmp,(long)getpid());
 
-    /* ★ 只挂载一次：把 SOFTWARE、ntoskrnl.exe、skus 目录都在这一次挂载里读完。
+    /* ★ 只挂载一次：把 SOFTWARE、4 个核心二进制、skus / servicing 目录都在这一次挂载里读完。
      *   分多次挂载会在"卷被标记脏"时第二次失败（实测某张盘就是这样丢掉内核版本的）。*/
     img_ntfs_fs *fs=img_ntfs_mount_rw(q,part_lba,part_bytes);
     if(!fs){ if(err) snprintf(err,errcap,"系统分区不是合法 NTFS"); return IMG_ESTATE; }
 
     uint64_t got=0;
     int rc_sw=img_ntfs_copy_out(fs,"/Windows/System32/config/SOFTWARE",tf_sw,NULL,&got);
-    uint64_t ksz=0;
-    int rc_kn=img_ntfs_copy_out(fs,"/Windows/System32/ntoskrnl.exe",tf_kn,NULL,&ksz);
 
-    if(getenv("IMG_PE_DEBUG")) fprintf(stderr,"[ver] rc_sw=%d rc_kn=%d ksz=%llu\n",rc_sw,rc_kn,(unsigned long long)ksz);
+    /* ② 核心二进制：这些文件被改过就开不了机，所以它们的 PE 版本最可信 */
+    static const char *core[]={
+        "/Windows/System32/ntoskrnl.exe",
+        "/Windows/System32/ntdll.dll",
+        "/Windows/System32/winload.exe",
+        "/Windows/System32/winload.efi",
+    };
+    static const char *label[]={"ntoskrnl","ntdll","winload.exe","winload.efi"};
+    char cf[4][600]; uint64_t csz[4]={0,0,0,0}; int chave[4]={0,0,0,0}, cexist[4]={0,0,0,0};
+    for(int i=0;i<4;i++){
+        cf[i][0]=0; csz[i]=0; chave[i]=0; cexist[i]=0;
+        if(img_ntfs_path_exists(fs,core[i])!=true) continue;
+        cexist[i]=1;
+        snprintf(cf[i],sizeof cf[i],"%s/imgtool-core-%d-%ld.bin",tmp,i,(long)getpid());
+        if(img_ntfs_copy_out(fs,core[i],cf[i],NULL,&csz[i])==IMG_OK &&
+           csz[i]>0 && csz[i]<=64u*1024*1024) chave[i]=1;
+        else { unlink(cf[i]); csz[i]=0; }
+
+    }
+
+    for(int i=0;i<4;i++){        /* 存在但没读出建造号：如实登记（WOF/CompactOS）*/
+        if(chave[i] || !cexist[i]) continue;
+        size_t n=strlen(out->skipped);
+        if(n+strlen(label[i])+2<sizeof out->skipped)
+            snprintf(out->skipped+n,sizeof out->skipped-n,"%s%s",n?",":"",label[i]);
+    }
+
     skus_acc sc={out->skus,sizeof out->skus,0};
     img_ntfs_list_dir(fs,"/Windows/System32/spp/tokens/skus",skus_cb,&sc);
+    svc_acc sa={out->servicing_version,sizeof out->servicing_version,0};
+    img_ntfs_list_dir(fs,"/Windows/servicing/Version",svc_cb,&sa);
 
     img_ntfs_umount(fs);
 
@@ -185,19 +249,57 @@ int img_win_version(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
     }
     unlink(tf_sw);
 
-    /* ② 特征文件：ntoskrnl.exe 的 PE 版本资源 */
-    if(rc_kn==IMG_OK && ksz>0 && ksz<64u*1024*1024){
-        FILE *fp=fopen(tf_kn,"rb");
-        if(fp){
-            uint8_t *b=malloc((size_t)ksz);
-            if(b && fread(b,1,(size_t)ksz,fp)==(size_t)ksz) img_pe_version(b,(size_t)ksz,out);
-            free(b); fclose(fp);
+    /* ② 多源证据：注册表 + 4 个核心二进制的 PE 版本（改了就开不了机）
+     *    + \Windows\servicing\Version\<版本> 目录名（servicing 栈自己写的）*/
+    if(out->current_build>0){
+        snprintf(out->vote[out->n_vote].src,sizeof out->vote[0].src,"registry");
+        out->vote[out->n_vote].build=out->current_build;
+        snprintf(out->vote[out->n_vote].ver,sizeof out->vote[0].ver,"%s",out->current_version);
+        out->n_vote++;
+    }
+    /* 逐个解析刚读出来的核心二进制（i==0 即 ntoskrnl，保留详细字段） */
+    for(int i=0;i<4 && out->n_vote<6;i++){
+        if(!chave[i]) continue;
+        FILE *fp=fopen(cf[i],"rb");
+        if(!fp){ unlink(cf[i]); continue; }
+        uint8_t *b=malloc((size_t)csz[i]);
+        if(b && fread(b,1,(size_t)csz[i],fp)==(size_t)csz[i]){
+            img_winver_t tmpv; memset(&tmpv,0,sizeof tmpv);
+            if(img_pe_version(b,(size_t)csz[i],&tmpv)==IMG_OK && tmpv.kernel_build>0){
+                snprintf(out->vote[out->n_vote].src,sizeof out->vote[0].src,"%s",label[i]);
+                out->vote[out->n_vote].build=tmpv.kernel_build;
+                snprintf(out->vote[out->n_vote].ver,sizeof out->vote[0].ver,"%s",tmpv.kernel_file_version);
+                out->n_vote++;
+                if(i==0){   /* ntoskrnl：保留详细字段 */
+                    snprintf(out->kernel_file_version,sizeof out->kernel_file_version,"%s",tmpv.kernel_file_version);
+                    snprintf(out->kernel_product_version,sizeof out->kernel_product_version,"%s",tmpv.kernel_product_version);
+                    snprintf(out->kernel_company,sizeof out->kernel_company,"%s",tmpv.kernel_company);
+                    snprintf(out->kernel_description,sizeof out->kernel_description,"%s",tmpv.kernel_description);
+                    out->kernel_major=tmpv.kernel_major; out->kernel_minor=tmpv.kernel_minor;
+                    out->kernel_build=tmpv.kernel_build;
+                }
+            }
+        }
+        free(b); fclose(fp); unlink(cf[i]);
+    }
+
+    /* \Windows\servicing\Version\<x.y.build.rev> 目录名（servicing 栈自己写的） */
+    if(sa.got){
+        int a=0,b2=0,c=0,e=0;
+        if(sscanf(sa.p,"%d.%d.%d.%d",&a,&b2,&c,&e)==4 && c>0 && out->n_vote<6){
+            snprintf(out->vote[out->n_vote].src,sizeof out->vote[0].src,"servicing");
+            out->vote[out->n_vote].build=c;
+            snprintf(out->vote[out->n_vote].ver,sizeof out->vote[0].ver,"%s",sa.p);
+            out->n_vote++;
         }
     }
-    unlink(tf_kn);
 
-    if(out->kernel_build>0 && out->current_build>0 &&
-       out->kernel_build != out->current_build) out->mismatch=1;
+    /* ③ 多方法投票：按"代"（build 去掉最后一位）取众数。
+     *   为什么要按代而不是按精确 build：Win10 从 2004 起用启用包升级，
+     *   注册表 CurrentBuild=19045（22H2）而 winload/ntoskrnl 仍是 10.0.19041.x，
+     *   这是【正常】的；精确比对会把正版盘误判成"被改过"（实测 Xlite 盘就是这样）。
+     *   跨代不一致（例如 7601 vs 19041、19041 vs 22000）才是真的被换过。 */
+    img_winver_vote(out);
 
     if(!out->product_name[0] && !out->kernel_file_version[0]){
         if(err) snprintf(err,errcap,"读不出版本（SOFTWARE 与 ntoskrnl 都没拿到）");

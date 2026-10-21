@@ -52,14 +52,14 @@ int img_args_validate(const img_args *a, const img_arg *spec, int nargs,
                       char *why, size_t whycap);
 
 /* ---------------- 结果信封（栈上结构，无 malloc） ---------------- */
-#define IMG_RES_FIELDS 16
+#define IMG_RES_FIELDS 24   /* win.version 一条就出 18 个字段，16 会静默丢 */
 typedef struct img_result {
     bool        ok;
     const char *cmd;
     long long   t0_ms;
     /* data: 键值对（字符串/整数/布尔） */
-    struct { char k[24]; int ty; char s[160]; long long n; bool b; const char *raw; } f[IMG_RES_FIELDS];
-    int nf;
+    struct { char k[40]; int ty; char s[160]; long long n; bool b; const char *raw; } f[IMG_RES_FIELDS];
+    int nf, nf_drop;    /* nf_drop>0 → 结果里会出现 "_overflow"，绝不静默丢字段 */
     /* err */
     int  rc;
     char code[48], why[256], at[256], suggest[256];
