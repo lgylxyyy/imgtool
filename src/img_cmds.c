@@ -11,7 +11,8 @@
 #include "img_constraints.h"   /* img_layout_build：img.create 用 */
 #include "img_bootcheck.h"
 #include "img_iso.h"
-#include "img_recovery.h"      /* boot.check 用 */
+#include "img_recovery.h"
+#include "img_identify.h"      /* boot.check 用 */
 #include "img_io.h"
 #include "img_fat32.h"
 #include "img_fat32_fs.h"
@@ -1901,6 +1902,139 @@ static int cmd_bcd_build(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+
+/* ================= 版本识别：从【内容】读，不信文件名 =================
+ * 用户点名的需求：挂载 ESD/WIM/ISO 时能直接看到是哪个 Windows 版本，
+ * 从而判断"这张盘/这个镜像到底是不是我以为的那个"。
+ * ⚠ WIM 的 <NAME>/<VERSION> 是文本，第三方可以改；所以 win.version 还会去读
+ *   盘里 ntoskrnl.exe 的 PE 版本资源（改了就开不了机）做交叉验证。*/
+
+typedef struct { img_io *io; } rd_io_t;
+static int rd_io(void *ud, uint64_t off, void *buf, size_t len){
+    rd_io_t *r=(rd_io_t*)ud;
+    return img_io_read_full(r->io,off,buf,len);
+}
+typedef struct { img_iso *iso; const char *path; } rd_iso_t;
+static int rd_iso(void *ud, uint64_t off, void *buf, size_t len){
+    rd_iso_t *r=(rd_iso_t*)ud;
+    return img_iso_read_range(r->iso,r->path,off,buf,len);
+}
+
+static const img_arg A_WIMID[] = {
+    {"src",   IMG_A_STR, true,  NULL, "WIM / ESD / ISO 路径（ISO 会自动找 sources\\install.wim|esd）", NULL},
+    {"index", IMG_A_U64, false, "0",  "只要第 N 个映像（0=全部）", NULL},
+};
+static int cmd_wim_identify(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx;
+    const char *src=img_args_get(in,"src");
+    int want=(int)img_args_u64(in,"index",0);
+    if(!src||!*src){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","src","需要镜像路径",NULL); return IMG_EINVAL; }
+
+    img_wim_image_t imgs[32]; int n=0; char err[256]="";
+    char container[8]="wim", inner[64]="";
+
+    size_t sl=strlen(src);
+    bool is_iso = (sl>4 && !strcasecmp(src+sl-4,".iso"));
+    if(is_iso){
+        img_iso *iso=NULL;
+        int rc=img_iso_open_path(&iso,src,err,sizeof err);
+        if(rc!=IMG_OK){ img_result_fail(out,rc,"HOST-OPEN-FAIL",src,err[0]?err:"ISO 打不开",NULL); return rc; }
+        const char *cands[2]={"/sources/install.wim","/sources/install.esd"};
+        const char *hit=NULL; uint64_t fsz=0; bool d=false;
+        for(int i=0;i<2;i++){
+            if(img_iso_stat(iso,cands[i],&fsz,&d)==IMG_OK && !d){ hit=cands[i]; break; }
+        }
+        if(!hit){
+            img_iso_close(iso);
+            img_result_fail(out,IMG_ENOENT,"WIM-NOTFOUND",src,
+                "ISO 里没有 sources\\install.wim / install.esd",NULL);
+            return IMG_ENOENT;
+        }
+        snprintf(container,sizeof container,"%s", strstr(hit,".esd")||strstr(hit,"ESD")?"esd":"wim");
+        snprintf(inner,sizeof inner,"%s",hit);
+        rd_iso_t r={iso,hit};
+        rc=img_wim_identify(rd_iso,&r,imgs,32,&n,err,sizeof err);
+        const char *vol=img_iso_volume_id(iso);
+        if(vol) img_result_str(out,"volume",vol);
+        img_iso_close(iso);
+        if(rc!=IMG_OK){ img_result_fail(out,rc,"WIM-NOTFOUND",hit,err[0]?err:"解析失败",NULL); return rc; }
+    } else {
+        img_io *io=img_io_open_existing(src,false);
+        if(!io){ img_result_fail(out,IMG_ENOENT,"HOST-OPEN-FAIL",src,"文件打不开",NULL); return IMG_ENOENT; }
+        { const char *dot=strrchr(src,'.'); if(dot && !strcasecmp(dot,".esd")) snprintf(container,sizeof container,"esd"); }
+        rd_io_t r={io};
+        int rc=img_wim_identify(rd_io,&r,imgs,32,&n,err,sizeof err);
+        img_io_close(io);
+        if(rc!=IMG_OK){ img_result_fail(out,rc,"WIM-NOTFOUND",src,err[0]?err:"不是 WIM/ESD",NULL); return rc; }
+    }
+
+    static char jb[64*1024]; size_t k=0;
+    k+=(size_t)snprintf(jb+k,sizeof jb-k,"[");
+    int emitted=0;
+    for(int i=0;i<n;i++){
+        if(want>0 && imgs[i].index!=want) continue;
+        k+=(size_t)snprintf(jb+k,sizeof jb-k,
+            "%s{\"index\":%d,\"name\":\"%s\",\"display_name\":\"%s\",\"edition_id\":\"%s\","
+            "\"arch\":\"%s\",\"version\":\"%d.%d.%d\",\"build\":%d,\"languages\":\"%s\","
+            "\"dirs\":%d,\"files\":%d,\"total_bytes\":%llu}",
+            emitted?",":"", imgs[i].index, imgs[i].name, imgs[i].display_name, imgs[i].edition_id,
+            imgs[i].arch, imgs[i].major, imgs[i].minor, imgs[i].build, imgs[i].build,
+            imgs[i].languages, imgs[i].dir_count, imgs[i].file_count,
+            (unsigned long long)imgs[i].total_bytes);
+        emitted++;
+        if(k>sizeof jb-2048) break;
+    }
+    k+=(size_t)snprintf(jb+k,sizeof jb-k,"]");
+    img_result_str(out,"container",container);
+    img_result_str(out,"source",src);
+    if(inner[0]) img_result_str(out,"inner_path",inner);
+    img_result_u64(out,"count",(uint64_t)emitted);
+    img_result_raw(out,"images",jb);
+    return IMG_OK;
+}
+
+/* ---------- win.version：读已装盘的"真相"（内核 PE + 注册表 + SKU）---------- */
+static const img_arg A_WINVER[] = {
+    {"img", IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
+    {"lba", IMG_A_U64, true, NULL, "Windows 系统分区起始 LBA", chk_lba},
+};
+static int cmd_win_version(img_ctx *ctx, const img_args *in, img_result *out){
+    if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（读系统盘里的注册表/内核）","重新编译时开启该功能并安装对应系统库");
+    uint64_t lba=img_args_u64(in,"lba",0);
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ img_result_fail(out,IMG_EFORMAT,"QC-OPEN-FAIL",img_ctx_path(ctx),NULL,NULL); return IMG_EFORMAT; }
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){ pb=(t->parts[i].last_lba-t->parts[i].first_lba+1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+
+    img_winver_t v; char err[256]="";
+    rc=img_win_version(q,lba,pb,&v,err,sizeof err);
+    if(rc!=IMG_OK){ img_result_fail(out,rc,"PART-FS-BAD",NULL,err[0]?err:"读不出版本",NULL); return rc; }
+
+    img_result_str(out,"registry.product_name",v.product_name);
+    img_result_str(out,"registry.edition_id",v.edition_id);
+    img_result_str(out,"registry.current_version",v.current_version);
+    img_result_u64(out,"registry.current_build",(uint64_t)v.current_build);
+    if(v.display_version[0]) img_result_str(out,"registry.display_version",v.display_version);
+    if(v.build_lab[0]) img_result_str(out,"registry.build_lab",v.build_lab);
+
+    if(v.kernel_file_version[0]){
+        img_result_str(out,"kernel.file_version",v.kernel_file_version);
+        img_result_str(out,"kernel.product_version",v.kernel_product_version);
+        img_result_u64(out,"kernel.build",(uint64_t)v.kernel_build);
+        if(v.kernel_company[0]) img_result_str(out,"kernel.company",v.kernel_company);
+        if(v.kernel_description[0]) img_result_str(out,"kernel.description",v.kernel_description);
+    }
+    if(v.skus[0]) img_result_str(out,"skus",v.skus);
+    img_result_bool(out,"mismatch",v.mismatch==1);
+    if(v.mismatch)
+        img_result_str(out,"note","注册表与内核构建号不一致 —— 这个镜像被改过（精简/换版本），别按文件名判断");
+    return IMG_OK;
+}
+
 const img_cmd IMG_CMD_TABLE[] = {
     {"img.info",  "1.0", "显示镜像基本信息（大小/分区表/分区数）",
         A_INFO,   (int)(sizeof A_INFO  /sizeof A_INFO[0]),   cmd_img_info},
@@ -1949,6 +2083,10 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_NTFSPUT,(int)(sizeof A_NTFSPUT/sizeof A_NTFSPUT[0]), cmd_ntfs_put},
     {"ntfs.export","1.0", "把 NTFS 分区里的文件导出到本地（抽 bootmgr/boot.sdi/winre.wim）",
         A_NTFSEXPORT,(int)(sizeof A_NTFSEXPORT/sizeof A_NTFSEXPORT[0]), cmd_ntfs_export},
+    {"wim.identify","1.0", "从内容识别 WIM/ESD/ISO 里的 Windows 版本（不信文件名）",
+        A_WIMID,(int)(sizeof A_WIMID/sizeof A_WIMID[0]), cmd_wim_identify},
+    {"win.version","1.0", "读已装盘的真实版本：ntoskrnl 的 PE 版本 + 注册表 + SKU 交叉验证",
+        A_WINVER,(int)(sizeof A_WINVER/sizeof A_WINVER[0]), cmd_win_version},
     {"bcd.build","1.0", "从模板直接构建 BCD（Win7 的 BCD-Template 没有绑定，必须这条）",
         A_BCDBUILD,(int)(sizeof A_BCDBUILD/sizeof A_BCDBUILD[0]), cmd_bcd_build},
     {"bcd.gen-uefi","1.0", "UEFI 换盘：按新盘 GUID 重写 BCD（= imggenbcd，同一份库实现）",

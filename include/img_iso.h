@@ -45,6 +45,9 @@ int img_iso_stat(img_iso *iso, const char *path, uint64_t *size, bool *is_dir);
 
 /* 把文件抽到本地 dst（流式，1 MiB 一块；不整文件进内存）。
  * max_bytes>0 时只抽前 max_bytes（自测/预览用）。out_bytes 返回实际写出字节数。*/
+/* 读文件的一段（不落盘）：给"只读 WIM 头/XML"这种场景用 */
+int img_iso_read_range(img_iso *iso, const char *path, uint64_t off, void *buf, size_t len);
+
 int img_iso_extract(img_iso *iso, const char *path, const char *dst,
                     uint64_t max_bytes, img_prog *prog, uint64_t *out_bytes);
 

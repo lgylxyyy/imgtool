@@ -490,6 +490,48 @@ int img_iso_list(img_iso *s, const char *path, img_iso_entry_cb cb, void *ud){
 }
 
 /* ---------- 抽取（流式 1 MiB） ---------- */
+int img_iso_read_range(img_iso *s, const char *path, uint64_t off, void *buf, size_t len){
+    if(!s || !path || !buf || !len) return IMG_EINVAL;
+    if(s->mode==1){
+        iso_find f; uint32_t lb=0,ll=0; bool d=false; uint64_t sz=0;
+        int rc=iso_resolve(s,path,&lb,&ll,&d,&sz,&f);
+        if(rc!=IMG_OK) return rc;
+        if(d) return IMG_ENOTSUP;
+        uint8_t *p=(uint8_t*)buf; uint64_t done=0, base=0;
+        for(int i=0;i<f.n && i<32 && done<len;i++){
+            uint64_t elen=f.ext_lens[i];
+            if(off < base+elen){
+                uint64_t skip = off>base ? off-base : 0;
+                uint64_t want = elen-skip; if(want>len-done) want=len-done;
+                if(img_io_read_full(s->io,(uint64_t)f.extents[i]*2048+skip,p+done,(size_t)want)!=IMG_OK) return IMG_EIO;
+                done+=want; off+=want;
+            }
+            base+=elen;
+        }
+        return done==len ? IMG_OK : IMG_ETRUNC;
+    }
+    uint64_t lb=0; bool d=false; uint64_t fsz=0;
+    int rc=resolve(s,path,&lb,&d,&fsz);
+    if(rc!=IMG_OK) return rc;
+    if(d) return IMG_ENOTSUP;
+    uint8_t feb[4096]; fe_t fe;
+    rc=read_fe(s,lb,feb,sizeof feb,&fe);
+    if(rc!=IMG_OK) return rc;
+    uint8_t *p=(uint8_t*)buf; uint64_t done=0, base=0;
+    for(int i=0;i<fe.n_ext && done<len;i++){
+        uint64_t elen=fe.ext[i].bytes;
+        if(off < base+elen){
+            uint64_t skip = off>base ? off-base : 0;
+            uint64_t want = elen-skip; if(want>len-done) want=len-done;
+            if(img_io_read_full(s->io,((uint64_t)s->part_start+fe.ext[i].lb)*s->lb_size+skip,
+                                p+done,(size_t)want)!=IMG_OK) return IMG_EIO;
+            done+=want; off+=want;
+        }
+        base+=elen;
+    }
+    return done==len ? IMG_OK : IMG_ETRUNC;
+}
+
 int img_iso_extract(img_iso *s, const char *path, const char *dst,
                     uint64_t max_bytes, img_prog *prog, uint64_t *out_bytes){
     if(out_bytes) *out_bytes=0;
