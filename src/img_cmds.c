@@ -25,6 +25,7 @@
 #include "img_fat32_fs.h"
 #include "img_event.h"
 #include "img_wim_apply.h"
+#include "img_wim_fs.h"
 /* ---- 功能开关（CMake 降级判定；缺库时对应 =0，命令仍列在表里但明确报不可用）---- */
 #ifndef IMG_WITH_WIM
 #define IMG_WITH_WIM 0
@@ -1166,7 +1167,10 @@ static int cmd_ctl_cancel(img_ctx *ctx, const img_args *in, img_result *out){
 /* ================= 命令 7：cmd.list（自描述：App 可据此自动生成界面） ================= */
 static int cmd_cmd_list(img_ctx *ctx, const img_args *in, img_result *out){
     (void)ctx; (void)in;
-    static char buf[96*1024];       /* 32 条命令 + 帮助文本约 20 KB；留足余量 */
+    /* ★ 线程局部而非进程级 static：cmd.list 无 ctx、允许并行，进程级缓冲会被
+     *   另一条并发命令覆盖。不能改成 per-call malloc —— img_result_raw() 只存指针
+     *   不拷贝，缓冲必须活到调用方渲染完，命令函数里 free 就是悬垂指针。*/
+    IMG_THREAD_LOCAL static char buf[96*1024];
     int n=img_cmd_list_json(buf,sizeof buf);
     if(n<=0){ img_result_fail(out,IMG_EIO,"LIST-FAIL",NULL,"命令表导出失败",NULL); return IMG_EIO; }
     img_result_raw(out,"table",buf);
@@ -1704,8 +1708,12 @@ static int cmd_iso_ls(img_ctx *ctx, const img_args *in, img_result *out){
     img_iso *iso=NULL;
     int rc=img_iso_open_path(&iso,isop,err,sizeof err);
     if(rc!=IMG_OK){ img_result_fail(out,rc,iso_open_code(rc),isop,err[0]?err:"无法打开 ISO",NULL); return rc; }
-    static char jb[256*1024];
-    /* ★ raw 类型必须是【一个完整的 JSON 值】：条目之间只有逗号是不够的，得包成数组 */
+    /* ★ 线程局部（原来是不带 TLS 的进程级 static）：iso.ls 无 ctx、允许并行，
+     *   进程级缓冲会被并发命令互相覆盖 —— 症状是 data.count 与 entries 元素数不符，
+     *   或失败信封里混进别人的条目（race_test 场景③ 就是抓这个的）。
+     *   不能换 per-call malloc：img_result_raw() 只存指针，命令函数里不能 free。
+     *   raw 类型必须是【一个完整的 JSON 值】：条目之间只有逗号不够，得包成数组。*/
+    IMG_THREAD_LOCAL static char jb[256*1024];
     jb[0]='['; isolist_t acc={jb,sizeof jb-2,1,0,false};
     img_span sp; img_span_prep(&sp,"iso","ls","列 ISO 目录");
     img_span_kv_str(&sp,"path",path); img_span_begin(&sp);
@@ -2414,7 +2422,7 @@ static int cmd_wim_identify(img_ctx *ctx, const img_args *in, img_result *out){
         if(rc!=IMG_OK){ img_result_fail(out,rc,"WIM-NOTFOUND",src,err[0]?err:"不是 WIM/ESD",NULL); return rc; }
     }
 
-    static char jb[64*1024]; size_t k=0;
+    IMG_THREAD_LOCAL static char jb[64*1024]; size_t k=0;   /* ★ TLS：wim.identify 无 ctx、可并行 */
     k+=(size_t)snprintf(jb+k,sizeof jb-k,"[");
     int emitted=0;
     for(int i=0;i<n;i++){
@@ -2501,6 +2509,332 @@ static int cmd_win_version(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+
+/* ================= 命令 6f：ntfs.move（盘内改名 / 移动，任意单条路径）====================
+ * 一次覆盖三种诉求：a.txt→b.txt（同目录改名）、/a.txt→/Temp/a.txt（移动）、
+ * /Temp/a.txt→/Temp/b.txt（既换目录又换名）。dst 的末段就是新名字。
+ * ★ 政策：默认【不覆盖】—— 覆盖会吃掉目标文件，必须 App 显式 overwrite=true。 */
+static const img_arg A_NTFSMOVE[] = {
+    {"img",  IMG_A_STR, true,  NULL, "镜像路径（qcow2）", NULL},
+    {"lba",  IMG_A_U64, true,  NULL, "NTFS 分区起始 LBA", chk_lba},
+    {"src",  IMG_A_STR, true,  NULL, "盘内现有路径（/ 开头）", NULL},
+    {"dst",  IMG_A_STR, true,  NULL, "盘内新路径（/ 开头；末段不同=改名，父目录不同=移动）", NULL},
+    {"overwrite", IMG_A_BOOL, false, "false", "目标已存在时是否覆盖（默认 false=直接报错）", NULL},
+};
+/* 把 img_ntfs_move_path 的返回码翻成【能分开病因】的错误码：
+ * "源不存在"/"目标已存在"/"目标是目录"/"空间不够"/"底层失败" 各一条 ——
+ * 之前踩过"所有失败共用一个码"的坑（排查时分不出打错字还是卷坏了）。 */
+static const char *ntfs_move_code(int rc){
+    switch(rc){
+        case IMG_ENOENT:   return "NTFS-PATH-NOTFOUND";
+        case IMG_EEXISTS:  return "NTFS-DEST-EXISTS";
+        case IMG_ENOTSUP:  return "NTFS-SRC-IS-DIR";   /* 源是目录：政策不放行（见 move_path 注释）*/
+        case IMG_ESTATE:   return "NTFS-DEST-IS-DIR";  /* 目标是目录：不许拿文件顶掉它 */
+        case IMG_EFULL:    return "FAT-ENOSPC";
+        case IMG_EINVAL:   return "CMD-ARG-BAD";
+        default:           return "NTFS-MOVE-FAIL";
+    }
+}
+/* 共用：按 lba 从分区表取分区字节数；取不到返回 0 */
+static uint64_t ntfs_part_bytes(img_parttable_t *t,uint64_t lba){
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba)
+            return (t->parts[i].last_lba - t->parts[i].first_lba + 1)*512;
+    return 0;
+}
+static int cmd_ntfs_move(img_ctx *ctx, const img_args *in, img_result *out){
+    if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 改名/移动）","重新编译时开启该功能并安装对应系统库");
+#if IMG_WITH_NTFS3G
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *src=img_args_get(in,"src"), *dst=img_args_get(in,"dst");
+    bool over=img_args_bool(in,"overwrite",false);
+    if(!src||src[0]!='/'||!dst||dst[0]!='/'){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","src/dst","两个都必须是 / 开头的盘内绝对路径",NULL); return IMG_EINVAL;
+    }
+    if(!strcmp(src,dst)){ img_result_bool(out,"noop",true); return IMG_OK; }   /* 原地改名给自己：无事可做 */
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q) return qc_open_fail(out,ctx);
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=ntfs_part_bytes(t,lba);
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+    img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",dst,"不是合法 NTFS（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
+    img_span sp; img_span_prep(&sp,"ntfs","move","盘内改名/移动");
+    img_span_kv_str(&sp,"src",src); img_span_kv_str(&sp,"dst",dst); img_span_begin(&sp);
+    int mr=img_ntfs_move_path(fs,src,dst,over);
+    img_span_end(&sp,mr);
+    /* ★ 校验必须在 umount 之前问（卸载后就问不到了）*/
+    bool gone  = (mr==IMG_OK) && !img_ntfs_path_exists(fs,src);
+    bool arrived=(mr==IMG_OK) &&  img_ntfs_path_exists(fs,dst);
+    img_ntfs_umount(fs);
+    if(mr!=IMG_OK){
+        const char *hint = (mr==IMG_ENOENT)?"源路径不存在（先用 ntfs.list 核对大小写与整条路径）":
+                           (mr==IMG_EEXISTS)?"目标已存在：换个名字，或明确传 overwrite=true":
+                           (mr==IMG_ENOTSUP)?"源是个目录：改名/移动目前只支持文件（NTFS 的 \"..\" 索引项不随 link+delete 更新，未经 Windows 侧验收不放行）":
+                           (mr==IMG_ESTATE)?"目标是个目录：工具不会用文件顶掉目录":
+                           "改名/移动失败（空间不足或卷状态异常）";
+        img_result_fail(out,mr,ntfs_move_code(mr),src,hint,dst); return mr;
+    }
+    if(!(gone&&arrived)){   /* 报成功但状态不符 → 如实报失败，绝不含糊 */
+        img_result_fail(out,IMG_ESTATE,"NTFS-MOVE-FAIL",src,"改完核对不上（源还在或目标不在）：建议 qc.verify",dst);
+        return IMG_ESTATE;
+    }
+    img_result_str(out,"src",src);
+    img_result_str(out,"dst",dst);
+    img_result_bool(out,"moved",true);
+    return IMG_OK;
+#else
+    (void)ctx;(void)in;(void)out; return IMG_ENOTSUP;
+#endif
+}
+
+/* ================= 命令 6g：ntfs.rm（删盘内文件）====================
+ * ★ 政策：只删【文件】。目录一律拒绝（img_ntfs_rm 内部就拒）——
+ *   递归删的误操作比"删不掉"可怕得多。 */
+static const img_arg A_NTFSSRM[] = {
+    {"img",  IMG_A_STR, true,  NULL, "镜像路径（qcow2）", NULL},
+    {"lba",  IMG_A_U64, true,  NULL, "NTFS 分区起始 LBA", chk_lba},
+    {"path", IMG_A_STR, true,  NULL, "要删除的盘内文件（/ 开头）", NULL},
+};
+static int cmd_ntfs_rm(img_ctx *ctx, const img_args *in, img_result *out){
+    if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 删除）","重新编译时开启该功能并安装对应系统库");
+#if IMG_WITH_NTFS3G
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *path=img_args_get(in,"path");
+    if(!path||path[0]!='/'){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","必须是 / 开头的盘内绝对路径",NULL); return IMG_EINVAL; }
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q) return qc_open_fail(out,ctx);
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=ntfs_part_bytes(t,lba);
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+    img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",path,"不是合法 NTFS（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
+    if(!img_ntfs_path_exists(fs,path)){
+        img_ntfs_umount(fs);
+        img_result_fail(out,IMG_ENOENT,"NTFS-PATH-NOTFOUND",path,"要删的路径不存在（先用 ntfs.list 核对）",NULL);
+        return IMG_ENOENT;
+    }
+    img_span sp; img_span_prep(&sp,"ntfs","rm","删盘内文件");
+    img_span_kv_str(&sp,"path",path); img_span_begin(&sp);
+    int rr=img_ntfs_rm(fs,path);
+    img_span_end(&sp,rr);
+    bool gone=(rr==IMG_OK) && !img_ntfs_path_exists(fs,path);
+    img_ntfs_umount(fs);
+    if(rr!=IMG_OK){
+        const char *code=(rr==IMG_ENOTSUP)?"NTFS-IS-DIR":(rr==IMG_EINVAL)?"CMD-ARG-BAD":"FAT-RM-FAIL";
+        const char *hint=(rr==IMG_ENOTSUP)?"这是个目录：工具不删目录（更不会递归删），先删掉里面的文件":
+                                          "删除失败（卷状态或权限异常）";
+        img_result_fail(out,rr,code,path,hint,NULL); return rr;
+    }
+    if(!gone){ img_result_fail(out,IMG_ESTATE,"FAT-RM-FAIL",path,"报成功但路径还在（卷状态异常，建议 qc.verify）",NULL); return IMG_ESTATE; }
+    img_result_str(out,"path",path);
+    img_result_bool(out,"deleted",true);
+    return IMG_OK;
+#else
+    (void)ctx;(void)in;(void)out; return IMG_ENOTSUP;
+#endif
+}
+
+
+/* ================= WIM/ESD 内部只读（wim.ls / wim.extract）=================
+ * 层归属同 iso.*：App 只下命令，不需要自己装 WIM 库、不需要文件操作权限。
+ * ★ 为什么 --wim 可以指 ISO：wimlib 只接受【真实文件路径】（没有块设备回调），
+ *   所以 ISO 内的 install.wim/.esd 必须先复制成本地文件才能浏览/抽取。
+ *   这个代价不该对用户隐身 —— 工具把它做掉，同时把"抽了多少字节"如实回给 App
+ *   （source_note），并在使用完删掉临时文件（unlink；进程被杀会留孤儿，
+ *   App 启动时清 img_tmpdir() 里 imgtool-src-* 是既定契约，见手册）。
+ * ★ 过滤状态一律放在累加器里，不用进程级全局：iso.ls 那种 static 缓冲在
+ *   【无 ctx 的命令】上并发跑会互相踩（这两条命令就不需要 ctx）。 */
+#define WIM_LS_MAX 4096
+typedef struct {
+    char *b; size_t cap, len; int n; bool trunc;
+    char contains[128]; size_t limit;      /* limit=0 → 用 WIM_LS_MAX */
+} wimlist_t;
+/* 手写 JSON 字符串转义（与 iso 同一套规矩：机器可读永远 ASCII/转义安全）*/
+static int wj_esc(char *dst,size_t cap,const char *s){
+    int k=0;
+    for(const unsigned char *p=(const unsigned char*)s; p&&*p && k<(int)cap-8; p++){
+        if(*p=='"'||*p=='\\'){ dst[k++]='\\'; dst[k++]=(char)*p; }
+        else if(*p<0x20) k+=snprintf(dst+k,cap-(size_t)k,"\\u%04x",*p);
+        else dst[k++]=(char)*p;
+    }
+    dst[k]=0;
+    return k;
+}
+static void wim_ls_cb(void *ud,const char *name,const char *full,bool isdir,
+                      uint64_t size,uint32_t attrs,size_t depth){
+    wimlist_t *a=(wimlist_t*)ud;
+    if(!a) return;
+    size_t lim=a->limit?a->limit:WIM_LS_MAX;
+    if((size_t)a->n>=lim){ a->trunc=true; return; }
+    if(a->contains[0] && !(full&&strstr(full,a->contains))) return;    /* 按整条路径匹配 */
+    char nm[512], fp[1024];
+    wj_esc(nm,sizeof nm,name?name:"");
+    wj_esc(fp,sizeof fp,full?full:"");
+    char item[1600];
+    int k=snprintf(item,sizeof item,"%s{\"name\":\"%s\",\"path\":\"%s\",\"dir\":%s,"
+                       "\"size\":%llu,\"attrs\":%u,\"depth\":%zu}",
+                   a->n?",":"",nm,fp,isdir?"true":"false",
+                   (unsigned long long)size,(unsigned)attrs,depth);
+    if(a->len+(size_t)k+1 < a->cap){ memcpy(a->b+a->len,item,(size_t)k); a->len+=(size_t)k; a->n++; }
+    else a->trunc=true;
+}
+/* --wim 可以指 WIM/ESD 本体，也可以指含它的 ISO。返回本地可用路径；
+ * is_tmp=true 时调用方用完必须 unlink。note/nsecap 回填"替你做了什么"。*/
+static int wim_source_local(const char *in,char *out,size_t cap,bool *is_tmp,
+                            char *note,size_t notecap,uint64_t *out_bytes,img_prog *prog){
+    if(is_tmp) *is_tmp=false;
+    if(out_bytes) *out_bytes=0;
+    size_t n=in?strlen(in):0;
+    bool looks_iso = n>4 && !strcasecmp(in+n-4,".iso");
+    if(!looks_iso){ snprintf(out,cap,"%s",in); return IMG_OK; }
+    img_iso *iso=NULL; char err[256]="";
+    int rc=img_iso_open_path(&iso,in,err,sizeof err);
+    if(rc!=IMG_OK) return rc;
+    const char *cands[2]={"/sources/install.wim","/sources/install.esd"};
+    const char *hit=NULL; uint64_t fsz=0; bool d=false;
+    for(int i=0;i<2;i++) if(img_iso_stat(iso,cands[i],&fsz,&d)==IMG_OK && !d){ hit=cands[i]; break; }
+    if(!hit){ img_iso_close(iso); return IMG_ENOENT; }
+    const char *tmp=img_tmpdir();
+    if(!tmp||!tmp[0]){ img_iso_close(iso); return IMG_ESTATE; }
+    snprintf(out,cap,"%s/imgtool-src-%d%s",tmp,(int)getpid(),
+             (strstr(hit,".esd")||strstr(hit,"ESD"))?".esd":".wim");
+    uint64_t got=0;
+    rc=img_iso_extract(iso,hit,out,0,prog,&got);
+    img_iso_close(iso);
+    if(rc!=IMG_OK){ unlink(out); out[0]=0; return rc; }
+    if(is_tmp) *is_tmp=true;
+    if(out_bytes) *out_bytes=got;
+    if(note) snprintf(note,notecap,"已从 ISO 抽出 %s（%llu 字节）到临时文件供 wimlib 读取",
+                     hit,(unsigned long long)got);
+    return IMG_OK;
+}
+/* wim.ls / wim.extract 共用的失败码翻译（把"没这个路径"和"库读不动"分开）*/
+static const char *wim_fs_code(int rc,int kind){
+    switch(rc){
+    case IMG_ENOENT:  return kind==1?"WIM-PATH-NOTFOUND":"HOST-OPEN-FAIL";
+    case IMG_ERANGE:  return "WIM-IDX-INVALID";
+    case IMG_EINVAL:  return "CMD-ARG-BAD";
+    case IMG_EFORMAT: return "WIM-NOTFOUND";
+    case IMG_ENOTSUP: return "WIM-IS-DIR";
+    case IMG_EFULL:   return "HOST-ENOSPC";
+    case IMG_ECANCELLED: return "CMD-CANCELLED";
+    case IMG_ESTATE:  return "HOST-ENOSPC";
+    default:          return kind==1?"WIM-LIST-FAIL":"WIM-EXTRACT-FAIL";
+    }
+}
+static const img_arg A_WIMLS[] = {
+    {"wim",       IMG_A_STR, true,  NULL,   "WIM/ESD 路径；也可以直接给含它的 ISO（工具自动定位 sources\\install.wim|.esd）", NULL},
+    {"index",     IMG_A_U64, false, "1",    "映像索引（先用 wim.identify 拿清单）", NULL},
+    {"path",      IMG_A_STR, false, "/",    "WIM 内的目录（/ 开头，大小写不敏感）", NULL},
+    {"recursive", IMG_A_BOOL,false, "false","true=整棵子树（大映像可达几十万条，务必配 limit）", NULL},
+    {"contains",  IMG_A_STR, false, NULL,   "只回路径里含这个子串的条目（App 省字节用）", NULL},
+    {"limit",     IMG_A_U64, false, "2000", "最多回多少条（0=用硬上限 4096）", NULL},
+};
+static int cmd_wim_ls(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx;
+    if(!IMG_WITH_WIM) return feat_unavail(out,"wimlib（WIM/ESD 浏览）","重新编译时开启 IMG_WITH_WIM 并安装 libwim");
+#if IMG_WITH_WIM
+    const char *srcp=img_args_get(in,"wim");
+    if(!srcp||!srcp[0]){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","wim","要一个 WIM/ESD 或 ISO 路径",NULL); return IMG_EINVAL; }
+    int index=(int)img_args_u64(in,"index",1);
+    const char *dir=img_args_get(in,"path"); if(!dir||!dir[0]) dir="/";
+    if(dir[0]!='/'){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","WIM 内路径必须以 / 开头",NULL); return IMG_EINVAL; }
+    bool rec=img_args_bool(in,"recursive",false);
+    uint64_t lim64=img_args_u64(in,"limit",2000);
+    const char *contains=img_args_get(in,"contains");
+
+    char local[1024]; bool is_tmp=false; char note[256]=""; uint64_t extracted=0;
+    int rc=wim_source_local(srcp,local,sizeof local,&is_tmp,note,sizeof note,&extracted,img_cmd_prog());
+    if(rc!=IMG_OK){
+        img_result_fail(out,rc,wim_fs_code(rc,1),srcp,
+                        rc==IMG_ENOENT?"不是 ISO 里的 install.wim/.esd，或这个文件不是 WIM":"无法准备 WIM 源",NULL);
+        return rc;
+    }
+    /* ★ 线程局部，理由同 iso.ls（无 ctx 命令可并行 + raw 只存指针不能就地 free）*/
+    IMG_THREAD_LOCAL static char jb[512*1024];
+    jb[0]=(char)0x5b; wimlist_t acc={jb,sizeof jb-2,1,0,false};   /* ★ len 从 1 起：第 0 格是 '['，别覆盖掉 */
+    if(contains&&contains[0]) snprintf(acc.contains,sizeof acc.contains,"%s",contains);
+    acc.limit=(size_t)lim64;
+    char err[256]="";
+    /* 先辨一下目标到底是目录还是文件：wimlib 对文件路径列"子项"会安静返回 0 条，
+     * App 看到 count=0 会以为目录是空的 —— 那是误导，必须显式报错。*/
+    {   img_wim_stat_t est; memset(&est,0,sizeof est);
+        if(strcmp(dir,"/")!=0 && img_wim_stat(local,index,dir,&est,err,sizeof err)==IMG_OK && !est.is_dir){
+            if(is_tmp) unlink(local);
+            img_result_fail(out,IMG_EINVAL,"WIM-NOT-A-DIR",dir,"这是文件不是目录；抽文件用 wim.extract",NULL);
+            return IMG_EINVAL;
+        }
+    }
+    img_span sp; img_span_prep(&sp,"wim","ls","列 WIM/ESD 目录");
+    img_span_kv_str(&sp,"path",dir); img_span_begin(&sp);
+    rc=img_wim_list(local,index,dir,rec,wim_ls_cb,&acc,err,sizeof err);
+    img_span_end(&sp,rc);
+    if(is_tmp) unlink(local);                     /* ★ 用完就删，不把 4~8 GB 垃圾留在用户机上 */
+    if(rc!=IMG_OK){
+        img_result_fail(out,rc,wim_fs_code(rc,1),dir,err[0]?err:"列目录失败",NULL);
+        return rc;
+    }
+    jb[acc.len++]=']'; jb[acc.len]=0;
+    img_result_u64(out,"count",(uint64_t)acc.n);
+    img_result_bool(out,"truncated",acc.trunc);
+    img_result_bool(out,"recursive",rec);
+    img_result_str(out,"path",dir);
+    if(note[0]) img_result_str(out,"source_note",note);
+    img_result_raw(out,"entries",jb);
+    return IMG_OK;
+#else
+    (void)ctx;(void)in;(void)out; return IMG_ENOTSUP;
+#endif
+}
+static const img_arg A_WIMEXTRACT[] = {
+    {"wim",   IMG_A_STR, true,  NULL, "WIM/ESD 路径；也可以直接给含它的 ISO", NULL},
+    {"index", IMG_A_U64, false, "1",  "映像索引", NULL},
+    {"path",  IMG_A_STR, true,  NULL, "WIM 内的文件路径（/ 开头；目录会被拒）", NULL},
+    {"dst",   IMG_A_STR, true,  NULL, "本地输出文件（会覆盖）", NULL},
+};
+static int cmd_wim_extract(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx;
+    if(!IMG_WITH_WIM) return feat_unavail(out,"wimlib（WIM/ESD 取文件）","重新编译时开启 IMG_WITH_WIM 并安装 libwim");
+#if IMG_WITH_WIM
+    const char *srcp=img_args_get(in,"wim"), *ip=img_args_get(in,"path"), *dst=img_args_get(in,"dst");
+    int index=(int)img_args_u64(in,"index",1);
+    if(!srcp||!ip||!dst){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","wim/path/dst","三个都必填",NULL); return IMG_EINVAL; }
+    if(ip[0]!='/'){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","WIM 内路径必须以 / 开头",NULL); return IMG_EINVAL; }
+    char local[1024]; bool is_tmp=false; char note[256]=""; uint64_t extracted=0;
+    img_prog *prog=img_cmd_prog();
+    int rc=wim_source_local(srcp,local,sizeof local,&is_tmp,note,sizeof note,&extracted,prog);
+    if(rc!=IMG_OK){
+        img_result_fail(out,rc,wim_fs_code(rc,2),srcp,"无法准备 WIM 源（不是 WIM/ESD，或 ISO 里没有 install.wim/.esd）",NULL);
+        return rc;
+    }
+    char err[256]=""; uint64_t got=0;
+    /* ★ 错误码分级：源准备失败 = 文件层面的问题（HOST-OPEN-FAIL 那一族），
+     *   抽取失败 = 映像【内部路径】的问题（WIM-PATH-NOTFOUND）——
+     *   之前一律按 kind=2 翻，把"里面没这个文件"报成"文件打不开"，方向完全带偏。*/
+    img_span sp; img_span_prep(&sp,"wim","extract","从 WIM/ESD 抽单个文件");
+    img_span_kv_str(&sp,"path",ip); img_span_begin(&sp);
+    rc=img_wim_extract_file(local,index,ip,dst,prog,&got,err,sizeof err);
+    img_span_kv_u64(&sp,"written",got);
+    img_span_end(&sp,rc);
+    if(is_tmp) unlink(local);
+    if(rc!=IMG_OK){
+        if(rc==IMG_ECANCELLED) unlink(dst);       /* 取消不留半成品 */
+        img_result_fail(out,rc,wim_fs_code(rc,1),ip,err[0]?err:"抽取失败",NULL);
+        return rc;
+    }
+    img_result_str(out,"path",ip);
+    img_result_str(out,"dst",dst);
+    img_result_u64(out,"bytes",got);
+    if(note[0]) img_result_str(out,"source_note",note);
+    return IMG_OK;
+#else
+    (void)ctx;(void)in;(void)out; return IMG_ENOTSUP;
+#endif
+}
+
 const img_cmd IMG_CMD_TABLE[] = {
     {"img.info",  "1.0", "显示镜像基本信息（大小/分区表/分区数）",
         A_INFO,   (int)(sizeof A_INFO  /sizeof A_INFO[0]),   cmd_img_info},
@@ -2549,8 +2883,16 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_NTFSPUT,(int)(sizeof A_NTFSPUT/sizeof A_NTFSPUT[0]), cmd_ntfs_put},
     {"ntfs.export","1.0", "把 NTFS 分区里的文件导出到本地（抽 bootmgr/boot.sdi/winre.wim）",
         A_NTFSEXPORT,(int)(sizeof A_NTFSEXPORT/sizeof A_NTFSEXPORT[0]), cmd_ntfs_export},
+    {"ntfs.move",  "1.0", "盘内改名/移动【单条路径】（末段不同=改名，父目录不同=移动；默认不覆盖）",
+        A_NTFSMOVE,(int)(sizeof A_NTFSMOVE/sizeof A_NTFSMOVE[0]), cmd_ntfs_move},
+    {"ntfs.rm",    "1.0", "删除盘内【一个文件】（目录一律拒绝，更不会递归删）",
+        A_NTFSSRM,(int)(sizeof A_NTFSSRM/sizeof A_NTFSSRM[0]), cmd_ntfs_rm},
     {"wim.identify","1.0", "从内容识别 WIM/ESD/ISO 里的 Windows 版本（不信文件名）",
         A_WIMID,(int)(sizeof A_WIMID/sizeof A_WIMID[0]), cmd_wim_identify},
+    {"wim.ls",     "1.0", "浏览 WIM/ESD 内部目录树（只读；--wim 可直接给 ISO，工具自己找出 install.wim/.esd）",
+        A_WIMLS,(int)(sizeof A_WIMLS/sizeof A_WIMLS[0]), cmd_wim_ls},
+    {"wim.extract","1.0", "从 WIM/ESD 里只读抽出【单个文件】到本地（--wim 可直接给 ISO；取消不留半成品）",
+        A_WIMEXTRACT,(int)(sizeof A_WIMEXTRACT/sizeof A_WIMEXTRACT[0]), cmd_wim_extract},
     {"win.version","1.0", "读已装盘的真实版本：ntoskrnl 的 PE 版本 + 注册表 + SKU 交叉验证",
         A_WINVER,(int)(sizeof A_WINVER/sizeof A_WINVER[0]), cmd_win_version},
     {"bcd.build","1.0", "从模板直接构建 BCD（Win7 的 BCD-Template 没有绑定，必须这条）",

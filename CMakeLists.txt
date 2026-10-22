@@ -46,6 +46,7 @@ set(IMG_SOURCES
   src/img_ntfs_fs.c
   src/img_fat32_fs.c
   src/img_wim_apply.c
+  src/img_wim_fs.c        # WIM/ESD 内部只读浏览 + 抽单文件
   src/img_ntfs_fmt.c     # 常驻：模块缺席时返回 IMG_ENOTSUP，不让链接炸
   src/img_iso.c          # ISO/UDF 只读（自研解析；抽 install.wim）
   src/img_recovery.c     # 恢复分区/WinRE（查/填/设属性）
@@ -100,7 +101,7 @@ if(IMG_WITH_WIM)
 endif()
 if(NOT IMG_WITH_WIM)
   add_compile_definitions(IMG_WITH_WIM=0)
-  list(REMOVE_ITEM IMG_SOURCES src/img_wim_apply.c)
+  list(REMOVE_ITEM IMG_SOURCES src/img_wim_apply.c src/img_wim_fs.c)
 endif()
 
 # ---- libhivex（BCD hive 读写；imggenbcd 需要；缺了就只跳过该工具）----

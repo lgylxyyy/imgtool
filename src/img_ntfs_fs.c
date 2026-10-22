@@ -729,3 +729,123 @@ int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
 }
 
 
+
+/* ================= 改名 / 移动（任意单条路径）=================
+ * 与 img_ntfs_move_into 同一套机制：【新位置 ntfs_link → sync 父目录落盘 → 旧位置 ntfs_delete】。
+ * ★ 顺序是"先加后减"：link count 全程 ≥1，中途失败最坏是"新旧两处都在"（重试即可），
+ *   绝不会出现"名字没了、数据也没了"。这是把 ntfs_inode_sync 放在 delete 之前的原因
+ *   （move_into 那次事故的根因就是少这一步 sync）。
+ * ★ 为什么目录要先实测再放开：NTFS 把"我爹是谁"记在【子目录自己的 $I30 的 ".." 索引项】里，
+ *   而 ntfs_link+ntfs_delete 只动父目录的索引 —— 搬完 ".." 仍指向旧父。
+ *   实测结论见 tests/ntfs-move-test.sh（同一份代码里判目录）。
+ */
+static int split_abs(const char *abs,char *dir,size_t dcap,char *name,size_t ncap){
+    const char *slash=strrchr(abs,'/');
+    if(!slash||!slash[1]) return -1;                       /* 结尾是 '/' 或不带名 */
+    size_t plen=(size_t)(slash-abs);
+    if(plen==0) snprintf(dir,dcap,"/");                     /* 根下的文件：父="/"（lookup 认这个）*/
+    else{ if(plen>=dcap) return -1; memcpy(dir,abs,plen); dir[plen]=0; }
+    if(strlen(slash+1)>=ncap) return -1;
+    snprintf(name,ncap,"%s",slash+1);
+    return 0;
+}
+
+int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,bool overwrite){
+    if(!fs||!fs->mounted||!src_abs||!dst_abs) return IMG_EINVAL;
+    if(src_abs[0]!='/'||dst_abs[0]!='/'||!src_abs[1]||!dst_abs[1]) return IMG_EINVAL;
+    static char sdir[512],sname[256],ddir[512],dname[256];
+    if(split_abs(src_abs,sdir,sizeof sdir,sname,sizeof sname)!=0) return IMG_EINVAL;
+    if(split_abs(dst_abs,ddir,sizeof ddir,dname,sizeof dname)!=0) return IMG_EINVAL;
+
+    ntfs_inode *spar=lookup(fs->vol,sdir,NULL);
+    if(!spar) return IMG_ENOENT;                            /* 源父目录不存在 */
+    ntfschar *su=NULL; size_t sul=0;
+    if(!to_ntfs(sname,&su,&sul)){ ntfs_inode_close(spar); return IMG_EINVAL; }
+    errno=0;
+    MFT_REF sref=ntfs_inode_lookup_by_name(spar,su,sul);
+    if(!mftref_ok(sref)){ ntfs_inode_close(spar); free(su); return IMG_ENOENT; }  /* 源不存在 */
+    ntfs_inode *ni=ntfs_inode_open(fs->vol,sref);
+    if(!ni){ ntfs_inode_close(spar); free(su); return IMG_EIO; }
+    bool isdir=(ni->mrec->flags & MFT_RECORD_IS_DIRECTORY)!=0;
+    /* ★ 目录一律拒绝（当前不放行的原因，写清楚免得后人当 bug 顺手删）：
+     *   NTFS 把"我爹是谁"记在【子目录自己的 $I30 里的 ".." 索引项】，
+     *   而 ntfs_link+ntfs_delete 只改父目录的索引 —— 搬完 ".." 仍指向旧父，
+     *   Windows 上 cd .. 会跳到错误位置。要放开必须先有"同步 .."的实现
+     *   + Windows 侧真机验收。文件不受影响（文件没有父引用这回事）。
+     *   注：img_ntfs_move_into 目前确实会搬目录（恢复分区那条流程在用），
+     *   它的 ".." 正确性同样欠一次 Windows 侧验收 —— 已记入待办，不虚报。*/
+    if(isdir){
+        ntfs_inode_close(ni); ntfs_inode_close(spar); free(su);
+        return IMG_ENOTSUP;
+    }
+
+    /* 目标父目录：不存在就建（与 ntfs.put 的 --mkdir 行为一致，App 少一次往返）*/
+    ntfs_inode *dpar=lookup(fs->vol,ddir,NULL);
+    if(!dpar){
+        if(img_ntfs_mkdir_p(fs,ddir)!=IMG_OK){
+            ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); return IMG_EIO;
+        }
+        dpar=lookup(fs->vol,ddir,NULL);
+        if(!dpar){ ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); return IMG_EIO; }
+    }
+    ntfschar *du=NULL; size_t dul=0;
+    if(!to_ntfs(dname,&du,&dul)){
+        ntfs_inode_close(dpar); ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); return IMG_EINVAL;
+    }
+    errno=0;
+    MFT_REF dref=ntfs_inode_lookup_by_name(dpar,du,dul);
+    if(mftref_ok(dref) && dref==sref){                     /* 已指向同一 inode（大小写写法不同）→ 成功 */
+        ntfs_inode_close(dpar); ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); free(du);
+        return IMG_OK;
+    }
+    if(mftref_ok(dref)){
+        if(!overwrite){
+            ntfs_inode_close(dpar); ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); free(du);
+            return IMG_EEXISTS;                             /* 目标已存在：不悄悄覆盖 */
+        }
+        /* 覆盖：只能覆盖【文件】—— 目标若是目录，删它会连累一 subtree，一律拒绝 */
+        ntfs_inode *dst_ni=ntfs_inode_open(fs->vol,dref);
+        bool dst_isdir = dst_ni && (dst_ni->mrec->flags & MFT_RECORD_IS_DIRECTORY);
+        if(dst_ni) ntfs_inode_close(dst_ni);
+        if(dst_isdir){
+            /* 与"源是目录"分开返回码（IMG_ESTATE）：一个是政策不放行，一个是
+             * 绝不允许拿文件顶掉目录 —— App 的文案与处理完全不同 */
+            ntfs_inode_close(dpar); ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); free(du);
+            return IMG_ESTATE;
+        }
+        int r=img_ntfs_rm(fs,dst_abs);
+        if(r!=IMG_OK){
+            ntfs_inode_close(dpar); ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); free(du);
+            return r;
+        }
+        /* rm 动过索引，dpar 需要重新打开（它的记录可能已被 ntfs-3g 内部刷新）*/
+        ntfs_inode_close(dpar);
+        dpar=lookup(fs->vol,ddir,NULL);
+        if(!dpar){ ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); free(du); return IMG_EIO; }
+    }
+    /* ① 新位置加链接 */
+    if(ntfs_link(ni,dpar,du,(u8)dul)!=0){
+        int e=errno;
+        ntfs_inode_close(dpar); ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); free(du);
+        return (e==EDQUOT||e==ENOSPC)?IMG_EFULL:IMG_EIO;
+    }
+    /* ② ★ 先把新父目录同步落盘，再动旧目录项（顺序不能反）*/
+    if(ntfs_inode_sync(dpar)!=0){
+        int e=errno;
+        ntfs_inode_close(dpar); ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); free(du);
+        return e?IMG_EIO:IMG_EIO;
+    }
+    ntfs_inode_close(dpar);
+    /* ③ 删旧目录项：ntfs_delete 会【消费】ni 与 spar，之后绝不能再 close/free */
+    errno=0;
+    int dr=ntfs_delete(fs->vol,src_abs,ni,spar,su,(u8)sul);
+    ni=NULL; spar=NULL;
+    free(du);
+    if(dr!=0){
+        int e=errno;
+        /* 旧项没删掉 → 新旧两处都在（数据完好），如实报失败让调用方重试 */
+        return (e==ENOENT)?IMG_ENOENT:IMG_EIO;
+    }
+    free(su);
+    return IMG_OK;
+}

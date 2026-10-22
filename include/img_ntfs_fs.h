@@ -84,6 +84,12 @@ int img_ntfs_rm(img_ntfs_fs *fs, const char *abs_path);
  * moved_out 返回实际搬动个数。返回 IMG_OK/IMG_E* */
 int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
                        const char **names, int nnames, int *moved_out);
+/* 改名/移动【任意单条路径】（src_abs/dst_abs 都以 / 开头；同目录改名的 dst 就换末段名）。
+ * 机制：新位置 ntfs_link → sync 新父 → 旧位置 ntfs_delete（先加后减，失败最坏是两处都在）。
+ * 返回 IMG_OK / IMG_ENOENT(源或源父不存在) / IMG_EEXISTS(目标已存在且 overwrite=false)
+ *      / IMG_ENOTSUP(overwrite 时目标是目录) / IMG_EFULL / IMG_EIO。
+ * ★ 目录：见 img_ntfs_fs.c 里 move_path 的注释与 tests/ntfs-move-test.sh 的实测结论。*/
+int img_ntfs_move_path(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs, bool overwrite);
 
 
 #ifdef __cplusplus

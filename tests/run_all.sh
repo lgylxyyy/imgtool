@@ -43,7 +43,19 @@ run "corrupt-chain-test（防死循环）"      bash "$ROOT/tests/corrupt-chain-
 run "timeout_test（I/O 看门狗：无进展→超时→fail-fast）" bash -c "./build/tests/timeout_test"
 run "fd_test（fd 生命周期 15 条）"        "$ROOT/build/tests/fd_test" "$W/a.qcow2"
 run "thread_test（并发 4 组）"            "$ROOT/build/tests/thread_test" "$W/a.qcow2" "$W/b.qcow2" 2048 2048 "$W/t.log"
-run "race_test（全局锁：并发首次初始化 + 环形缓冲读写竞争）" "$ROOT/build/tests/race_test" 60
+# 场景③ 素材：一张最小 ISO（无 xorrisofs 就只跑前两个场景）
+RACE_ISO=""
+if command -v xorrisofs >/dev/null 2>&1; then
+  mkdir -p "$W/isosrc" && echo hello > "$W/isosrc/a.txt"
+  xorrisofs -o "$W/race.iso" "$W/isosrc" >/dev/null 2>&1 && RACE_ISO="$W/race.iso"
+fi
+if [ -n "$RACE_ISO" ]; then
+  # 场景③ 要真读 ISO，沙箱里每次调用约 0.5s（proot syscall 代理开销，非库慢）
+  run "race_test（全局锁/环形缓冲/无ctx命令 TLS 缓冲）" "$ROOT/build/tests/race_test" 5 "$RACE_ISO"
+else
+  run "race_test（全局锁/环形缓冲）" "$ROOT/build/tests/race_test" 40
+fi
+run "ntfs-move-test（盘内改名/移动/删除 端到端）" python3 "$ROOT/tests/ntfs-move-test.py"
 run "cancel_test（取消 7 条）"            "$ROOT/build/tests/cancel_test" "$W/a.qcow2" 2048 "$W/big.bin"
 if [ -x "$ROOT/build/tests/bcd_test" ]; then
   run "bcd_test（BCD 读写）" "$ROOT/build/tests/bcd_test" "$ROOT/reference/bcd-reference-uefi.bin" "$W/bcd_out.bin"

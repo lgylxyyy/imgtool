@@ -13,6 +13,20 @@ extern "C" {
 /* ---------- 版本 ---------- */
 #define IMG_VERSION "0.1.0"
 
+/* ---------- 线程局部存储 ----------
+ * 命令表里几个"拼 JSON 的大缓冲"必须用它。为什么不是别的方案：
+ *   · 进程级 static → 无 ctx 的命令（iso.ls / wim.ls / wim.identify / cmd.list）是允许
+ *     并行的，两个线程同时往同一块缓冲里写 → 另一边的输出被咬（race_test 场景③ 取证）。
+ *   · per-call malloc → img_result_raw() 只存指针不拷贝（大列表复制代价高），
+ *     缓冲必须活到调用方渲染完，命令函数里 free 等于留一个悬垂指针。
+ *   · 给无 ctx 命令上全局锁 → 把库的并发能力压成排队，实测直接把并行压测拖到超时。
+ * MSVC 用 __declspec(thread)，其余走 C11 _Thread_local（GCC/clang/Bionic 都支持）。*/
+#if defined(_MSC_VER)
+#  define IMG_THREAD_LOCAL __declspec(thread)
+#else
+#  define IMG_THREAD_LOCAL _Thread_local
+#endif
+
 /* ---------- 错误码（负值，<=0 表示失败） ---------- */
 typedef enum {
     IMG_OK            =  0,

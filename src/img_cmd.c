@@ -354,7 +354,13 @@ int img_cmd_exec(const char *name, img_ctx *ctx, const img_args *in, img_result 
         return rc;
     }
     /* ★ 同一句柄串行：App 从多个线程调同一个 ctx 时排队执行，
-     *   避免踩坏 qcow2 的 L1/L2 缓存与 L2 表缓冲 */
+     *   避免踩坏 qcow2 的 L1/L2 缓存与 L2 表缓冲。
+     * ★ 没有句柄的命令【不加全局锁】—— 它们要能并行（两个 iso.extract 不该排队）。
+     *   中途试过给它们上一把进程级串行锁，被实测否掉了：真正该修的是命令表里那些
+     *   进程级 static 大缓冲（iso.ls / wim.ls / wim.identify / cmd.list 为省一次
+     *   malloc 用了 static，并发跑会互相覆盖 → race_test 场景③ 守这条）。
+     *   上锁的代价是并发退化成排队（实测 240 次调用直接超时），
+     *   拆 static 的代价是一次 malloc/free —— 后者明显更划算。*/
     img_lock_t *lk = ctx ? &ctx->lk : NULL;
     img_lock_acquire(lk);
     rc=c->run(ctx,use,out);
