@@ -434,3 +434,19 @@ $T/imgmkfs $W/tpl.qcow2 --mkfs $LBA TEST
    `SystemSetupInProgress` / `SetupType`（imagex/wimlib 裸灌 Win7 的标准收尾）。
 
 **未做**：`win.finish`（写 setup 状态）、`img.create --sr-type=07|27`、裸灌路径跑进桌面。
+
+### 裸灌路径打通到 OOBE（2026-10-22，Win7 32 位实测）
+
+三关叠加，缺一不可（详见 `../docs/AGENT-MEMORY.md` 同名条目）：
+1. **引导链**：MBR 码 + bootmgr/boot.sdi + BCD（按分区号定位）+ 内置 $Boot 引导码模板
+2. **系统保留分区 0x27**：官方明文（`use type 0x27 … Do not use … 0x7`）；
+   0x07 时 Win7 报"驱动器号不匹配"
+3. **`win.finish`**：`SYSTEM\Setup\Status\ChildCompletion\setup.exe` 1→3
+   （微软 Learn 官方修复），离线改 hive
+
+实测：`e-win7x86-bios.qcow2`（Win7 旗舰版 32 位，wim.apply 裸灌）
+→ QEMU 540 秒进入 **Windows 7 OOBE 界面**（"设置 Windows"，国家/地区/键盘布局）。
+`win.finish --dry-run` 输出：`setup.exe=1, SetupType=2, SystemSetupInProgress=1` → 改 3 → 生效。
+
+未做：Win10/Win11 的同样收尾验证（它们的 setup 状态机可能不同，Win10/11 用 Sysprep
+的 `SetupType=0` + OOBE；需要各自 dry-run 看实际值）；官方 `bcdboot` 对齐。
