@@ -480,3 +480,8 @@ $T/imgmkfs $W/tpl.qcow2 --mkfs $LBA TEST
 风险：源头是两个大文件（Xlite ≈10GB、diskB ≈11GB）。若被清理，可用
 `git cat-file -p 9c8277ce…` 取回模板字节，但无法再复核“当时的模板盘”。
 校验入口：`python3 tests/vbr-tpl-test.py`（数组==文件==写入盘，10 条断言）。
+
+**存证（2026-10-22）**：`reference/ntfs-vbr-xlite-source.bin` 与 `reference/ntfs-vbr-diskb-source.bin`
+是从那两个源盘抽出的 `$Boot` 前 10 扇区快照（各 5120 B）；`reference/ntfs-vbr-README.md`
+写清三者关系、证据链与适用范围。`tests/vbr-tpl-test.py` 扩到 15 条断言：
+数组 == 文件 == 两个源快照的引导码段 == 写入盘。
