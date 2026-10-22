@@ -2098,7 +2098,10 @@ static int cmd_bcd_create(img_ctx *ctx, const img_args *in, img_result *out){
         rq.sr_off=(boot_lba!=sys_lba)?boot_lba*512ull:0;
     }
 
-    char bcdtmp[]="/tmp/imgbcdcreateXXXXXX";
+    const char *td=img_tmpdir();
+    if(!td){ img_result_fail(out,IMG_ENOTSUP,"TMPDIR-UNAVAILABLE",NULL,
+                        "没有可写的临时目录，请设置 IMGTOOL_TMPDIR",NULL); return IMG_ENOTSUP; }
+    char bcdtmp[528]; snprintf(bcdtmp,sizeof bcdtmp,"%s/imgbcdcreateXXXXXX",td);
     int fd=mkstemp(bcdtmp); if(fd<0){ img_result_fail(out,IMG_EIO,"BCD-BUILD-FAIL",NULL,"建不了临时文件",NULL); return IMG_EIO; }
     close(fd);
     char err[256]="";

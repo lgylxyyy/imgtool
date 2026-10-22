@@ -119,4 +119,9 @@ const char *img_op_name(img_op_t op);
 #ifdef __cplusplus
 }
 #endif
-#endif /* IMG_TYPES_H */
+/* 可写临时目录：IMGTOOL_TMPDIR → TMPDIR → /tmp → "."，取第一个可写的。
+ * ★ 安卓没有 /tmp，库内任何地方都不许再写死 "/tmp"。返回 NULL 表示没有可写目录，
+ *   调用方必须报错，不能继续往 /tmp 上撞。 */
+const char *img_tmpdir(void);
+
+#endif

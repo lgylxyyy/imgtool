@@ -73,7 +73,7 @@ static void test_mbr(void){
 
     /* displayorder 必须是 GUID 列表（t=7）；写成 REG_SZ 会 0xc0000098。
      * img_bcd 没有暴露"读元素类型"，所以直接拿生成物用 hivex 看。 */
-    { char tp[] = "/tmp/bcdcreateXXXXXX"; int fd = mkstemp(tp);
+    { const char *td = img_tmpdir(); int fd = -1; char tp[528] = ""; if(td){ snprintf(tp, sizeof tp, "%s/bcdcreateXXXXXX", td); fd = mkstemp(tp); }
       if(fd >= 0){ ssize_t wr = write(fd, m, n); (void)wr; close(fd);
           hive_h *h = hivex_open(tp, 0);
           int ty = -1;

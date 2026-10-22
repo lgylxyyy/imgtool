@@ -30,7 +30,8 @@ static uint64_t be64r(const unsigned char *b){
 
 int main(void){
     setvbuf(stdout,NULL,_IONBF,0);
-    char path[] = "/tmp/qcscanXXXXXX";
+    const char *td = img_tmpdir(); char path[528];
+    snprintf(path, sizeof path, "%s/qcscanXXXXXX", td ? td : ".");
     int fd = mkstemp(path); if(fd >= 0) close(fd);
     printf("qcscan-test — qcow2 结构自检\n");
 
@@ -103,7 +104,8 @@ int main(void){
      * 手机上"进程被系统杀掉"是必然事件，所以这条必须过：
      *   被杀之后重开 → 扫描必须干净（无别名/越界）→ 继续写不许串到旧数据里。*/
     printf("\n── kill -9 之后续写（崩溃一致性）──\n");
-    char path2[] = "/tmp/qckillXXXXXX";
+    char path2[528];
+    snprintf(path2, sizeof path2, "%s/qckillXXXXXX", td ? td : ".");
     int fd2 = mkstemp(path2); if(fd2 >= 0) close(fd2);
     img_io_opts_t io2 = {0}; io2.writable = true;
     img_io *fh2 = img_io_open_path(path2, &io2);

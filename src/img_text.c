@@ -22,6 +22,8 @@ int img_lang_en(void){
 
 /* zh → en。只收录【会进 JSON 信封 / 日志】的人话；注释和 CLI 专属文案不在这里。 */
 static const char *const T[][2] = {
+    {"没有可写的临时目录，请设置 IMGTOOL_TMPDIR",
+     "No writable temporary directory; set IMGTOOL_TMPDIR"},
     /* ---- NTFS 格式化模块缺席时的降级说明 ---- */
     {"NTFS 格式化模块（mkntfs）", "NTFS format module (mkntfs)"},
     {"重新编译时开启 -DIMG_WITH_NTFS=ON（会引入 GPL-2.0+ 代码）",

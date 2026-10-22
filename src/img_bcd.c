@@ -57,7 +57,8 @@ img_bcd *img_bcd_open_file(const char *path){
     b->h=h; return b;
 }
 img_bcd *img_bcd_open_mem(const void *data, size_t len){
-    char tmpl[]="/tmp/imgbcdXXXXXX";
+    const char *td=img_tmpdir(); if(!td) return NULL;
+    char tmpl[528]; snprintf(tmpl,sizeof tmpl,"%s/imgbcdXXXXXX",td);
     int fd=mkstemp(tmpl); if(fd<0) return NULL;
     size_t off=0; const char *p=(const char*)data;
     while(off<len){ ssize_t w=write(fd,p+off,len-off);
@@ -79,7 +80,8 @@ int img_bcd_save(img_bcd *b, const char *path){
 }
 int img_bcd_save_mem(img_bcd *b, void **out, size_t *out_len){
     if(!b||!out||!out_len) return IMG_EINVAL;
-    char tmpl[]="/tmp/imgbcdoutXXXXXX";
+    const char *td=img_tmpdir(); if(!td) return IMG_EIO;
+    char tmpl[528]; snprintf(tmpl,sizeof tmpl,"%s/imgbcdoutXXXXXX",td);
     int fd=mkstemp(tmpl); if(fd<0) return IMG_EIO;
     close(fd);
     if(hivex_commit(b->h, tmpl, 0)!=0){ unlink(tmpl); return IMG_EIO; }

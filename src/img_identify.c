@@ -190,7 +190,7 @@ int img_win_version(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
     memset(out,0,sizeof *out);
 
     const char *tmp=getenv("IMGTOOL_TMPDIR"); if(!tmp||!*tmp) tmp=getenv("TMPDIR");
-    if(!tmp||!*tmp) tmp="/tmp";
+    if(!tmp||!*tmp){ const char *t2=img_tmpdir(); if(t2) tmp=t2; }
     char tf_sw[600];
     snprintf(tf_sw,sizeof tf_sw,"%s/imgtool-software-%ld",tmp,(long)getpid());
 

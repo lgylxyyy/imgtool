@@ -57,3 +57,28 @@ const char *img_op_name(img_op_t o){
     default:                 return "?";
     }
 }
+
+/* ---- 可写临时目录（见 img_types.h 的说明）---- */
+#include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
+const char *img_tmpdir(void){
+    static char cached[512];
+    if(cached[0]) return cached;
+    const char *cand[4]; int nc = 0;
+    const char *e1 = getenv("IMGTOOL_TMPDIR"), *e2 = getenv("TMPDIR");
+    if(e1 && *e1) cand[nc++] = e1;
+    if(e2 && *e2) cand[nc++] = e2;
+    cand[nc++] = "/tmp";
+    cand[nc++] = ".";
+    for(int i = 0; i < nc; i++){
+        size_t L = strlen(cand[i]);
+        while(L && cand[i][L-1] == '/') L--;          /* 去掉尾巴上的 /，免得拼出 // */
+        if(!L) L = 1;                                  /* 根目录本身 */
+        if(L >= sizeof cached - 16) continue;
+        memcpy(cached, cand[i], L); cached[L] = 0;
+        if(access(cached, W_OK | X_OK) == 0) return cached;
+        cached[0] = 0;
+    }
+    return NULL;
+}

@@ -13,7 +13,8 @@ static int fails=0;
 #define OK(c,m) do{ if(c) printf("  ✅ %s\n", m); else { printf("  ❌ %s\n", m); fails++; } }while(0)
 int main(void){
     setvbuf(stdout,NULL,_IONBF,0);
-    char path[]="/tmp/ebr_test_XXXXXX";
+    const char *td=img_tmpdir(); char path[528];
+    snprintf(path,sizeof path,"%s/ebr_test_XXXXXX",td?td:".");
     int fd=mkstemp(path); if(fd>=0) close(fd);
     img_io_opts_t io={0}; io.writable=true;
     img_io *fh=img_io_open_path(path,&io);

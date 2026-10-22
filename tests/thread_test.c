@@ -46,7 +46,8 @@ static void *th_log(void *arg){
 static const char *g_img[2]; static uint64_t g_lba[2];
 static void *th_img(void *arg){
     long id=(long)arg;
-    char src[256]; snprintf(src,sizeof src,"/tmp/tt_src_%ld.bin",id);
+    const char *td=img_tmpdir(); char src[528];
+    snprintf(src,sizeof src,"%s/tt_src_%ld.bin",td?td:".",id);
     FILE *f=fopen(src,"wb"); if(!f) return (void*)1;
     char buf[4096]; memset(buf,(int)('a'+id),sizeof buf);
     for(int i=0;i<16;i++) fwrite(buf,1,sizeof buf,f);
@@ -76,7 +77,7 @@ static void *th_img(void *arg){
 static img_ctx *g_ctx; static uint64_t g_lba_c; static int g_cmd_bad;
 static void *th_cmd(void *arg){
     long id=(long)arg;
-    char src[128]; snprintf(src,sizeof src,"/tmp/tt_cmd_%ld.bin",id);
+    char src[128]; snprintf(src,sizeof src,"%s/tt_cmd_%ld.bin",img_tmpdir()?img_tmpdir():".",id);
     FILE *f=fopen(src,"wb"); if(f){ fwrite("hello",1,5,f); fclose(f); }
     for(int i=0;i<6;i++){
         img_args *a=img_args_new();

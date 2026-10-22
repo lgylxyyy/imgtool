@@ -34,7 +34,8 @@ int main(int argc,char**argv){
         chk("open_fd(已关闭的 fd) = NULL", img_io_open_fd(fd,false,&ro)==NULL);
     }
     {
-        int fd=open("/tmp",O_RDONLY);                 /* 目录 */
+        const char *td=img_tmpdir();                  /* 拿一个真实存在的目录当反例 */
+        int fd=open(td?td:".",O_RDONLY);              /* 目录 */
         chk("open_fd(目录 fd) = NULL",     img_io_open_fd(fd,false,&ro)==NULL);
         close(fd);
     }
