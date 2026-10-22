@@ -1096,7 +1096,7 @@ static int cmd_mbrboot(img_ctx *ctx, const img_args *in, img_result *out){
 }
 
 /* ================= 命令 6j：part.layout（BIOS/MBR 标准布局生成器）====================
- * 产出：系统保留(活动,0x27) → 系统(0x07) → 恢复(0x27) → 扩展分区(0x0F, 含一个逻辑分区)
+ * 产出：系统保留(活动,0x07) → 系统(0x07) → 恢复(0x27) → 扩展分区(0x0F, 含一个逻辑分区)
  * ★ 层归属：这是"机制"——尺寸/名字由参数给；默认值只是 CLI 兜底（App 显式传）。
  * ★ EBR：img_parttable_write 负责写 EBR 链；读表时自动跟链补全逻辑分区。*/
 static const img_arg A_PARTLAYOUT[] = {
@@ -1144,8 +1144,7 @@ static int cmd_part_layout(img_ctx *ctx, const img_args *in, img_result *out){
         img_result_str(out,"mode","single");
         return IMG_OK;
     }
-    /* 系统保留用 0x27（Windows 安装程序同款）：0x07 会被分配盘符，抢走 C: */
-    if((rc=img_partition_add(&t,off,sr_sec,IMG_MBR_RECOVERY,NULL,"System Reserved",true,&idx))!=IMG_OK)
+    if((rc=img_partition_add(&t,off,sr_sec,IMG_MBR_NTFS_EXFAT,NULL,"System Reserved",true,&idx))!=IMG_OK)
         return img_result_fail(out,rc,"CMD-ARG-BAD","sr-mb","系统保留分区建不了（太小/越界）",NULL), rc;
     off+=sr_sec;
     if((rc=img_partition_add(&t,off,sys_sec,IMG_MBR_NTFS_EXFAT,NULL,"Windows",false,&idx))!=IMG_OK)
