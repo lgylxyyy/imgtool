@@ -249,7 +249,8 @@ static img_check_t *add(img_bootcheck_result_t *r, const char *id, const char *n
     img_check_t *c = &r->items[r->count++];
     c->id=id; c->name=name; c->level=lvl; c->pass=pass;
     va_list ap; va_start(ap,fmt);
-    vsnprintf(c->detail,sizeof c->detail,fmt,ap);
+    /* ★ fmt 先过 img_t()：中文格式串即 key，英文环境换成英文模板再填数据 */
+    vsnprintf(c->detail,sizeof c->detail,img_t(fmt),ap);
     va_end(ap);
     if(lvl==IMG_CK_REQUIRED && !pass) r->n_required_fail++;
     if(lvl==IMG_CK_WARN && !pass) r->n_warn_fail++;

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 /* img_cmd.c — 命令表骨架：参数校验 / 结果信封 / 上下文 / 分发 */
 #include "img_cmd.h"
+#include "img_text.h"
 #ifndef IMG_WITH_WIM
 #define IMG_WITH_WIM 0
 #endif
@@ -382,7 +383,7 @@ int img_cmd_list_json(char *buf,int cap){
         char *cs=w.p; W cw={w.p,cs,w.end};
         wstr(&cw,"name",c->name);
         wstr(&cw,"since",c->since?c->since:"");
-        wstr(&cw,"help",c->help?c->help:"");
+        wstr(&cw,"help",c->help?img_t(c->help):"");   /* ★ 中英双份 */
         wkey(&cw,"args"); if(cw.p<cw.end)*cw.p++='[';
         for(int j=0;j<c->nargs;j++){
             const img_arg *A=&c->args[j];
@@ -396,7 +397,7 @@ int img_cmd_list_json(char *buf,int cap){
             wstr(&aw,"type",ty);
             wraw(&aw,"required",A->required?"true":"false");
             if(A->def) wstr(&aw,"default",A->def);
-            if(A->help) wstr(&aw,"help",A->help);
+            if(A->help) wstr(&aw,"help",img_t(A->help));   /* ★ 中英双份 */
             cw.p=aw.p;
             if(cw.p<cw.end)*cw.p++='}';
         }
