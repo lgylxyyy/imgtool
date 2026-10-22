@@ -48,12 +48,6 @@ static void rm_rf(const char *dir){
     closedir(d);
     rmdir(dir);
 }
-static char *dup_tstr(const wimlib_tchar *s){
-    if(!s) return NULL;
-    char *o=malloc(strlen((const char*)s)+1);
-    if(o) strcpy(o,(const char*)s);
-    return o;
-}
 
 /* ★ wimlib 1.14 的头声明了 wimlib_get_error_string()，但发行版的 libwim.so 没导出
  *   这个符号（链接期 undefined reference）—— 与 img_wim_apply.c 同一对策：
