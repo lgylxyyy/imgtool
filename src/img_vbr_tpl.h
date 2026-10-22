@@ -16,6 +16,15 @@
 #ifndef IMG_VBR_TPL_H
 #define IMG_VBR_TPL_H
 #define IMG_VBR_TPL_BYTES 5120
+/* 自证用：reference/ntfs-vbr.bin 的 sha256，以及"引导代码本体"
+ * （扇区0[0x54..0x1FD] + 扇区1..9）的 sha256。
+ * ★ 这份模板就是 2026-10-22 实测让 Win10/Win11 进 logo、Win7 32/64 位进 specialize
+ *   的同一份字节（五张盘比对一致）。tests/vbr-tpl-test.py 会核对：
+ *     ① 数组与 reference/ntfs-vbr.bin 是否一致
+ *     ② imgfixboot 写进盘里的字节是否与文件一致
+ *   任何一边被改动都会立刻失败 —— 别再靠人记。*/
+#define IMG_VBR_TPL_SHA256      "5506a698ea03bf130ec5ff88fd9f767222487fa2e7b1db5e234e1f1ae4f1f2e8"
+#define IMG_VBR_TPL_CODE_SHA256 "1d79bfa4ef4fbfa72806c4fe14fb19c82ca0072c71874b04b62b0e7d38243851"
 static const unsigned char IMG_VBR_TPL[IMG_VBR_TPL_BYTES] = {
     0xeb,0x52,0x90,0x4e,0x54,0x46,0x53,0x20,0x20,0x20,0x20,0x00,0x02,0x08,0x00,0x00,
     0x00,0x00,0x00,0x00,0x00,0xf8,0x00,0x00,0x3f,0x00,0xff,0x00,0x00,0x08,0x00,0x00,
