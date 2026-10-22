@@ -450,3 +450,9 @@ $T/imgmkfs $W/tpl.qcow2 --mkfs $LBA TEST
 
 未做：Win10/Win11 的同样收尾验证（它们的 setup 状态机可能不同，Win10/11 用 Sysprep
 的 `SetupType=0` + OOBE；需要各自 dry-run 看实际值）；官方 `bcdboot` 对齐。
+
+### 裸灌三系统实测对照（2026-10-22）
+- Win7 32 位：`win.finish` 改 `ChildCompletion\setup.exe` 1→3 → **OOBE** ✅
+- Win10 x64：`setup.exe` 本来就是 3、`SystemSetupInProgress=0` → **不需要改**，直接进**桌面** ✅
+  （含"网络发现"提示；540s，`-accel tcg,thread=multi`，CPU 975s 满载 = 只是慢）
+- Win11 x64：无 ChildCompletion 节点、`SetupType=1` 仍在 specialize → `win.finish` 不适用，待查
