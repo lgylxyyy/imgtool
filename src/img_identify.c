@@ -147,10 +147,20 @@ static int hive_str(hive_h *h, hive_node_h node, const char *name, char *out, si
     return 0;
 }
 
-/* build 的"代"：19041/19045 → 1904；7600/7601 → 760；22000 → 2200；760 → 760 */
+/* build 的"代" = 发布桶，不是 build/10。
+ * ★ 实测教训：Win11 26300 的盘里注册表写 26300、内核等文件是 26100（24H2 基线），
+ *   用 build/10 会得到 2630 与 2610 两个"代" → 误报 mismatch=true。
+ *   两者都是 Windows 11，差的是 servicing，不该报警。
+ * build 区间互不重叠，所以单看 build 就够： */
 int img_build_family(int b){
-    if(b<=0) return 0;
-    return b>=1000 ? b/10 : b;
+    if(b <= 0)     return 0;
+    if(b <  6000)  return 5;    /* NT5.x：XP x64 / 2003（3790/5xxx） */
+    if(b <  7000)  return 60;   /* Vista  6000 / 6001 / 6002 */
+    if(b <  9000)  return 61;   /* Win7   7600 / 7601 */
+    if(b <  9600)  return 62;   /* Win8   9200 */
+    if(b < 10000)  return 63;   /* Win8.1 9600 */
+    if(b < 22000)  return 100;  /* Win10  10240 … 19045 */
+    return 101;                 /* Win11  22000 / 22621 / 22631 / 26100 / 26300 … */
 }
 
 /* 投票：按"代"取众数（详见头文件注释）。分离成公开函数是为了能单测。 */

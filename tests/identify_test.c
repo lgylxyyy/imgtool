@@ -17,10 +17,13 @@ int main(void){
     setvbuf(stdout,NULL,_IONBF,0);
     printf("identify_test — 多源版本投票\n");
 
-    OK(img_build_family(7600)==760 && img_build_family(7601)==760, "7600/7601 同代（Win7 RTM/SP1）");
-    OK(img_build_family(19041)==1904 && img_build_family(19045)==1904, "19041/19045 同代（Win10 启用包）");
-    OK(img_build_family(22000)==2200 && img_build_family(22631)==2263, "22000/22631 不同代（Win11 21H2/23H2）");
-    OK(img_build_family(28000)==2800, "28000 → 2800");
+    OK(img_build_family(7600)==img_build_family(7601), "7600 与 7601 同代（Win7 RTM/SP1）");
+    OK(img_build_family(19041)==img_build_family(19045), "19041 与 19045 同代（Win10 启用包）");
+    OK(img_build_family(22000)==img_build_family(22631), "22000 与 22631 同代（都是 Win11）");
+    OK(img_build_family(26100)==img_build_family(26300), "★ 26100 与 26300 同代（实测误报过）");
+    OK(img_build_family(19045)!=img_build_family(22000), "Win10(19045) 与 Win11(22000) 不同代");
+    OK(img_build_family(9200)!=img_build_family(9600), "Win8(9200) 与 Win8.1(9600) 不同代");
+    OK(img_build_family(6000)!=img_build_family(7601), "Vista(6000) 与 Win7(7601) 不同代");
     OK(img_build_family(0)==0, "0 → 0（没有证据）");
 
     { img_winver_t v; memset(&v,0,sizeof v);
