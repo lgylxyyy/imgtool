@@ -266,7 +266,13 @@ int img_layout_build(img_parttable_t *t, uint64_t disk_sectors,
         /* BIOS/MBR：活动系统分区 */
         img_part_request_t rq={0};
         rq.table=table; rq.disk_sectors=disk_sectors; rq.sector_size=sec;
-        /* ★ 系统保留分区用【0x27】而不是 0x07 —— 这是 Windows 安装程序的做法。
+        /* ★ 系统保留分区必须用【0x27】—— 微软官方明文（Learn《BIOS/MBR-based hard drive
+         *   partitions》"System and utility partitions"）：
+         *     "To keep system and utility partitions from being reset, use type 0x27.
+         *      Do not use any of the following types: 0x7, 0x0c, 0x0b, 0x0e, 0x06, and 0x42."
+         *   本工具 2026-10-16~18 的克隆路径用过 0x07 且能到徽标（因为克隆的系统已完成
+         *   specialize），但裸灌路径实测：0x07 时 Win7 报"驱动器号不匹配"（Windows 把
+         *   这个普通 NTFS 卷认成 C:），0x27 后该错误消失。官方文档 + 实测同向。
          *   实测（QEMU + Win7 32 位）：0x07 时 Windows 首次启动会把这个 512MiB 的
          *   普通 NTFS 卷当成 C:，真正的系统分区变成 D: → specialize 阶段报
          *   "没有确保计算机之间分配的驱动器号相匹配"，卡死。
