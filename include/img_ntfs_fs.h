@@ -94,6 +94,12 @@ int img_ntfs_move_path(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs
  * ★ 单独做的理由：脏卷 ntfs-3g 只给【只读挂载】→ wimlib 直写秒失败，
  *   调用方只看到 WIM-APPLY-FAIL，猜不到"加 --format=on 就行"。*/
 int img_ntfs_dirty_check(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes, bool *out_dirty);
+/* 灌入前的只读预检：一次挂载同时回答"卷脏吗""根目录有几项"。
+ * ★ 为什么必须查"非空"：实测中断后重跑 wim.apply --format=off 会【挂住】——
+ *   100 秒零进展、盘一个字节都不长，既不报错也不继续，用户只能干等。
+ *   主动拒绝（NTFS-NOT-EMPTY）比挂住好得多。*/
+int img_ntfs_precheck(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
+                      bool *out_dirty, int *out_root_entries);
 
 
 #ifdef __cplusplus
