@@ -96,6 +96,13 @@ if [ -x "$ROOT/build/tests/recovery_bcd_test" ]; then
   else skipped=$((skipped+1)); echo "  ⏭ 跳过 recovery_bcd_test（缺官方 ISO BCD 参考）"; fi
 else skipped=$((skipped+1)); echo "  ⏭ 跳过 recovery_bcd_test（没编进构建）"; fi
 
+# 依赖裁剪（默认跳过：要重编两套约 30 s；要跑：DEGRADED=1 tests/run_all.sh）
+if [ "${DEGRADED:-0}" = "1" ]; then
+  run "degraded-build-test（关掉 WIM/NTFS 仍可构建且如实报不可用）" bash "$ROOT/tests/degraded-build-test.sh"
+else
+  skipped=$((skipped+1)); echo "  ⏭ 跳过 degraded-build-test（要跑：DEGRADED=1 tests/run_all.sh）"
+fi
+
 # 重型测试（默认跳过，需要时：WITH_WIM=1 tests/run_all.sh）
 if [ "${WITH_WIM:-0}" = "1" ]; then
   run "wim-apply-test（WIM 直灌 + 中途取消，1~8 分钟）" bash "$ROOT/tests/wim-apply-test.sh"
