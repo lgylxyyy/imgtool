@@ -1214,7 +1214,8 @@ static const img_arg A_BOOTREPAIR[]={
     {"sr-lba", IMG_A_U64, false, NULL, "系统保留分区 LBA（缺省=活动分区）", NULL},
     {"sig", IMG_A_STR, false, NULL, "磁盘签名 HEX（缺省=保持现值）", NULL},
     {"mbr-code", IMG_A_STR, false, NULL, "MBR 引导码文件（≥440字节；缺省不动 MBR）", NULL},
-    {"vbr-tpl", IMG_A_STR, false, NULL, "VBR 模板 镜像:lba（缺省不动 VBR）", NULL},
+    {"vbr-tpl", IMG_A_STR, false, NULL, "VBR 模板 镜像:lba（缺省用内置模板，不需要外部盘）", NULL},
+    {"no-vbr",  IMG_A_BOOL,false, "false","跳过 VBR 引导码修复（UEFI 盘不需要；默认按需补）", NULL},
     {"vbr-lba", IMG_A_U64, false, NULL, "要写 VBR 的分区 LBA（缺省=活动/SR 分区；BIOS 引导码在活动分区）", NULL},
     {"bcd-ref", IMG_A_STR, false, NULL, "参考 BCD 文件（缺省不动 BCD）", NULL},
 };
@@ -1275,6 +1276,15 @@ static int cmd_boot_repair(img_ctx *ctx, const img_args *in, img_result *out){
         for(int i=0;i<440;i++) if(z[i]){ mbr_code_ok=1; break; }
     }
     if(img_qcow2_read(q,vbr_lba*512u,z,512)==IMG_OK) vbr_ok=(!memcmp(z+3,"NTFS    ",8));
+    /* ★ 只认 "NTFS    " 标签不够：mkntfs 也写标签，但扇区 1..9 的引导代码是空的，
+     *   BIOS 照样报 "A disk read error occurred"。必须看后续扇区有没有代码。*/
+    int vbr_code_ok=0;
+    if(vbr_ok){
+        unsigned char s1[512];
+        if(img_qcow2_read(q,(vbr_lba+1)*512u,s1,512)==IMG_OK)
+            for(int i=0;i<512;i++) if(s1[i]){ vbr_code_ok=1; break; }
+    }
+    img_result_bool(out,"diag.vbr_code_ok",vbr_code_ok);
     if(sr_lba&&sr_b){
         img_ntfs_fs *fs=img_ntfs_mount_rw(q,sr_lba,sr_b);
         if(fs){ void *b=NULL; size_t n=0;
@@ -1298,8 +1308,24 @@ static int cmd_boot_repair(img_ctx *ctx, const img_args *in, img_result *out){
         if(img_qcow2_write(q,0,z,512)!=IMG_OK){ img_result_fail(out,IMG_EIO,"PART-WRITE-FAIL",NULL,NULL,NULL); return IMG_EIO; }
         fixed++;
     }
-    /* ②-2 VBR：模板引导码（保留自己的 BPB） */
-    if(vtpl){
+    /* ②-2 VBR：模板引导码（保留自己的 BPB）
+     * ★ 缺省用【内置模板】（src/img_vbr_tpl.h），不再要求外部模板盘；
+     *   --vbr-tpl 可覆盖成你自己提取的；--no-vbr=true 跳过（UEFI 不依赖这段）。*/
+    bool no_vbr = img_args_bool(in,"no-vbr",false);
+    /* ★ "只诊断"必须真的不动手：只有调用方【表达了要修】（传了 mbr-code / vbr-tpl / bcd-ref
+     *   中任意一个）时，才把 VBR 一起补上（用内置模板）。否则 --img + --sys-lba 这种
+     *   纯诊断调用也会改盘 —— boot-repair-test 第 1 组就是守这条（fixed_count=0）。*/
+    bool any_fix = (mcode!=NULL) || (vtpl!=NULL) || (bref!=NULL);
+    if(!no_vbr && any_fix && (vtpl || !vbr_code_ok)){
+      if(!vtpl){
+        int gp=0;
+        if(img_ntfs_fix_geometry(q,sys_lba)==IMG_OK) gp++;
+        if(vbr_lba!=sys_lba && img_ntfs_fix_geometry(q,vbr_lba)==IMG_OK) gp++;
+        img_result_u64(out,"geometry_patched",(uint64_t)gp);
+        int rc0=img_fixboot_builtin(q,vbr_lba,img_cmd_prog());
+        if(rc0!=IMG_OK){ img_result_fail(out,rc0,"BOOT-VBR-WRITE-FAIL","builtin",NULL,NULL); return rc0; }
+        fixed++;
+      } else {
         char buf[512]; snprintf(buf,sizeof buf,"%s",vtpl);
         char *cl=strrchr(buf,':'); if(!cl){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","vbr-tpl","格式 镜像:lba",NULL); return IMG_EINVAL; }
         *cl=0; uint64_t tl=strtoull(cl+1,NULL,0);
@@ -1316,6 +1342,7 @@ static int cmd_boot_repair(img_ctx *ctx, const img_args *in, img_result *out){
         int rc=img_fixboot(q,vbr_lba,q2,tl,img_cmd_prog());
         if(rc!=IMG_OK){ img_result_fail(out,rc,"BOOT-VBR-WRITE-FAIL",NULL,NULL,NULL); return rc; }
         fixed++;
+      }
     }
     /* ②-3 BCD：参考件 → 改命门（签名+分区字节偏移）→ 写回 SR */
     if(bref){
