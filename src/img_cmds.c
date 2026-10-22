@@ -397,19 +397,19 @@ static int cmd_wim_apply_cmd(img_ctx *ctx, const img_args *in, img_result *out){
     /* ★ 不格式化时先问"卷脏不脏"：中断/掉电会把 NTFS 标脏，ntfs-3g 对脏卷只给
      *   只读挂载 → wimlib 直写模式【秒失败】，只报 WIM-APPLY-FAIL，没人猜得到
      *   该加 --format=on。实测：中断后重灌 103ms 失败就是这个原因。*/
-    if(IMG_WITH_NTFS3G && !do_fmt){
+    /* ★ 灌入前的只读预检：只拦【卷脏】。
+     *   曾经还想在这里拦"根目录非空"，实测是错的：中断后 --format=off 重跑
+     *   【能正常覆盖续灌】（12GiB 盘灌 8GB 系统 218 秒成功）—— 拦非空会误伤这个合法用法。
+     *   非空的项数只作为结果字段回给 App（root_entries），由 App 决定要不要提示。*/
+    int root_entries=-1;
+    if(IMG_WITH_NTFS3G){
         bool dirty=false; int nroot=0;
         if(img_ntfs_precheck(q,lba,pb,&dirty,&nroot)==IMG_OK){
-            if(dirty){
+            root_entries=nroot;
+            if(dirty && !do_fmt){
                 img_result_fail(out,IMG_ESTATE,"NTFS-VOLUME-DIRTY",img_ctx_path(ctx),
                     "目标分区被标脏（上次灌入被中断/掉电）：ntfs-3g 对脏卷只给只读挂载，写不进去。"
                     "加 --format=on 重新格式化再灌（会清空该分区）",NULL);
-                return IMG_ESTATE;
-            }
-            if(nroot>0){
-                img_result_fail(out,IMG_ESTATE,"NTFS-NOT-EMPTY",img_ctx_path(ctx),
-                    "目标分区非空（上次很可能没灌完）。实测此时 --format=off 重跑会挂住"
-                    "（既不报错也不继续），所以工具直接拒绝：加 --format=on 重新格式化再灌",NULL);
                 return IMG_ESTATE;
             }
         }
@@ -453,6 +453,7 @@ static int cmd_wim_apply_cmd(img_ctx *ctx, const img_args *in, img_result *out){
     }
     img_result_u64(out,"index",(uint64_t)idx);
     img_result_bool(out,"formatted",do_fmt);
+    if(root_entries>=0) img_result_u64(out,"root_entries",(uint64_t)root_entries);   /* 灌入前根目录项数（App 可据此判断"这是覆盖灌"）*/
     return IMG_OK;
 #else
     (void)ctx; (void)in; (void)out; return IMG_ENOTSUP;   /* 不可达：上一行已返回 */
