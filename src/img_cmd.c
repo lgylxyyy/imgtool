@@ -209,7 +209,10 @@ static void wnum(W *w,const char *k,long long v){ wkey(w,k); char t[32]; int n=s
 
 int img_result_json(const img_result *r, char *buf, int cap){
     if(!r||!buf||cap<16) return IMG_EINVAL;
-    W w={buf+1,buf+1,buf+cap-1};
+    /* ★ 预留 "}\n\0" 三位：writer 写不下时是【静默丢弃】的，不预留就会出现
+     *   "字段被截断 + 括号没闭合"的半截 JSON，而函数还返回"成功"。
+     *   实测：ntfs.list 列 System32（4000+ 项）超出调用方 128KB 缓冲 → App 解析崩。*/
+    W w={buf+1,buf+1,buf+cap-3};
     buf[0]='{';
     wraw(&w,"ok", r->ok?"true":"false");
     wstr(&w,"cmd", r->cmd?r->cmd:"");
@@ -241,6 +244,16 @@ int img_result_json(const img_result *r, char *buf, int cap){
     if(w.p<w.end)*w.p++='}';
     if(w.p<w.end)*w.p++='\n';
     *w.p=0;
+    /* ★ 溢出兜底：writer 顶到上限 = 有字段没写进去。宁可吐一个【合法】的错误信封，
+     *   也不能让调用方拿到半截 JSON（那会让 App 崩，而不是报错）。*/
+    if(w.p>=w.end){
+        int n=snprintf(buf,(size_t)cap,
+            "{\"ok\":false,\"cmd\":\"%s\",\"version\":1,\"err\":{\"rc\":-10,\"error_code\":\"RESULT-TOO-BIG\"}}\n",
+            r->cmd?r->cmd:"");
+        if(n<0||n>=cap)
+            snprintf(buf,(size_t)cap,"{\"ok\":false,\"err\":{\"rc\":-10,\"error_code\":\"RESULT-TOO-BIG\"}}\n");
+        return (int)strlen(buf);
+    }
     return (int)(w.p-buf);
 }
 

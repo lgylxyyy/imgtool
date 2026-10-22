@@ -849,3 +849,28 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,b
     free(su);
     return IMG_OK;
 }
+
+/* 卷是否被标脏。用【只读】挂载 —— 脏卷本身能只读挂上，我们要读的就是它的 flags。
+ * 脏到连只读都挂不上 → 当作脏（宁可提示重格式化，也别让人对着 WIM-APPLY-FAIL 猜）。*/
+int img_ntfs_dirty_check(img_qcow2 *q,uint64_t part_lba,uint64_t part_bytes,bool *out_dirty){
+    if(out_dirty) *out_dirty=false;
+    if(!q||!part_bytes) return IMG_EINVAL;
+    if(img_ntfs_probe(q,part_lba,NULL)!=IMG_OK) return IMG_EFORMAT;
+    img_ntfs_ctx *ctx=img_ntfs_ctx_new(q,part_lba,part_bytes);
+    if(!ctx) return IMG_EIO;
+    img_ntfs_ctx_activate(q,part_lba,part_bytes);
+    const char *dn=img_dev_placeholder(); if(!dn) dn="imgtool-dev";
+    struct ntfs_device *dev=ntfs_device_alloc(dn,0,img_ntfs_device_ops(),NULL);
+    if(!dev){ img_ntfs_ctx_deactivate(); img_ntfs_ctx_free(ctx); return IMG_EIO; }
+    ntfs_volume *vol=ntfs_device_mount(dev, NTFS_MNT_RDONLY|NTFS_MNT_IGNORE_HIBERFILE);
+    if(!vol){
+        ntfs_device_free(dev); img_ntfs_ctx_deactivate(); img_ntfs_ctx_free(ctx);
+        if(out_dirty) *out_dirty=true;
+        return IMG_OK;
+    }
+    if(out_dirty) *out_dirty=(le16_to_cpu(vol->flags) & VOLUME_IS_DIRTY)!=0;
+    ntfs_umount(vol,false);
+    img_ntfs_ctx_deactivate();
+    img_ntfs_ctx_free(ctx);
+    return IMG_OK;
+}

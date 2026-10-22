@@ -459,10 +459,21 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
               : "恢复分区内没有 winre.wim");
         /* ReAgent.xml —— reagentc 靠它注册恢复位置（官方规范第 9 项）*/
         bool r_std = ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/ReAgent.xml");
-        bool r_root= r_std ? false : ntfs_path_exists(q,lba,sz,"/ReAgent.xml");
-        add(out,"rec.reagent","ReAgent.xml 存在",IMG_CK_WARN, r_std||r_root,
-            (r_std||r_root)
-              ? (r_std ? "在标准路径找到（reagentc 可识别）" : "在根目录找到")
+        /* ★ 官方真正的家在【系统分区】的 \Windows\System32\Recovery\ReAgent.xml
+         *   （UEFI 布局下恢复分区里根本没有它）。以前只查恢复分区，
+         *   于是盘 A 明摆着有 837 字节的 ReAgent.xml 还被报"缺" —— 纯误报。*/
+        bool r_sys = false;
+        if(!r_std && P.os>=0 && t.parts[P.os].used){
+            uint64_t oslba=t.parts[P.os].first_lba;
+            uint64_t ossz=(t.parts[P.os].last_lba-t.parts[P.os].first_lba+1)*512;
+            r_sys = ntfs_path_exists(q,oslba,ossz,"/Windows/System32/Recovery/ReAgent.xml");
+        }
+        bool r_root = (r_std||r_sys) ? false : ntfs_path_exists(q,lba,sz,"/ReAgent.xml");
+        add(out,"rec.reagent","ReAgent.xml 存在",IMG_CK_WARN, r_std||r_sys||r_root,
+            (r_std||r_sys||r_root)
+              ? (r_std ? "在恢复分区标准路径找到（reagentc 可识别）"
+                       : (r_sys ? "在系统分区 \Windows\System32\Recovery\ 找到（官方位置）"
+                                : "在分区根目录找到"))
               : "缺 ReAgent.xml — Windows 自带的 reagentc 认不出恢复位置");
         add(out,"rec.bootsdi","boot.sdi 存在",IMG_CK_WARN, s_std||s_root,
             (s_std||s_root)

@@ -28,20 +28,22 @@ int main(int argc,char**argv){
         else if(!strcmp(argv[i],"--verify")) verify=true;
     }
     if(verify){
-        if(!tp){ printf("❌ --verify 需要 --tpl\n"); return 2; }
-        img_qcow2 *t=op(tp); if(!t){printf("❌ 无法打开 tpl\n");return 1;}
         char det[256];
-        int rc=img_fixboot_verify(d,dlba,t,tlba,det,sizeof det);
+        int rc;
+        if(tp){ img_qcow2 *t=op(tp); if(!t){printf("❌ 无法打开 tpl\n");return 1;}
+                rc=img_fixboot_verify(d,dlba,t,tlba,det,sizeof det); }
+        else  { rc=img_fixboot_verify_builtin(d,dlba,det,sizeof det); }
         printf("%s  %s\n", rc==IMG_OK?"✅ 引导代码与模板一致":"❌ 不一致", det);
         return rc==IMG_OK?0:1;
     }
-    if(!tp){ printf("❌ 需要 --tpl <img> <lba>\n"); return 2; }
-    img_qcow2 *t=op(tp); if(!t){printf("❌ 无法打开 tpl\n");return 1;}
     img_span sp;
     img_span_prep(&sp,"fixboot","write","写入 NTFS 引导代码（$Boot 0..9）");
     img_span_kv_u64(&sp,"dst_lba",dlba);
     img_span_begin(&sp);
-    int rc=img_fixboot(d,dlba,t,tlba,NULL);
+    int rc;
+    if(tp){ img_qcow2 *t=op(tp); if(!t){printf("❌ 无法打开 tpl\n");return 1;}
+            rc=img_fixboot(d,dlba,t,tlba,NULL); }
+    else  { rc=img_fixboot_builtin(d,dlba,NULL); }   /* 内置模板：不需要外部模板盘 */
     img_span_end(&sp, rc);
     printf("%s img_fixboot → %s\n", rc==IMG_OK?"✅":"❌", img_strerror(rc));
     return rc==IMG_OK?0:1;

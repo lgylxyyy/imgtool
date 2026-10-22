@@ -3,6 +3,7 @@
 #endif
 /* img_fixboot.c — NTFS 引导区写入（算法见头文件注释） */
 #include "img_fixboot.h"
+#include "img_vbr_tpl.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -14,13 +15,11 @@
 #define CODE_START 0x54
 #define CODE_END   0x1FE      /* 不含 */
 
-int img_fixboot(img_qcow2 *dst, uint64_t dst_lba, img_qcow2 *tpl,
-                uint64_t tpl_lba, img_prog *prog){
-    if(!dst||!tpl) return IMG_EINVAL;
-    uint8_t tsec[10*512], dsec[512];
-    int rc = img_qcow2_read_full(tpl, tpl_lba*512ULL, tsec, sizeof tsec);
-    if(rc) return rc;
-    rc = img_qcow2_read_full(dst, dst_lba*512ULL, dsec, 512);
+int img_fixboot_mem(img_qcow2 *dst, uint64_t dst_lba, const uint8_t *tsec_in, img_prog *prog){
+    if(!dst||!tsec_in) return IMG_EINVAL;
+    const uint8_t *tsec = tsec_in;
+    uint8_t dsec[512];
+    int rc = img_qcow2_read_full(dst, dst_lba*512ULL, dsec, 512);
     if(rc) return rc;
 
     if(tsec[510]!=0x55 || tsec[511]!=0xAA) return IMG_ECORRUPT;   /* 模板不是引导扇区 */
@@ -63,13 +62,12 @@ int img_ntfs_fix_geometry(img_qcow2 *q, uint64_t lba){
     return img_qcow2_write(q, lba*512ULL, s, sizeof s);
 }
 
-int img_fixboot_verify(img_qcow2 *dst, uint64_t dst_lba, img_qcow2 *tpl,
-                       uint64_t tpl_lba, char *out_detail, int detail_cap){
-    if(!dst||!tpl) return IMG_EINVAL;
-    uint8_t tsec[10*512], dsec[10*512];
-    int rc = img_qcow2_read_full(tpl, tpl_lba*512ULL, tsec, sizeof tsec);
-    if(rc) return rc;
-    rc = img_qcow2_read_full(dst, dst_lba*512ULL, dsec, sizeof dsec);
+int img_fixboot_verify_mem(img_qcow2 *dst, uint64_t dst_lba, const uint8_t *tsec_in,
+                           char *out_detail, int detail_cap){
+    if(!dst||!tsec_in) return IMG_EINVAL;
+    const uint8_t *tsec = tsec_in;
+    uint8_t dsec[10*512];
+    int rc = img_qcow2_read_full(dst, dst_lba*512ULL, dsec, sizeof dsec);
     if(rc) return rc;
 
     int code_diff=0, sec19_diff=0;
@@ -79,4 +77,31 @@ int img_fixboot_verify(img_qcow2 *dst, uint64_t dst_lba, img_qcow2 *tpl,
         snprintf(out_detail,(size_t)detail_cap,
                  "扇区0引导代码差异 %d 字节 · 扇区1..9 差异 %d 字节", code_diff, sec19_diff);
     return (code_diff==0 && sec19_diff==0) ? IMG_OK : IMG_ECRC;
+}
+
+/* 从模板镜像取 10 个扇区，再走 mem 版（保持旧调用方不变）*/
+int img_fixboot(img_qcow2 *dst, uint64_t dst_lba, img_qcow2 *tpl,
+                uint64_t tpl_lba, img_prog *prog){
+    if(!dst||!tpl) return IMG_EINVAL;
+    uint8_t tsec[10*512];
+    int rc = img_qcow2_read_full(tpl, tpl_lba*512ULL, tsec, sizeof tsec);
+    if(rc) return rc;
+    return img_fixboot_mem(dst, dst_lba, tsec, prog);
+}
+/* 用编译期内置模板（reference/ntfs-vbr.bin 的逐字节副本）——
+ * 这样"造 BIOS 启动盘"不再需要用户手里另有一张带引导代码的盘。*/
+int img_fixboot_builtin(img_qcow2 *dst, uint64_t dst_lba, img_prog *prog){
+    return img_fixboot_mem(dst, dst_lba, IMG_VBR_TPL, prog);
+}
+int img_fixboot_verify_builtin(img_qcow2 *dst, uint64_t dst_lba, char *out_detail, int detail_cap){
+    return img_fixboot_verify_mem(dst, dst_lba, IMG_VBR_TPL, out_detail, detail_cap);
+}
+
+int img_fixboot_verify(img_qcow2 *dst, uint64_t dst_lba, img_qcow2 *tpl,
+                       uint64_t tpl_lba, char *out_detail, int detail_cap){
+    if(!dst||!tpl) return IMG_EINVAL;
+    uint8_t tsec[10*512];
+    int rc = img_qcow2_read_full(tpl, tpl_lba*512ULL, tsec, sizeof tsec);
+    if(rc) return rc;
+    return img_fixboot_verify_mem(dst, dst_lba, tsec, out_detail, detail_cap);
 }

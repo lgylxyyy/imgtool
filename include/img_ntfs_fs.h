@@ -90,6 +90,10 @@ int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
  *      / IMG_ENOTSUP(overwrite 时目标是目录) / IMG_EFULL / IMG_EIO。
  * ★ 目录：见 img_ntfs_fs.c 里 move_path 的注释与 tests/ntfs-move-test.sh 的实测结论。*/
 int img_ntfs_move_path(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs, bool overwrite);
+/* 卷是否被标脏（掉电/进程被杀 → NTFS $Volume flags bit0）。
+ * ★ 单独做的理由：脏卷 ntfs-3g 只给【只读挂载】→ wimlib 直写秒失败，
+ *   调用方只看到 WIM-APPLY-FAIL，猜不到"加 --format=on 就行"。*/
+int img_ntfs_dirty_check(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes, bool *out_dirty);
 
 
 #ifdef __cplusplus

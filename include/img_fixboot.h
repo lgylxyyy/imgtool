@@ -33,6 +33,13 @@ int img_fixboot(img_qcow2 *dst, uint64_t dst_lba,
 
 /* 只读校验：dst 的引导代码是否与模板一致（排除 BPB 后逐字节）
  * out_detail 可为 NULL；返回 IMG_OK=一致 */
+/* 用编译期内置模板（src/img_vbr_tpl.h）—— 造 BIOS 盘时不再需要外部模板盘 */
+int img_fixboot_builtin(img_qcow2 *dst, uint64_t dst_lba, img_prog *prog);
+int img_fixboot_verify_builtin(img_qcow2 *dst, uint64_t dst_lba, char *out_detail, int detail_cap);
+/* 内存模板版（tsec = 10*512 字节的 $Boot 前三段真值）*/
+int img_fixboot_mem(img_qcow2 *dst, uint64_t dst_lba, const uint8_t *tsec, img_prog *prog);
+int img_fixboot_verify_mem(img_qcow2 *dst, uint64_t dst_lba, const uint8_t *tsec,
+                           char *out_detail, int detail_cap);
 int img_fixboot_verify(img_qcow2 *dst, uint64_t dst_lba,
                        img_qcow2 *tpl, uint64_t tpl_lba,
                        char *out_detail, int detail_cap);
