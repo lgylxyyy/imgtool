@@ -413,3 +413,24 @@ $T/imgmkfs $W/tpl.qcow2 --mkfs $LBA TEST
 > 另修掉两处 CMake 门控错误：`wim_apply_test`、`ntfs_probe` 的
 > `target_link_libraries` 写在 `if()` 外层，关掉对应特性时"链接不存在的目标"直接报错。
 > 这两个 ❌ 组合安卓端用不到，要补的话按"缺库降级"政策照 NTFS 那次的做法办即可（待用户发话）。
+
+### 裸灌路径（wim.apply）的首次启动问题（2026-10-22，与上面的克隆路径区分开）
+
+**先分清两条路**（这是本节的要害）：
+- 上面 10-16~18 的结论都属于 **GPT→MBR 克隆已装好的系统**（源盘进过桌面 → 首次启动无需 specialize
+  → 到 Windows 徽标即算成功）。那条路的配置（SR=100MiB 活动 **0x07**）已验证，不要动。
+- 本节是 **`wim.apply` 裸灌 install.wim**：系统未 specialize，必须跑 Windows 自己的 setup/OOBE。
+
+**已验证的引导链（三条都成立）**：Win10 x64 / Win11 x64 / Win7 x64+x86 全部进到 Windows 首次启动
+（logo 或 specialize），SeaBIOS 无 `A disk read error`，`boot.check` 9/9。
+
+**两个卡点（裸灌特有，与引导码/模板无关）**：
+1. 盘符错位：SR 用 0x07 时，Windows 可能把 512MiB 的普通 NTFS 卷认成 C:，系统分区变 D:
+   → Win7 报"没有确保计算机之间分配的驱动器号相匹配"。
+   **同盘单字节对照**：SR 改 0x27 → 该错误消失，从"应用系统设置"推进到"为首次使用计算机做准备"。
+   （0x27 确实是 Windows RE 的类型，但微软建 System Reserved 也用 `diskpart ... id=27`。）
+   **结论：默认值仍保持 0x07；0x27 作为裸灌场景的候选，需参数化 + 两条路径分别回归后再改。**
+2. setup 状态机：再往后弹"计算机意外地重新启动或遇到错误" → 需改 SYSTEM hive 的
+   `SystemSetupInProgress` / `SetupType`（imagex/wimlib 裸灌 Win7 的标准收尾）。
+
+**未做**：`win.finish`（写 setup 状态）、`img.create --sr-type=07|27`、裸灌路径跑进桌面。
