@@ -132,7 +132,11 @@ int img_recovery_populate(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
         img_ntfs_fmt_opts_t o; img_ntfs_fmt_defaults(&o,part_lba,part_bytes);
         o.label=label?label:"Recovery"; o.force=true; o.quick=true;
         int rc=img_ntfs_format(q,&o,prog);
-        if(rc!=IMG_OK){ if(err) snprintf(err,errcap,"格式化恢复分区失败"); return rc; }
+        if(rc!=IMG_OK){
+            if(err) snprintf(err,errcap,
+                rc==IMG_ENOTSUP ? "本构建未启用 NTFS 格式化模块" : "格式化恢复分区失败");
+            return rc;
+        }
     }
 
     /* 先把 Winre.wim 抽到临时文件（App 侧 TMPDIR 要可写）*/

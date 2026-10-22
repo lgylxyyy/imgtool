@@ -401,3 +401,15 @@ $T/imgmkfs $W/tpl.qcow2 --mkfs $LBA TEST
 1. App 端出现"往分区拷大文件"的高频场景且用户反馈慢
 2. 用户明确说 ESP 建盘/写入速度不能接受
 3. 需要重新动 FAT 写入路径时（那时顺手做 B，避免两次改同一条路径）
+
+## 构建组合矩阵（2026-10-22 补记，交叉编译时暴露）
+| IMG_WITH_NTFS3G | IMG_WITH_WIM | IMG_WITH_NTFS | 能否构建 | 说明 |
+| --- | --- | --- | --- | --- |
+| ON | ON | ON | ✅ | 主机默认，`run_all` 17/0/1 |
+| ON | ON | OFF | ✅ | **本轮修好**（安卓端用这套：不把 GPL mkntfs 编进 APK） |
+| ON | OFF | OFF | ❌ 已知 | `img_recovery.c:132`、`tools/imgwimls.c` 有未包住的 `wimlib_*` 调用 |
+| OFF | OFF | OFF | ❌ 已知 | `imgrunonce`/`imgcmd`/`ntfs_dev_test` 引用被摘掉的 `img_ntfs_cb_*` |
+
+> 另修掉两处 CMake 门控错误：`wim_apply_test`、`ntfs_probe` 的
+> `target_link_libraries` 写在 `if()` 外层，关掉对应特性时"链接不存在的目标"直接报错。
+> 这两个 ❌ 组合安卓端用不到，要补的话按"缺库降级"政策照 NTFS 那次的做法办即可（待用户发话）。

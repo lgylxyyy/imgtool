@@ -365,6 +365,8 @@ static int cmd_wim_apply_cmd(img_ctx *ctx, const img_args *in, img_result *out){
         o.label=img_args_get(in,"label");
         rc=img_ntfs_format(q,&o,img_cmd_prog());
         img_span_end(&sp,rc);
+        if(rc==IMG_ENOTSUP) return feat_unavail(out,"NTFS 格式化模块（mkntfs）",
+                        "重新编译时开启 -DIMG_WITH_NTFS=ON（会引入 GPL-2.0+ 代码）");
         if(rc){ img_result_fail(out,rc,"NTFS-FORMAT-FAIL",NULL,NULL,NULL); return rc; }
     }
 
@@ -1429,6 +1431,8 @@ static int cmd_fs_format(img_ctx *ctx, const img_args *in, img_result *out){
         img_span_begin(&sp);
         rc=img_ntfs_format(q,&o,img_cmd_prog());
         img_span_end(&sp,rc);
+        if(rc==IMG_ENOTSUP) return feat_unavail(out,"NTFS 格式化模块（mkntfs）",
+                        "重新编译时开启 -DIMG_WITH_NTFS=ON（会引入 GPL-2.0+ 代码）");
         if(rc){ img_result_fail(out,rc,"NTFS-FORMAT-FAIL",NULL,NULL,NULL); return rc; }
         img_result_str(out,"fs","NTFS");
     } else {

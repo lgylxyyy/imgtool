@@ -46,6 +46,7 @@ set(IMG_SOURCES
   src/img_ntfs_fs.c
   src/img_fat32_fs.c
   src/img_wim_apply.c
+  src/img_ntfs_fmt.c     # 常驻：模块缺席时返回 IMG_ENOTSUP，不让链接炸
   src/img_iso.c          # ISO/UDF 只读（自研解析；抽 install.wim）
   src/img_recovery.c     # 恢复分区/WinRE（查/填/设属性）
   src/img_identify.c     # 从内容读 Windows 版本（WIM XML / SOFTWARE hive）
@@ -82,7 +83,7 @@ if(NOT IMG_WITH_NTFS3G)
   add_compile_definitions(IMG_WITH_NTFS3G=0)
   list(REMOVE_ITEM IMG_SOURCES
        src/img_ntfs_fs.c src/img_ntfs_dev.c src/img_ntfs_ops.c src/ntfs_bridge.c
-       src/img_ntfs_fmt.c src/img_bootcheck.c)
+       src/img_bootcheck.c)
   if(IMG_WITH_WIM)
     message(WARNING "imgtool: NTFS 关闭 → WIM 直灌一并关闭（img_wim_apply 依赖 NTFS 设备层）")
     set(IMG_WITH_WIM OFF)
@@ -167,11 +168,11 @@ if(IMG_WITH_NTFS AND IMG_WITH_NTFS3G)
   # mkntfs 对象：由 third_party_ntfs3g.md 描述的构建流程产出
   file(GLOB MKNTFS_OBJS "${CMAKE_CURRENT_SOURCE_DIR}/../build/mkntfs_obj/mkntfs-*.o")
   if(NTFSDEV_INC AND NTFSDEV_LIB AND MKNTFS_OBJS)
-    target_sources(imgtool       PRIVATE src/img_ntfs_fmt.c ${MKNTFS_OBJS})
+    # img_ntfs_fmt.c 已在 IMG_SOURCES 里常驻，这里只补 GPL 对象
+    target_sources(imgtool       PRIVATE ${MKNTFS_OBJS})
     target_include_directories(imgtool       PRIVATE ${NTFSDEV_INC})
     target_link_libraries(imgtool       PUBLIC ${NTFSDEV_LIB})
-    target_sources(imgtool       PRIVATE src/img_ntfs_fmt.c ${MKNTFS_OBJS})
-    target_sources(imgtool_shared PRIVATE src/img_ntfs_fmt.c ${MKNTFS_OBJS})
+    target_sources(imgtool_shared PRIVATE ${MKNTFS_OBJS})
     target_include_directories(imgtool_shared PRIVATE ${NTFSDEV_INC})
     target_link_libraries(imgtool_shared PUBLIC ${NTFSDEV_LIB})
     add_compile_definitions(IMG_WITH_NTFS=1)
@@ -179,5 +180,6 @@ if(IMG_WITH_NTFS AND IMG_WITH_NTFS3G)
   else()
     message(WARNING "imgtool: IMG_WITH_NTFS=ON 但缺依赖，已跳过"
                     " (需要 libntfs-3g-dev 与 ../build/mkntfs_obj/*.o)")
+    add_compile_definitions(IMG_WITH_NTFS=0)
   endif()
 endif()

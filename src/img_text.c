@@ -22,6 +22,11 @@ int img_lang_en(void){
 
 /* zh → en。只收录【会进 JSON 信封 / 日志】的人话；注释和 CLI 专属文案不在这里。 */
 static const char *const T[][2] = {
+    /* ---- NTFS 格式化模块缺席时的降级说明 ---- */
+    {"NTFS 格式化模块（mkntfs）", "NTFS format module (mkntfs)"},
+    {"重新编译时开启 -DIMG_WITH_NTFS=ON（会引入 GPL-2.0+ 代码）",
+     "Rebuild with -DIMG_WITH_NTFS=ON (pulls in GPL-2.0+ code)"},
+    {"本构建未启用 NTFS 格式化模块", "This build has no NTFS format module"},
     /* ---- 命令表 note 字段 ---- */
     {"已置取消标志；正在跑的操作会在下一个检查点退出",
      "Cancellation requested; the running operation stops at the next checkpoint"},

@@ -53,19 +53,17 @@ target_link_libraries(cancel_test PRIVATE imgtool)
 
 if(IMG_WITH_WIM)
   add_executable(wim_apply_test wim_apply_test.c)
+  target_link_libraries(wim_apply_test PRIVATE imgtool)   # 原来写在外层，WIM=OFF 时链接不存在的目标
 endif()
-
-target_link_libraries(wim_apply_test PRIVATE imgtool)
 
 add_executable(fatput fatput.c)
 target_link_libraries(fatput PRIVATE imgtool)
 
 if(IMG_WITH_NTFS3G)
   add_executable(ntfs_probe ntfs_probe.c)
+  target_link_libraries(ntfs_probe PRIVATE imgtool)          # 同 wim_apply_test：原来写在外层
+  target_include_directories(ntfs_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
 endif()
-
-target_link_libraries(ntfs_probe PRIVATE imgtool)
-target_include_directories(ntfs_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 
 add_executable(timeout_test timeout_test.c)

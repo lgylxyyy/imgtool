@@ -18,15 +18,22 @@
 #include <time.h>        /* ★ 必须在 ntfs 头之前，否则 ntfstime.h 重定义 timespec */
 #include <sys/types.h>
 #include <sys/stat.h>
+#ifndef IMG_WITH_NTFS
+#define IMG_WITH_NTFS 0   /* 未启用格式化模块时走文件末尾的降级桩 */
+#endif
+#if IMG_WITH_NTFS
 #include <ntfs-3g/types.h>
 #include <ntfs-3g/layout.h>
 #include <ntfs-3g/device.h>
+#endif
 
 
 
+#if IMG_WITH_NTFS
 /* mkntfs 的真实入口（由构建时 objcopy 重命名） */
 extern int mkntfs_main(int argc, char **argv);
 void img_ntfs_set_active_ctx(img_ntfs_ctx *ctx);   /* 通用管道在 img_ntfs_ops.c */
+#endif
 
 void img_ntfs_fmt_defaults(img_ntfs_fmt_opts_t *o, uint64_t lba, uint64_t bytes){
     if(!o) return;
@@ -38,6 +45,7 @@ void img_ntfs_fmt_defaults(img_ntfs_fmt_opts_t *o, uint64_t lba, uint64_t bytes)
     o->quick = true;
 }
 
+#if IMG_WITH_NTFS
 int img_ntfs_format(img_qcow2 *q, const img_ntfs_fmt_opts_t *o, img_prog *prog){
     if(!q || !o || o->partition_bytes < 1024*1024) return IMG_EINVAL;
 
@@ -106,4 +114,9 @@ static inline uint64_t l64(const void *p){ const uint8_t*b=p;
     return (uint64_t)b[0]|(uint64_t)b[1]<<8|(uint64_t)b[2]<<16|(uint64_t)b[3]<<24|
            (uint64_t)b[4]<<32|(uint64_t)b[5]<<40|(uint64_t)b[6]<<48|(uint64_t)b[7]<<56; }
 
-
+#else  /* !IMG_WITH_NTFS：没有 GPL mkntfs 对象时的降级实现 */
+int img_ntfs_format(img_qcow2 *q, const img_ntfs_fmt_opts_t *o, img_prog *prog){
+    (void)q; (void)o; (void)prog;
+    return IMG_ENOTSUP;   /* 调用点统一翻成 FEATURE-UNAVAILABLE */
+}
+#endif
