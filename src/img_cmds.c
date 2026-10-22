@@ -2838,8 +2838,12 @@ static int cmd_ntfs_move(img_ctx *ctx, const img_args *in, img_result *out){
     img_span_kv_str(&sp,"src",src); img_span_kv_str(&sp,"dst",dst); img_span_begin(&sp);
     int mr=img_ntfs_move_path(fs,src,dst,over);
     img_span_end(&sp,mr);
-    /* ★ 校验必须在 umount 之前问（卸载后就问不到了）*/
-    bool gone  = (mr==IMG_OK) && !img_ntfs_path_exists(fs,src);
+    /* ★ 校验必须在 umount 之前问（卸载后就问不到了）
+     * ★ 只改大小写（a.txt → A.TXT）时"源还在"这个判断没有意义：
+     *   NTFS 是大小写不敏感的，源名字查到的就是同一个文件（真机实测：
+     *   改名成功了，却被后面的核对判成失败 IMG_ESTATE）。*/
+    bool case_only = (strcasecmp(src,dst)==0);
+    bool gone  = (mr==IMG_OK) && (case_only || !img_ntfs_path_exists(fs,src));
     bool arrived=(mr==IMG_OK) &&  img_ntfs_path_exists(fs,dst);
     img_ntfs_umount(fs);
     if(mr!=IMG_OK){
@@ -2857,6 +2861,7 @@ static int cmd_ntfs_move(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_str(out,"src",src);
     img_result_str(out,"dst",dst);
     img_result_bool(out,"moved",true);
+    img_result_bool(out,"case_only",case_only);
     return IMG_OK;
 #else
     (void)ctx;(void)in;(void)out; return IMG_ENOTSUP;

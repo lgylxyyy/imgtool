@@ -107,6 +107,32 @@ check('  被拒后目录还在（不是半途失败）', ex('/dirA/x.txt'))
 d = run('ntfs.move', img=IMG, lba=LBA, src='/dirA/x.txt', dst='/dirA', overwrite='true')
 check('目标是目录 → 不许用文件顶掉 NTFS-DEST-IS-DIR', code(d) == 'NTFS-DEST-IS-DIR', code(d))
 
+# —— 子目录内的改名（2026-10-23 真机抓到的真 bug）——
+# 同一目录里 spar/dpar 被 ntfs_inode_open 开了【两份独立副本】，link 写 A 份、
+# delete 拿 B 份的旧索引去删 → EIO，且把该子目录的索引写空（文件消失）。
+# 根目录因为索引项在磁盘块里，反而看不出问题 —— 所以必须专门测子目录。
+print('\n──── 子目录内改名（同名目录两份 inode 的坑）────')
+check('造 /mvdir/a.txt 与 /mvdir/keep.txt',
+      put('/mvdir/a.txt', b'AAA-IN-DIR').get('ok') and put('/mvdir/keep.txt', b'KEEP').get('ok'))
+d = run('ntfs.move', img=IMG, lba=LBA, src='/mvdir/a.txt', dst='/mvdir/b.txt')
+check('子目录内改名 /mvdir/a.txt → /mvdir/b.txt', d.get('ok'), json.dumps(d)[:200])
+check('  新名字在', ex('/mvdir/b.txt'))
+check('  内容逐字节一致', exported('/mvdir/b.txt') == b'AAA-IN-DIR')
+check('  同目录的其它文件还在（索引没被写空）', ex('/mvdir/keep.txt'))
+
+# 只改大小写：NTFS 大小写不敏感，"源还在"不能当失败依据
+d = run('ntfs.move', img=IMG, lba=LBA, src='/mvdir/b.txt', dst='/mvdir/B.TXT')
+check('只改大小写 /mvdir/b.txt → /mvdir/B.TXT', d.get('ok'), json.dumps(d)[:200])
+check('  带 case_only=true', (d.get('data') or {}).get('case_only') is True, json.dumps(d)[:200])
+check('  内容没变', exported('/mvdir/B.TXT') == b'AAA-IN-DIR')
+check('  同目录其它文件仍在', ex('/mvdir/keep.txt'))
+
+# 子目录 → 根（反向也测一遍；这条以前只测过 根 → 子目录）
+d = run('ntfs.move', img=IMG, lba=LBA, src='/mvdir/B.TXT', dst='/fromdir.txt')
+check('子目录 → 根 /mvdir/B.TXT → /fromdir.txt', d.get('ok'), json.dumps(d)[:200])
+check('  内容一致', exported('/fromdir.txt') == b'AAA-IN-DIR')
+check('  原目录里已没有它', not ex('/mvdir/B.TXT'))
+
 # —— 删除 ——
 d = run('ntfs.rm', img=IMG, lba=LBA, path='/dirA/x.txt')
 check('删文件 /dirA/x.txt', d.get('ok'), json.dumps(d)[:200])

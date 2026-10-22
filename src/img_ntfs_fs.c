@@ -652,6 +652,10 @@ int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
     if(moved_out) *moved_out=0;
     if(!fs||!fs->mounted||!dst_dir||!names||nnames<=0) return IMG_EINVAL;
     if(img_ntfs_mkdir_p(fs, dst_dir)!=IMG_OK) return IMG_EIO;
+    /* ★ 目标是根目录时，dst 必须【就是 root 那一份】：
+     *   ntfs-3g 对同一个 MFT 号两次 open 会给出各自独立的索引副本
+     *   （详见 move_path 里同目录改名的注释），两份混用会把 $I30 写坏。*/
+    bool dst_is_root = (strcmp(dst_dir,"/")==0);
 
     int moved=0, first_err=0;
     for(int i=0;i<nnames;i++){
@@ -660,10 +664,10 @@ int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
         ntfschar *u=NULL; size_t ul=0;
         if(!to_ntfs(nm,&u,&ul)) continue;
 
-        ntfs_inode *dst=lookup(fs->vol, dst_dir, NULL);     /* 每轮新开（上轮可能被消费）*/
         ntfs_inode *root=ntfs_inode_open(fs->vol, FILE_root);
+        ntfs_inode *dst = dst_is_root ? root : lookup(fs->vol, dst_dir, NULL);  /* 每轮新开（上轮可能被消费）*/
         if(!dst||!root){
-            if(dst) ntfs_inode_close(dst);
+            if(dst && !dst_is_root) ntfs_inode_close(dst);
             if(root) ntfs_inode_close(root);
             free(u);
             if(!first_err) first_err=IMG_EIO;
@@ -672,13 +676,15 @@ int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
         errno=0;
         MFT_REF ref=ntfs_inode_lookup_by_name(root,u,ul);
         if(!mftref_ok(ref)){
-            ntfs_inode_close(dst); ntfs_inode_close(root); free(u);
+            if(!dst_is_root) ntfs_inode_close(dst);
+            ntfs_inode_close(root); free(u);
             if(!first_err) first_err=IMG_ENOENT;
             continue;
         }
         ntfs_inode *ni=ntfs_inode_open(fs->vol, ref);
         if(!ni){
-            ntfs_inode_close(dst); ntfs_inode_close(root); free(u);
+            if(!dst_is_root) ntfs_inode_close(dst);
+            ntfs_inode_close(root); free(u);
             if(!first_err) first_err=IMG_EIO;
             continue;
         }
@@ -694,7 +700,7 @@ int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
             errno=0;
             int dr=ntfs_delete(fs->vol, path, ni, root, u, (u8)ul); /* ③ 消费 ni+root */
             ni=NULL; root=NULL;
-            if(dr==0){ moved++; ntfs_inode_close(dst); free(u); continue; }
+            if(dr==0){ moved++; if(!dst_is_root) ntfs_inode_close(dst); free(u); continue; }
             err=errno?errno:EIO;
             /* ④ 回滚：把目标目录里多出来的同名链接删掉（fresh opens，它也会被消费）*/
             char dp[600]; snprintf(dp,sizeof dp,"%s/%s", dst_dir, nm);
@@ -719,7 +725,7 @@ int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
             /* link 或 sync 失败：链接没进盘 → 直接清理内存对象即可（根目录原样，无残留）*/
             ntfs_inode_close(ni); ntfs_inode_close(root);
         }
-        ntfs_inode_close(dst);
+        if(!dst_is_root) ntfs_inode_close(dst);
         free(u);
         if(!first_err) first_err = (err==EPERM)?IMG_ENOTSUP:IMG_EIO;
     }
@@ -757,15 +763,45 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,b
     if(split_abs(src_abs,sdir,sizeof sdir,sname,sizeof sname)!=0) return IMG_EINVAL;
     if(split_abs(dst_abs,ddir,sizeof ddir,dname,sizeof dname)!=0) return IMG_EINVAL;
 
+    /* ★★ 同目录改名时 spar 与 dpar 必须是【同一个 ntfs_inode 对象】★★
+     *   ntfs-3g 的 ntfs_inode_open() 对同一个 MFT 号会各开一份独立副本
+     *   （NIDATA 缓存是"取走即移出"，第二次 open 就重新读盘）。
+     *   两份的 $I30 索引根各是各的：ntfs_link 写 A 份并落盘，ntfs_delete 却拿
+     *   B 份的【旧索引】去删 → ntfs_index_remove 报 EIO；最坏把这个子目录的
+     *   索引写空（2026-10-23 真机实测：/dir/a.txt → /dir/b.txt 失败且 /dir 变空，
+     *   而根目录下的同样改名是好的 —— 根目录的索引项在磁盘块里，看不出问题）。
+     *   所以：同目录只开一份，dpar 就是 spar；也绝不 close 两次。*/
+    bool same_dir = (strcmp(sdir,ddir)==0);
     ntfs_inode *spar=lookup(fs->vol,sdir,NULL);
-    if(!spar) return IMG_ENOENT;                            /* 源父目录不存在 */
+    if(!spar) return IMG_ENOENT;                           /* 源父目录不存在 */
+    ntfs_inode *dpar=spar;
+    bool dpar_extra=false;                                 /* dpar 是另开的一份 → 要单独 close */
+    if(!same_dir){
+        dpar=lookup(fs->vol,ddir,NULL);
+        if(!dpar){
+            /* 目标父目录：不存在就建（与 ntfs.put 的 --mkdir 行为一致）*/
+            if(img_ntfs_mkdir_p(fs,ddir)!=IMG_OK){ ntfs_inode_close(spar); return IMG_EIO; }
+            dpar=lookup(fs->vol,ddir,NULL);
+            if(!dpar){ ntfs_inode_close(spar); return IMG_EIO; }
+        }
+        dpar_extra=true;
+    }
     ntfschar *su=NULL; size_t sul=0;
-    if(!to_ntfs(sname,&su,&sul)){ ntfs_inode_close(spar); return IMG_EINVAL; }
+    ntfschar *du=NULL; size_t dul=0;
+    if(!to_ntfs(sname,&su,&sul)){ if(dpar_extra) ntfs_inode_close(dpar); ntfs_inode_close(spar); return IMG_EINVAL; }
     errno=0;
     MFT_REF sref=ntfs_inode_lookup_by_name(spar,su,sul);
-    if(!mftref_ok(sref)){ ntfs_inode_close(spar); free(su); return IMG_ENOENT; }  /* 源不存在 */
+    if(!mftref_ok(sref)){                                   /* 源不存在 */
+        if(dpar_extra) ntfs_inode_close(dpar);
+        ntfs_inode_close(spar); free(su);
+        return IMG_ENOENT;
+    }
     ntfs_inode *ni=ntfs_inode_open(fs->vol,sref);
-    if(!ni){ ntfs_inode_close(spar); free(su); return IMG_EIO; }
+    if(!ni){
+        if(dpar_extra) ntfs_inode_close(dpar);
+        ntfs_inode_close(spar); free(su);
+        return IMG_EIO;
+    }
     bool isdir=(ni->mrec->flags & MFT_RECORD_IS_DIRECTORY)!=0;
     /* ★ 目录一律拒绝（当前不放行的原因，写清楚免得后人当 bug 顺手删）：
      *   NTFS 把"我爹是谁"记在【子目录自己的 $I30 里的 ".." 索引项】，
@@ -775,67 +811,108 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,b
      *   注：img_ntfs_move_into 目前确实会搬目录（恢复分区那条流程在用），
      *   它的 ".." 正确性同样欠一次 Windows 侧验收 —— 已记入待办，不虚报。*/
     if(isdir){
-        ntfs_inode_close(ni); ntfs_inode_close(spar); free(su);
+        ntfs_inode_close(ni);
+        if(dpar_extra) ntfs_inode_close(dpar);
+        ntfs_inode_close(spar); free(su);
         return IMG_ENOTSUP;
     }
-
-    /* 目标父目录：不存在就建（与 ntfs.put 的 --mkdir 行为一致，App 少一次往返）*/
-    ntfs_inode *dpar=lookup(fs->vol,ddir,NULL);
-    if(!dpar){
-        if(img_ntfs_mkdir_p(fs,ddir)!=IMG_OK){
-            ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); return IMG_EIO;
-        }
-        dpar=lookup(fs->vol,ddir,NULL);
-        if(!dpar){ ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); return IMG_EIO; }
-    }
-    ntfschar *du=NULL; size_t dul=0;
     if(!to_ntfs(dname,&du,&dul)){
-        ntfs_inode_close(dpar); ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); return IMG_EINVAL;
+        ntfs_inode_close(ni);
+        if(dpar_extra) ntfs_inode_close(dpar);
+        ntfs_inode_close(spar); free(su);
+        return IMG_EINVAL;
     }
     errno=0;
     MFT_REF dref=ntfs_inode_lookup_by_name(dpar,du,dul);
-    if(mftref_ok(dref) && dref==sref){                     /* 已指向同一 inode（大小写写法不同）→ 成功 */
-        ntfs_inode_close(dpar); ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); free(du);
+    if(mftref_ok(dref) && dref==sref){                      /* 已指向同一 inode（大小写写法不同）→ 成功 */
+        ntfs_inode_close(ni);
+        if(dpar_extra) ntfs_inode_close(dpar);
+        ntfs_inode_close(spar); free(su); free(du);
         return IMG_OK;
     }
     if(mftref_ok(dref)){
         if(!overwrite){
-            ntfs_inode_close(dpar); ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); free(du);
+            ntfs_inode_close(ni);
+            if(dpar_extra) ntfs_inode_close(dpar);
+            ntfs_inode_close(spar); free(su); free(du);
             return IMG_EEXISTS;                             /* 目标已存在：不悄悄覆盖 */
         }
-        /* 覆盖：只能覆盖【文件】—— 目标若是目录，删它会连累一 subtree，一律拒绝 */
+        /* 覆盖：只能覆盖【文件】—— 目标若是目录，删它会连累整棵子树，一律拒绝 */
         ntfs_inode *dst_ni=ntfs_inode_open(fs->vol,dref);
         bool dst_isdir = dst_ni && (dst_ni->mrec->flags & MFT_RECORD_IS_DIRECTORY);
         if(dst_ni) ntfs_inode_close(dst_ni);
         if(dst_isdir){
             /* 与"源是目录"分开返回码（IMG_ESTATE）：一个是政策不放行，一个是
              * 绝不允许拿文件顶掉目录 —— App 的文案与处理完全不同 */
-            ntfs_inode_close(dpar); ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); free(du);
+            ntfs_inode_close(ni);
+            if(dpar_extra) ntfs_inode_close(dpar);
+            ntfs_inode_close(spar); free(su); free(du);
             return IMG_ESTATE;
         }
         int r=img_ntfs_rm(fs,dst_abs);
         if(r!=IMG_OK){
-            ntfs_inode_close(dpar); ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); free(du);
+            ntfs_inode_close(ni);
+            if(dpar_extra) ntfs_inode_close(dpar);
+            ntfs_inode_close(spar); free(su); free(du);
             return r;
         }
-        /* rm 动过索引，dpar 需要重新打开（它的记录可能已被 ntfs-3g 内部刷新）*/
-        ntfs_inode_close(dpar);
-        dpar=lookup(fs->vol,ddir,NULL);
-        if(!dpar){ ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); free(du); return IMG_EIO; }
+        /* rm 动过索引：把目录 inode 全部丢掉重开一份（两种情形合起来只有一份）*/
+        if(dpar_extra){ ntfs_inode_close(dpar); dpar=NULL; }
+        ntfs_inode_close(spar); spar=NULL; dpar=NULL;
+        spar=lookup(fs->vol,sdir,NULL);
+        if(!spar){ ntfs_inode_close(ni); free(su); free(du); return IMG_EIO; }
+        if(same_dir){ dpar=spar; dpar_extra=false; }
+        else {
+            dpar=lookup(fs->vol,ddir,NULL);
+            if(!dpar){ ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); free(du); return IMG_EIO; }
+            dpar_extra=true;
+        }
     }
+    /* 逐步骤 DEBUG 留痕（只在 --log-level=debug 时产生，零成本否则）：
+     * 真机上排查 move 只能靠这个 —— 一个 EIO 后面可能站着四种完全不同的原因。*/
+    { img_ev ev;
+      if(img_ev_init(&ev,IMG_LV_DEBUG,"ntfs","move_plan",IMG_OK,"move 计划")){
+          img_ev_str(&ev,"src",src_abs); img_ev_str(&ev,"dst",dst_abs);
+          img_ev_str(&ev,"sdir",sdir); img_ev_str(&ev,"ddir",ddir);
+          img_ev_str(&ev,"sname",sname); img_ev_str(&ev,"dname",dname);
+          img_ev_u64(&ev,"same_dir",same_dir?1u:0u);
+          img_ev_emit(&ev);
+      } }
     /* ① 新位置加链接 */
     if(ntfs_link(ni,dpar,du,(u8)dul)!=0){
         int e=errno;
-        ntfs_inode_close(dpar); ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); free(du);
+        img_ev ev;
+        if(img_ev_init(&ev,IMG_LV_ERROR,"ntfs","move_link_fail",IMG_EIO,"加链接失败")){
+            img_ev_str(&ev,"src",src_abs); img_ev_str(&ev,"dst",dst_abs);
+            img_ev_errno(&ev,e); img_ev_emit(&ev);
+        }
+        ntfs_inode_close(ni);
+        if(dpar_extra) ntfs_inode_close(dpar);
+        ntfs_inode_close(spar); free(su); free(du);
         return (e==EDQUOT||e==ENOSPC)?IMG_EFULL:IMG_EIO;
     }
+    { img_ev ev;
+      if(img_ev_init(&ev,IMG_LV_DEBUG,"ntfs","move_linked",IMG_OK,"新位置已加链接")){
+          img_ev_str(&ev,"dst",dst_abs); img_ev_emit(&ev);
+      } }
     /* ② ★ 先把新父目录同步落盘，再动旧目录项（顺序不能反）*/
     if(ntfs_inode_sync(dpar)!=0){
         int e=errno;
-        ntfs_inode_close(dpar); ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); free(du);
-        return e?IMG_EIO:IMG_EIO;
+        img_ev ev;
+        if(img_ev_init(&ev,IMG_LV_ERROR,"ntfs","move_sync_fail",IMG_EIO,"新父目录落盘失败")){
+            img_ev_str(&ev,"src",src_abs); img_ev_str(&ev,"dst",dst_abs);
+            img_ev_errno(&ev,e); img_ev_emit(&ev);
+        }
+        ntfs_inode_close(ni);
+        if(dpar_extra) ntfs_inode_close(dpar);
+        ntfs_inode_close(spar); free(su); free(du);
+        return IMG_EIO;
     }
-    ntfs_inode_close(dpar);
+    if(dpar_extra) ntfs_inode_close(dpar);
+    { img_ev ev;
+      if(img_ev_init(&ev,IMG_LV_DEBUG,"ntfs","move_synced",IMG_OK,"新父已落盘，准备删旧")){
+          img_ev_str(&ev,"src",src_abs); img_ev_emit(&ev);
+      } }
     /* ③ 删旧目录项：ntfs_delete 会【消费】ni 与 spar，之后绝不能再 close/free */
     errno=0;
     int dr=ntfs_delete(fs->vol,src_abs,ni,spar,su,(u8)sul);
@@ -843,6 +920,11 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,b
     free(du);
     if(dr!=0){
         int e=errno;
+        img_ev ev;
+        if(img_ev_init(&ev,IMG_LV_ERROR,"ntfs","move_delete_fail",IMG_EIO,"删旧目录项失败")){
+            img_ev_str(&ev,"src",src_abs); img_ev_str(&ev,"dst",dst_abs);
+            img_ev_errno(&ev,e); img_ev_emit(&ev);
+        }
         /* 旧项没删掉 → 新旧两处都在（数据完好），如实报失败让调用方重试 */
         return (e==ENOENT)?IMG_ENOENT:IMG_EIO;
     }
