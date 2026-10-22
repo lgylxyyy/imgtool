@@ -286,7 +286,9 @@ void img_ctx_close(img_ctx *c){
     if(!c) return;
     if(c->q){ img_qcow2_close(c->q); c->q=NULL; }
     if(c->io){ img_io_close(c->io); c->io=NULL; }
-    img_lock_destroy(&c->lk);
+    /* ★ 不 destroy 一把可能仍被别的线程持有的锁（那是 glibc abort 路径）；
+     *   拿得到才销毁，拿不到就随 free 一起消失 —— mutex 无内禀资源，不泄漏。*/
+    img_lock_destroy_safe(&c->lk);
     free(c);
 }
 const char  *img_ctx_path(const img_ctx *c){ return c?c->path:""; }

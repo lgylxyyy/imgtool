@@ -33,3 +33,4 @@ tools/imgtest_progress
 *.swp
 *~
 imgtool-dev
+build-*/
