@@ -266,10 +266,15 @@ int img_layout_build(img_parttable_t *t, uint64_t disk_sectors,
         /* BIOS/MBR：活动系统分区 */
         img_part_request_t rq={0};
         rq.table=table; rq.disk_sectors=disk_sectors; rq.sector_size=sec;
-        rq.role=IMG_ROLE_SYSPART; rq.mbr_type=IMG_MBR_NTFS_EXFAT; rq.active=true;
+        /* ★ 系统保留分区用【0x27】而不是 0x07 —— 这是 Windows 安装程序的做法。
+         *   实测（QEMU + Win7 32 位）：0x07 时 Windows 首次启动会把这个 512MiB 的
+         *   普通 NTFS 卷当成 C:，真正的系统分区变成 D: → specialize 阶段报
+         *   "没有确保计算机之间分配的驱动器号相匹配"，卡死。
+         *   改 0x27 后同样条件推进到"为首次使用计算机做准备"，该错误消失。*/
+        rq.role=IMG_ROLE_SYSPART; rq.mbr_type=IMG_MBR_RECOVERY; rq.active=true;
         rq.sectors = o->sys_bytes/sec; rq.first_lba=off; rq.existing_count=0;
         if((rc=img_constraints_check_partition(&rq,err))!=IMG_OK) return rc;
-        if((rc=img_partition_add(t,off,rq.sectors,IMG_MBR_NTFS_EXFAT,NULL,"System",true,&idx))!=IMG_OK) return rc;
+        if((rc=img_partition_add(t,off,rq.sectors,IMG_MBR_RECOVERY,NULL,"System",true,&idx))!=IMG_OK) return rc;
         off += rq.sectors;
     }
 
