@@ -485,3 +485,20 @@ $T/imgmkfs $W/tpl.qcow2 --mkfs $LBA TEST
 是从那两个源盘抽出的 `$Boot` 前 10 扇区快照（各 5120 B）；`reference/ntfs-vbr-README.md`
 写清三者关系、证据链与适用范围。`tests/vbr-tpl-test.py` 扩到 15 条断言：
 数组 == 文件 == 两个源快照的引导码段 == 写入盘。
+
+---
+
+## 2026-10-23 关闭的工程债（详见 HANDOFF-2026-10-23.md）
+
+| 债 | 状态 | 落点 |
+|---|---|---|
+| `ntfs.list` 大目录只回 `RESULT-TOO-BIG` | ✅ 分页 `--offset/--limit` + `total/has_more` | 211b105 |
+| FAT 侧没有改名/移动/删除 | ✅ `fat.rm` / `fat.move`（库层 `img_fat32_rename`） | 0c80051 + 211b105 |
+| ISO 只能一层层 `ls` | ✅ `iso.ls --recursive/--find/--max/--depth` | 211b105 |
+| `IMG_WITH_WIM=OFF` / `IMG_WITH_NTFS3G=OFF` 不可构建 | ✅ 占位实现 + 门控 + `degraded-build-test.sh` | 6312e98 |
+| `imgtool-dev-<pid>` 占位文件不清理 | ✅ atexit + 死 pid 清理 | 6312e98 |
+| 同目录内 NTFS 改名写坏 `$I30`（真机丢文件） | ✅ 同一份 inode + 三步诊断事件 | 2bedc48 |
+
+未关闭：NTFS 目录移动（`".."` 未同步，需 Windows 侧验收）、`ntfs.list` 的 `size` 恒 0、
+`fat.ls` 无分页（64 KB 缓冲 ≈ 900 项）、32 位 UEFI 与 Vista/8/8.1 未复现、
+`wim.apply --wimboot` 未验证、`bcdboot` 未对齐。
