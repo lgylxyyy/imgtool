@@ -557,13 +557,27 @@ static const img_arg A_NTFSLIST[] = {
     {"img",  IMG_A_STR, true,  NULL, "镜像路径（qcow2）", NULL},
     {"lba",  IMG_A_U64, true,  NULL, "NTFS 分区起始 LBA", chk_lba},
     {"path", IMG_A_STR, false, "/",  "要列的目录（绝对路径，默认根目录）", NULL},
+    /* ★ 分页（2026-10-23）：System32 有 4000+ 项，整页序列化必然溢出 128KB 输出缓冲，
+     *   于是 App 只拿到 RESULT-TOO-BIG、看不见任何名字。分页把「看不见」变成「翻页」。*/
+    {"offset", IMG_A_U64, false, "0",   "从第几项开始（分页；默认 0）", NULL},
+    {"limit",  IMG_A_U64, false, "500", "本页最多多少项（1~2000；默认 500）", NULL},
 };
 #if IMG_WITH_NTFS3G
-#define NTFS_LIST_MAX 4096
-typedef struct { char *b; size_t cap, len; int n; bool truncated; } list_buf_t;
+/* 单页硬上限：条目 JSON 约 70~90 字节，2000 项 ≈ 180KB，仍在 256KB 缓冲内。
+ * 真正的上限是【输出信封】的大小（CLI 128KB / JNI 侧同样有上限），
+ * 所以默认 500 给 App 留足余量。*/
+#define NTFS_LIST_MAX 2000
+#define NTFS_LIST_DEFAULT 500
+typedef struct { char *b; size_t cap, len;
+                 uint64_t total;            /* 目录里一共多少项（不受分页影响）*/
+                 uint64_t offset, limit;
+                 int n;                     /* 本页已序列化项数 */
+                 bool truncated; } list_buf_t;
 static void list_json_cb(void *ud, const char *name, bool is_dir, uint64_t size){
     list_buf_t *a=(list_buf_t*)ud;
-    if(a->n >= NTFS_LIST_MAX){ a->truncated=true; return; }
+    uint64_t idx = a->total++;                 /* 先计数，再决定要不要写进本页 */
+    if(idx < a->offset) return;
+    if((uint64_t)a->n >= a->limit) return;     /* 后面的项只计数，不再序列化 */
     char item[640];
     /* name 里可能有引号/反斜杠 → 手写转义（与日志同一套规则）*/
     int k=snprintf(item,sizeof item,"%s{\"name\":\"", a->n?",":"");
@@ -596,12 +610,22 @@ static int cmd_ntfs_list(img_ctx *ctx, const img_args *in, img_result *out){
     img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
     if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",path,"不是合法 NTFS（未格式化或 LBA 不对）",NULL);
              return IMG_ESTATE; }
-    static char jbuf[256*1024];
-    list_buf_t acc={jbuf,sizeof jbuf,0,0,false};
+    uint64_t offset=img_args_u64(in,"offset",0);
+    uint64_t limit =img_args_u64(in,"limit",NTFS_LIST_DEFAULT);
+    if(limit==0) limit=NTFS_LIST_DEFAULT;                 /* 0 当默认，避免"要 0 项"这种无意义输入 */
+    if(limit>NTFS_LIST_MAX) limit=NTFS_LIST_MAX;
+    /* ★ TLS：ntfs.list 走的是 ctx（同一 ctx 内部串行），但不同 ctx 可并行；
+     *   jbuf 原是进程级 static → 两盘并发列目录会互相覆盖（与 iso.ls 同一类缺陷）。*/
+    IMG_THREAD_LOCAL static char jbuf[256*1024];
+    list_buf_t acc={jbuf,sizeof jbuf,0,0,offset,limit,0,false};
     rc=img_ntfs_list_dir(fs,path,list_json_cb,&acc);
     img_ntfs_umount(fs);
     if(rc!=IMG_OK){ img_result_fail(out,rc,"FAT-LS-FAIL",path,"目录无法读取（路径不对或卷损坏）",NULL); return rc; }
+    img_result_u64(out,"total",acc.total);                /* 目录里总共多少项（翻页依据）*/
+    img_result_u64(out,"offset",offset);
+    img_result_u64(out,"limit",limit);
     img_result_u64(out,"count",(uint64_t)acc.n);
+    img_result_bool(out,"has_more", offset+(uint64_t)acc.n < acc.total);
     img_result_bool(out,"truncated",acc.truncated);
     if(!acc.len){ memcpy(jbuf,"[]",2); acc.len=2; }
     else{                                             /* ★ 补方括号（裸项拼接不是合法 JSON —— 实测踩过）*/
@@ -1728,24 +1752,105 @@ static int cmd_boot_check(img_ctx *ctx, const img_args *in, img_result *out){
  * 背景（DESIGN-OUTPUT.md §十一 层归属）：ISO → sources/install.wim 原来归 App 做，
  * 意味着 App 必须自己找 ISO 库、自己写文件。改成工具做：
  *   iso.ls / iso.extract → App 只剩下"命令权"，读写出问题时排查面收敛到工具日志。*/
-typedef struct { char *b; size_t cap, len; int n; bool trunc; } isolist_t;
-static void iso_list_cb(void *ud, const char *name, bool is_dir, uint64_t size){
-    isolist_t *a=(isolist_t*)ud;
-    if(!a || a->n>=4096){ if(a) a->trunc=true; return; }
-    char item[640]; int k=snprintf(item,sizeof item,"%s{\"name\":\"",a->n?",":"");
-    for(const unsigned char *p=(const unsigned char*)name; p&&*p && k<(int)sizeof item-64; p++){
-        if(*p=='"'||*p=='\\') item[k++]='\\', item[k++]=(char)*p;
-        else if(*p<0x20) k+=snprintf(item+k,sizeof item-(size_t)k,"\\u%04x",*p);
-        else item[k++]=(char)*p;
+/* 递归列目录（2026-10-23）
+ * 背景：以前只能一层层 ls —— 用户问"这张 ISO 里有没有 install.wim / 哪个版本"，
+ *   得点几十次。递归 + find 一次给全（只读，不改 ISO）。
+ * 防环/防爆：① 深度上限（默认 32）② 条目上限（默认 1500）③ 目录数上限 4096。
+ *   UDF 规范里目录是树，但坏镜像/构造镜像可以有回指 —— 三条上限一起兜底。*/
+typedef struct { char *b; size_t cap, len; int n; unsigned max; bool trunc;
+                 int dirs; const char *find; } isolist_t;
+typedef struct { char **v; int n, cap; bool bad; } isolist_subs;
+
+static bool istr_has(const char *hay, const char *needle){
+    if(!needle||!*needle) return true;
+    size_t nl=strlen(needle);
+    for(const char *p=hay; *p; p++)
+        if(!strncasecmp(p,needle,nl)) return true;
+    return false;
+}
+static void subs_push(isolist_subs *s, const char *nm){
+    if(s->n>=s->cap){
+        int nc=s->cap? s->cap*2 : 16;
+        if(nc>8192) nc=8192;
+        char **nv=realloc(s->v,(size_t)nc*sizeof *nv);
+        if(!nv){ s->bad=true; return; }
+        s->v=nv; s->cap=nc;
     }
-    k+=snprintf(item+k,sizeof item-(size_t)k,"\",\"dir\":%s,\"size\":%llu}",
-                is_dir?"true":"false",(unsigned long long)size);
-    if(a->len+(size_t)k+1 < a->cap){ memcpy(a->b+a->len,item,(size_t)k); a->len+=(size_t)k; a->n++; }
+    if(s->n>=s->cap){ s->bad=true; return; }
+    s->v[s->n]=strdup(nm);
+    if(!s->v[s->n]){ s->bad=true; return; }
+    s->n++;
+}
+/* JSON 字符串转义（与 wim/iso 其它地方同一套规矩）*/
+static int iso_jesc(char *dst, size_t cap, const char *s){
+    int k=0;
+    for(const unsigned char *p=(const unsigned char*)s; p&&*p && k<(int)cap-8; p++){
+        if(*p=='"'||*p=='\\'){ dst[k++]='\\'; dst[k++]=(char)*p; }
+        else if(*p<0x20) k+=snprintf(dst+k,cap-(size_t)k,"\\u%04x",*p);
+        else dst[k++]=(char)*p;
+    }
+    dst[k]=0;
+    return k;
+}
+static void iso_scpy(char *d, size_t cap, const char *s){
+    if(!cap) return;
+    size_t n=strlen(s?s:"");
+    if(n>=cap) n=cap-1;
+    memcpy(d,s,n); d[n]=0;
+}
+/* dir + "/" + name，超长截断（截断只会让路径显示不全，不会越界）*/
+static void iso_join(char *out, size_t cap, const char *dir, const char *name){
+    iso_scpy(out,cap,dir);
+    size_t n=strlen(out);
+    if(n+1<cap && strcmp(dir,"/")) out[n++]='/';
+    iso_scpy(out+n,cap-n,name);
+}
+typedef struct { isolist_t *a; isolist_subs subs; char dir[1400]; } iso_dir_ctx;
+static void iso_list_cb(void *ud, const char *name, bool is_dir, uint64_t size){
+    iso_dir_ctx *c=(iso_dir_ctx*)ud;
+    isolist_t *a=c?c->a:NULL;
+    if(!a || !name) return;
+    char full[1400];
+    iso_join(full,sizeof full,c->dir,name);
+    if(is_dir) subs_push(&c->subs,name);
+    if(a->n>=(int)a->max){ a->trunc=true; return; }
+    if(a->find && !istr_has(full,a->find)) return;
+    char nm[600], fp[1400], item[2200];
+    iso_jesc(nm,sizeof nm,name);
+    iso_jesc(fp,sizeof fp,full);
+    int k=snprintf(item,sizeof item,"%s{\"name\":\"%s\",\"path\":\"%s\",\"dir\":%s,\"size\":%llu}",
+                   a->n?",":"",nm,fp,is_dir?"true":"false",(unsigned long long)size);
+    if(k>0 && a->len+(size_t)k+1 < a->cap){ memcpy(a->b+a->len,item,(size_t)k); a->len+=(size_t)k; a->n++; }
     else a->trunc=true;
+}
+static int iso_ls_rec(img_iso *iso, const char *dir, int depth, int maxdepth, isolist_t *a){
+    if(depth>maxdepth || a->n>=(int)a->max || a->dirs>=4096) return IMG_OK;
+    if(strlen(dir)>=sizeof(((iso_dir_ctx*)0)->dir)-300) return IMG_OK;  /* 路径过长：不再下钻 */
+    iso_dir_ctx *c=calloc(1,sizeof *c);
+    if(!c) return IMG_ENOMEM;
+    iso_scpy(c->dir,sizeof c->dir,dir);
+    c->a=a;
+    a->dirs++;
+    int cnt=img_iso_list(iso,dir,iso_list_cb,c);
+    int rc=(cnt<0)?cnt:IMG_OK;
+    for(int i=0;i<c->subs.n && rc==IMG_OK;i++){
+        if(a->n>=(int)a->max){ a->trunc=true; break; }
+        char sub[1400];
+        iso_join(sub,sizeof sub,dir,c->subs.v[i]);
+        rc=iso_ls_rec(iso,sub,depth+1,maxdepth,a);
+    }
+    for(int i=0;i<c->subs.n;i++) free(c->subs.v[i]);
+    free(c->subs.v);
+    free(c);
+    return rc;
 }
 static const img_arg A_ISOLS[] = {
     {"iso",  IMG_A_STR, true,  NULL, "ISO 文件路径（UDF bridge；不修改它）", NULL},
     {"path", IMG_A_STR, false, "/",  "ISO 内的目录（大小写不敏感）", NULL},
+    {"recursive", IMG_A_BOOL, false, "false", "递归列出所有子目录（默认只列一层）", NULL},
+    {"find", IMG_A_STR, false, NULL, "按路径子串过滤（不区分大小写；给了它就自动递归）", NULL},
+    {"max",  IMG_A_U64, false, "1500", "最多返回多少项（1~4000）", NULL},
+    {"depth",IMG_A_U64, false, "32",   "递归最大深度（1~64；防病态镜像）", NULL},
 };
 /* img_iso_open_* 的 rc → 错误码：以前一律 HOST-OPEN-FAIL，把“不是 ISO”也说成“打不开”，
    真机排查时被带偏过一次，这里按语义分开。 */
@@ -1762,6 +1867,10 @@ static int cmd_iso_ls(img_ctx *ctx, const img_args *in, img_result *out){
     (void)ctx;
     const char *isop=img_args_get(in,"iso");
     const char *path=img_args_get(in,"path"); if(!path||!*path) path="/";
+    const char *find=img_args_get(in,"find"); if(find && !*find) find=NULL;
+    bool rec=img_args_bool(in,"recursive",false) || (find!=NULL);
+    uint64_t max=img_args_u64(in,"max",1500); if(max<1) max=1; if(max>4000) max=4000;
+    uint64_t depth=img_args_u64(in,"depth",32); if(depth<1) depth=1; if(depth>64) depth=64;
     char err[256]="";
     img_iso *iso=NULL;
     int rc=img_iso_open_path(&iso,isop,err,sizeof err);
@@ -1772,17 +1881,32 @@ static int cmd_iso_ls(img_ctx *ctx, const img_args *in, img_result *out){
      *   不能换 per-call malloc：img_result_raw() 只存指针，命令函数里不能 free。
      *   raw 类型必须是【一个完整的 JSON 值】：条目之间只有逗号不够，得包成数组。*/
     IMG_THREAD_LOCAL static char jb[256*1024];
-    jb[0]='['; isolist_t acc={jb,sizeof jb-2,1,0,false};
+    jb[0]='['; isolist_t acc={jb,sizeof jb-2,1,0,(unsigned)max,false,0,find};
     img_span sp; img_span_prep(&sp,"iso","ls","列 ISO 目录");
-    img_span_kv_str(&sp,"path",path); img_span_begin(&sp);
-    int n=img_iso_list(iso,path,iso_list_cb,&acc);
-    img_span_end(&sp, n<0?IMG_ENOENT:IMG_OK);
+    img_span_kv_str(&sp,"path",path); img_span_kv_str(&sp,"find",find?find:"");
+    img_span_begin(&sp);
+    if(rec){
+        rc=iso_ls_rec(iso,path,0,(int)depth,&acc);
+        if(rc==IMG_OK && acc.n==0 && !find){ rc=IMG_ENOENT; }   /* 目录不存在：与单层语义一致 */
+    } else {
+        iso_dir_ctx *c=calloc(1,sizeof *c);
+        if(!c){ img_iso_close(iso); img_result_fail(out,IMG_ENOMEM,"ISO-READ-FAIL",path,"内存不足",NULL); return IMG_ENOMEM; }
+        snprintf(c->dir,sizeof c->dir,"%s",path);
+        c->a=&acc;
+        int n=img_iso_list(iso,path,iso_list_cb,c);
+        for(int i=0;i<c->subs.n;i++) free(c->subs.v[i]);
+        free(c->subs.v); free(c);
+        rc=(n<0)?IMG_ENOENT:IMG_OK;
+    }
+    img_span_end(&sp, rc);
     const char *vol=img_iso_volume_id(iso);
     img_iso_close(iso);
-    if(n<0){ img_result_fail(out,IMG_ENOENT,"FAT-DIR-NOTFOUND",path,"ISO 里没有这个目录",NULL); return IMG_ENOENT; }
+    if(rc!=IMG_OK){ img_result_fail(out,IMG_ENOENT,"FAT-DIR-NOTFOUND",path,"ISO 里没有这个目录",NULL); return IMG_ENOENT; }
     jb[acc.len++]=']'; jb[acc.len]=0;
     img_result_u64(out,"count",(uint64_t)acc.n);
     img_result_bool(out,"truncated",acc.trunc);
+    img_result_bool(out,"recursive",rec);
+    img_result_u64(out,"dirs_scanned",(uint64_t)acc.dirs);
     if(vol) img_result_str(out,"volume",vol);
     img_result_raw(out,"entries",jb);
     return IMG_OK;
@@ -1869,7 +1993,97 @@ static int cmd_fat_export(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+/* ---------- fat.rm（删文件 / 空目录；不递归 —— 递归删是政策，不是机制）----------
+ * 与 ntfs.rm 对齐：目录非空一律拒绝（IMG_ENOTSUP），让 App 明确"先删子项"，
+ * 而不是工具替它猜。底层 img_fat32_rm 已存在多年，这条命令只是把它暴露出来。*/
+static const img_arg A_FATRM[] = {
+    {"img",  IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
+    {"lba",  IMG_A_U64, true, NULL, "FAT32 分区起始 LBA", chk_lba},
+    {"path", IMG_A_STR, true, NULL, "分区内要删除的绝对路径（/ 开头）", NULL},
+};
+static int cmd_fat_rm(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *path=img_args_get(in,"path");
+    if(!path||path[0]!='/'){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","需要 / 开头的绝对路径",NULL); return IMG_EINVAL; }
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ return qc_open_fail(out,ctx); }
+    img_fat32_fs *fs=img_fat32_mount(q,lba,true);
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL",path,"不是合法 FAT32（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
+    int rc=img_fat32_rm(fs,path);
+    img_fat32_unmount(fs);
+    if(rc==IMG_ENOENT){
+        img_result_fail(out,rc,"FAT-ENTRY-NOTFOUND",path,"路径不存在（大小写不敏感，但路径必须完整）","先用 fat.ls 核对父目录");
+        return rc;
+    }
+    if(rc==IMG_ENOTSUP){
+        img_result_fail(out,rc,"FAT-DIR-NOT-EMPTY",path,"目录非空（本命令不递归删除）","先逐个删掉里面的项，或改在 App 侧做递归");
+        return rc;
+    }
+    if(rc!=IMG_OK){
+        img_result_fail(out,rc,rc==IMG_ECORRUPT?"PART-FS-BAD":"FAT-RM-FAIL",path,"删除失败（卷损坏或簇链成环）","跑 qc.verify / 换备份镜像");
+        return rc;
+    }
+    img_result_str(out,"path",path);
+    return IMG_OK;
+}
 
+/* ---------- fat.move（盘内改名 / 移动，单条路径）----------
+ * 目标已存在 → 明确报 FAT-ENTRY-EXISTS，不默认覆盖（覆盖=丢数据，必须 App 显式决定：
+ * 先 fat.rm 再 fat.move，两步各自可见）。*/
+static const img_arg A_FATMOVE[] = {
+    {"img", IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
+    {"lba", IMG_A_U64, true, NULL, "FAT32 分区起始 LBA", chk_lba},
+    {"src", IMG_A_STR, true, NULL, "源绝对路径（/ 开头；可指向文件或目录）", NULL},
+    {"dst", IMG_A_STR, true, NULL, "目标绝对路径（父目录必须已存在）", NULL},
+};
+static int cmd_fat_move(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *src=img_args_get(in,"src"), *dst=img_args_get(in,"dst");
+    if(!src||src[0]!='/'||!dst||dst[0]!='/'){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","src/dst","两个都得是 / 开头的绝对路径",NULL); return IMG_EINVAL;
+    }
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q){ return qc_open_fail(out,ctx); }
+    img_fat32_fs *fs=img_fat32_mount(q,lba,true);
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL",src,"不是合法 FAT32（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
+    /* ★ 先分清楚"源不存在"和"目标父目录不存在"：底层统一返回 ENOENT，
+     *   混在一起报会让 App 提示错方向（实测就踩过：以为源丢了，其实是目标目录没建）。*/
+    if(!img_fat32_path_exists(fs,src)){
+        img_fat32_unmount(fs);
+        img_result_fail(out,IMG_ENOENT,"FAT-ENTRY-NOTFOUND",src,"源路径不存在","先用 fat.ls 核对大小写与整条路径");
+        return IMG_ENOENT;
+    }
+    {   char parent[512]; snprintf(parent,sizeof parent,"%s",dst);
+        char *slash=strrchr(parent,'/');
+        if(slash){ if(slash==parent) slash[1]=0; else *slash=0; }
+        if(!img_fat32_dir_exists(fs,parent)){
+            img_fat32_unmount(fs);
+            img_result_fail(out,IMG_ENOENT,"FAT-DEST-DIR-NOTFOUND",dst,"目标的父目录不存在（本命令不自动建目录）","先在该位置 fat.put 一个文件把目录建出来，或改目标路径");
+            return IMG_ENOENT;
+        }
+    }
+    int rc=img_fat32_rename(fs,src,dst);
+    img_fat32_unmount(fs);
+    if(rc==IMG_ENOENT){
+        img_result_fail(out,rc,"FAT-ENTRY-NOTFOUND",src,"源路径不存在，或目标的父目录不存在","先用 fat.ls 核对两边的父目录");
+        return rc;
+    }
+    if(rc==IMG_EEXISTS){
+        img_result_fail(out,rc,"FAT-ENTRY-EXISTS",dst,"目标已经存在（本命令不覆盖）","先 fat.rm 删掉目标，或换一个名字");
+        return rc;
+    }
+    if(rc==IMG_EINVAL){
+        img_result_fail(out,rc,"FAT-MOVE-BAD",dst,"源与目标相同，或把目录移进了它自己的子树",NULL);
+        return rc;
+    }
+    if(rc!=IMG_OK){
+        img_result_fail(out,rc,rc==IMG_ECORRUPT?"PART-FS-BAD":"FAT-MOVE-FAIL",dst,"移动失败（卷损坏或簇链成环）","跑 qc.verify / 换备份镜像");
+        return rc;
+    }
+    img_result_str(out,"src",src);
+    img_result_str(out,"dst",dst);
+    return IMG_OK;
+}
 /* ================= 恢复分区 / WinRE 四件套（2026-10-20，A2）=================
  * 政策仍是"默认不建"：这些命令只在 App 明确勾选后调用（DESIGN-OUTPUT §十一）。*/
 
@@ -2579,6 +2793,7 @@ static const img_arg A_NTFSMOVE[] = {
     {"dst",  IMG_A_STR, true,  NULL, "盘内新路径（/ 开头；末段不同=改名，父目录不同=移动）", NULL},
     {"overwrite", IMG_A_BOOL, false, "false", "目标已存在时是否覆盖（默认 false=直接报错）", NULL},
 };
+#if IMG_WITH_NTFS3G   /* 只在开启 NTFS 时用到；关掉时不该留下 unused 警告 */
 /* 把 img_ntfs_move_path 的返回码翻成【能分开病因】的错误码：
  * "源不存在"/"目标已存在"/"目标是目录"/"空间不够"/"底层失败" 各一条 ——
  * 之前踩过"所有失败共用一个码"的坑（排查时分不出打错字还是卷坏了）。 */
@@ -2600,6 +2815,7 @@ static uint64_t ntfs_part_bytes(img_parttable_t *t,uint64_t lba){
             return (t->parts[i].last_lba - t->parts[i].first_lba + 1)*512;
     return 0;
 }
+#endif /* IMG_WITH_NTFS3G */
 static int cmd_ntfs_move(img_ctx *ctx, const img_args *in, img_result *out){
     if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 改名/移动）","重新编译时开启该功能并安装对应系统库");
 #if IMG_WITH_NTFS3G
@@ -2705,6 +2921,7 @@ static int cmd_ntfs_rm(img_ctx *ctx, const img_args *in, img_result *out){
  *   App 启动时清 img_tmpdir() 里 imgtool-src-* 是既定契约，见手册）。
  * ★ 过滤状态一律放在累加器里，不用进程级全局：iso.ls 那种 static 缓冲在
  *   【无 ctx 的命令】上并发跑会互相踩（这两条命令就不需要 ctx）。 */
+#if IMG_WITH_WIM       /* wim.ls / wim.extract 的私有助手 */
 #define WIM_LS_MAX 4096
 typedef struct {
     char *b; size_t cap, len; int n; bool trunc;
@@ -2783,6 +3000,7 @@ static const char *wim_fs_code(int rc,int kind){
     default:          return kind==1?"WIM-LIST-FAIL":"WIM-EXTRACT-FAIL";
     }
 }
+#endif /* IMG_WITH_WIM */
 static const img_arg A_WIMLS[] = {
     {"wim",       IMG_A_STR, true,  NULL,   "WIM/ESD 路径；也可以直接给含它的 ISO（工具自动定位 sources\\install.wim|.esd）", NULL},
     {"index",     IMG_A_U64, false, "1",    "映像索引（先用 wim.identify 拿清单）", NULL},
@@ -2813,7 +3031,7 @@ static int cmd_wim_ls(img_ctx *ctx, const img_args *in, img_result *out){
     }
     /* ★ 线程局部，理由同 iso.ls（无 ctx 命令可并行 + raw 只存指针不能就地 free）*/
     IMG_THREAD_LOCAL static char jb[512*1024];
-    jb[0]=(char)0x5b; wimlist_t acc={jb,sizeof jb-2,1,0,false};   /* ★ len 从 1 起：第 0 格是 '['，别覆盖掉 */
+    jb[0]=(char)0x5b; wimlist_t acc={jb,sizeof jb-2,1,0,false,{0},0};   /* ★ len 从 1 起：第 0 格是 '['，别覆盖掉 */
     if(contains&&contains[0]) snprintf(acc.contains,sizeof acc.contains,"%s",contains);
     acc.limit=(size_t)lim64;
     char err[256]="";
@@ -2975,6 +3193,10 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_FATEXPORT,(int)(sizeof A_FATEXPORT/sizeof A_FATEXPORT[0]), cmd_fat_export},
     {"fat.exists", "1.0", "查 FAT32 路径是否存在（断点续跑探测原语）",
         A_FATEXISTS,(int)(sizeof A_FATEXISTS/sizeof A_FATEXISTS[0]), cmd_fat_exists},
+    {"fat.rm",    "1.0", "删除 FAT32 分区里的文件或【空】目录（不递归）",
+        A_FATRM,  (int)(sizeof A_FATRM  /sizeof A_FATRM[0]),  cmd_fat_rm},
+    {"fat.move",  "1.0", "FAT32 分区内改名/移动【单条路径】（目标已存在则拒绝）",
+        A_FATMOVE,(int)(sizeof A_FATMOVE/sizeof A_FATMOVE[0]), cmd_fat_move},
     {"ctl.cancel","1.0", "请求取消正在执行的操作（另一线程调用；协作式，下一个检查点生效）",
         NULL, 0, cmd_ctl_cancel},
     /* ---- 2026-10-20：补齐 App 建盘流水线（手册 §11.0 的 7 个缺口）---- */

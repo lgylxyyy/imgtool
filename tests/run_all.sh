@@ -57,6 +57,7 @@ else
 fi
 run "ntfs-move-test（盘内改名/移动/删除 端到端）" python3 "$ROOT/tests/ntfs-move-test.py"
 run "vbr-tpl-test（内置引导码模板三方一致性）" python3 "$ROOT/tests/vbr-tpl-test.py"
+run "fat-fs-test（FAT32 改名/移动/删除 34 条 + mtools 交叉验证）" python3 "$ROOT/tests/fat-fs-test.py"
 run "cancel_test（取消 7 条）"            "$ROOT/build/tests/cancel_test" "$W/a.qcow2" 2048 "$W/big.bin"
 if [ -x "$ROOT/build/tests/bcd_test" ]; then
   run "bcd_test（BCD 读写）" "$ROOT/build/tests/bcd_test" "$ROOT/reference/bcd-reference-uefi.bin" "$W/bcd_out.bin"

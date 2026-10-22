@@ -312,7 +312,17 @@ int main(int argc, char **argv){
         if(!strcmp(key,"lang")){ snprintf(g_lang,sizeof g_lang,"%s",val);
             img_lang_set(val);   /* ★ 库里的 note/summary/检查项名字跟着换语言 */
             continue; }
-        if(!eq){ fprintf(stderr,"参数 %s 缺少 =值（例如 --lba=2048）\n",a); img_args_free(args); return 2; }
+        if(!eq){
+            /* ★ 布尔参数允许裸写：--recursive 等价于 --recursive=true。
+             *   用户和 App 都会自然这么写（实测：--recursive 报"缺少 =值"，
+             *   第一反应是"参数名写错了"，而不是"要补 =1"）。*/
+            bool isbool=false;
+            const img_cmd *cc = cmd ? img_cmd_find(cmd) : NULL;
+            for(int k=0; cc && k<cc->nargs; k++)
+                if(!strcmp(cc->args[k].name,key) && cc->args[k].ty==IMG_A_BOOL){ isbool=true; break; }
+            if(!isbool){ fprintf(stderr,"参数 %s 缺少 =值（例如 --lba=2048）\n",a); img_args_free(args); return 2; }
+            val="true";
+        }
         img_args_set(args,key,val);
     }
 

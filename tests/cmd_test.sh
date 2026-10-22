@@ -314,6 +314,17 @@ except Exception: print(-1)")
         rm -f "$W/r.txt"
         IMG_ISO_FORCE_ISO9660=1 $T/imgcmd iso.extract --iso="$ISO" --path=/README.TXT --dst="$W/r.txt" --progress=none >/dev/null 2>&1
         [ "$(stat -c%s "$W/r.txt" 2>/dev/null)" = "135" ] && ok "iso.extract 走 ISO9660 → 135 字节" || ng "ISO9660 抽取异常"
+        # —— 递归 / find（2026-10-23：以前只能一层层 ls，找 install.wim 要点很多次）——
+        $T/imgcmd iso.ls --iso="$ISO" --find=install.wim --progress=none > "$W/if.json" 2>/dev/null
+        [ "$(python3 -c "
+import json;d=json.load(open('$W/if.json'))
+print(1 if d['ok'] and any(e['path'].lower().endswith('/install.wim') for e in d['data']['entries']) else 0)" 2>/dev/null)" = "1" ] \
+            && ok "iso.ls --find=install.wim 一次定位（自动递归，条目带完整 path）" || ng "iso.ls --find 失败：$(head -c 200 "$W/if.json")"
+        $T/imgcmd iso.ls --iso="$ISO" --recursive --max=50 --progress=none > "$W/ir.json" 2>/dev/null
+        [ "$(python3 -c "
+import json;d=json.load(open('$W/ir.json'))
+print('%d/%s' % (d['data']['count'], d['data']['truncated']))" 2>/dev/null)" = "50/True" ] \
+            && ok "iso.ls --recursive --max=50 → 正好 50 项并标记 truncated（裸布尔参数也认）" || ng "iso.ls --recursive 失败：$(head -c 200 "$W/ir.json")"
         rm -f "$W/b.sdi"
         $T/imgcmd iso.extract --iso="$ISO" --path=/boot/boot.sdi --dst="$W/b.sdi" --progress=none > "$W/ix.json" 2>/dev/null
         if [ -s "$W/b.sdi" ] && [ "$(stat -c%s "$W/b.sdi")" = "3170304" ]; then

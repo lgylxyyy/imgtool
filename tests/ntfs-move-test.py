@@ -125,6 +125,38 @@ d = run('ntfs.list', img=IMG, lba=LBA, path='/sub/deep')
 names = [e['name'] for e in (d.get('data') or {}).get('names', [])]   # ★ 字段是 names[]
 check('列目录只剩搬来的 c.txt', names == ['c.txt'], str(names))
 
+# —— ntfs.list 分页（System32 有 4479 项，整页序列化会超输出缓冲 → 以前只回 RESULT-TOO-BIG）——
+print('\n──── ntfs.list 分页 ────')
+for i in range(25):
+    put('/pg/f%02d.txt' % i, b'P%d' % i)
+p1 = run('ntfs.list', img=IMG, lba=LBA, path='/pg', limit='10')
+d1 = p1.get('data') or {}
+check('第 1 页：total=25 / count=10 / has_more',
+      d1.get('total') == 25 and d1.get('count') == 10 and d1.get('has_more') is True, json.dumps(d1)[:200])
+n1 = [e['name'] for e in d1.get('names', [])]
+p2 = run('ntfs.list', img=IMG, lba=LBA, path='/pg', offset='10', limit='10')
+d2 = p2.get('data') or {}
+n2 = [e['name'] for e in d2.get('names', [])]
+check('第 2 页：offset 生效、与第 1 页不重叠不重复',
+      d2.get('offset') == 10 and d2.get('count') == 10 and not (set(n1) & set(n2)), str(n2))
+p3 = run('ntfs.list', img=IMG, lba=LBA, path='/pg', offset='20', limit='10')
+d3 = p3.get('data') or {}
+check('第 3 页：只剩 5 项、has_more=false',
+      d3.get('count') == 5 and d3.get('has_more') is False, json.dumps(d3)[:200])
+check('三页拼起来正好 25 个名字',
+      len(set(n1) | set(n2) | {e['name'] for e in d3.get('names', [])}) == 25)
+p4 = run('ntfs.list', img=IMG, lba=LBA, path='/pg', offset='999')
+d4 = p4.get('data') or {}
+check('offset 超出范围：count=0 但 total 仍是 25（翻页要知道边界）',
+      d4.get('count') == 0 and d4.get('total') == 25 and d4.get('has_more') is False,
+      json.dumps(d4)[:200])
+p5 = run('ntfs.list', img=IMG, lba=LBA, path='/pg', limit='0')
+d5 = p5.get('data') or {}
+check('limit=0 归一成默认值 500（不是"要 0 项"）', d5.get('count') == 25, json.dumps(d5)[:200])
+p6 = run('ntfs.list', img=IMG, lba=LBA, path='/pg', limit='99999')
+d6 = p6.get('data') or {}
+check('limit 超上限被夹到 2000', d6.get('limit') == 2000, json.dumps(d6)[:200])
+
 # cmd.list 的 JSON 是分块多行，直接解析不好办；用 --list（单行 JSON）取权威命令表
 pl = subprocess.run([IMGCMD, '--list'], capture_output=True, text=True)
 try:
