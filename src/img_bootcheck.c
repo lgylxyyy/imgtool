@@ -472,7 +472,7 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
         add(out,"rec.reagent","ReAgent.xml 存在",IMG_CK_WARN, r_std||r_sys||r_root,
             (r_std||r_sys||r_root)
               ? (r_std ? "在恢复分区标准路径找到（reagentc 可识别）"
-                       : (r_sys ? "在系统分区 \Windows\System32\Recovery\ 找到（官方位置）"
+                       : (r_sys ? "在系统分区 \\Windows\\System32\\Recovery\\ 找到（官方位置）"
                                 : "在分区根目录找到"))
               : "缺 ReAgent.xml — Windows 自带的 reagentc 认不出恢复位置");
         add(out,"rec.bootsdi","boot.sdi 存在",IMG_CK_WARN, s_std||s_root,

@@ -23,10 +23,13 @@ target_link_libraries(imglayout PRIVATE imgtool)
 target_link_libraries(imgresize PRIVATE imgtool)
 target_link_libraries(imgmkfs PRIVATE imgtool)
 
-add_executable(imgbc imgbc.c)
-target_link_libraries(imgbc PRIVATE imgtool)
-
+# ★ imgbc / imgfixboot / imgrunonce 都直接调 libntfs-3g 的封装（img_ntfs_*）：
+#   NTFS 关掉时这些符号不存在 → 必须一起裁掉，否则 -DIMG_WITH_NTFS3G=OFF 直接链接失败
+#   （这就是"关不掉"那个工程债的根因）。
 if(IMG_WITH_NTFS3G)
+  add_executable(imgbc imgbc.c)
+  target_link_libraries(imgbc PRIVATE imgtool)
+
   add_executable(imgfixboot imgfixboot.c)
   target_link_libraries(imgfixboot PRIVATE imgtool)
 endif()
@@ -65,8 +68,8 @@ if(IMG_WITH_WIM)
   target_link_libraries(imgwimls PRIVATE imgtool wim)
 endif()
 
-# ★ 离线写 RunOnce（需要 libhivex，同 imggenbcd 的依赖方式）
-if(HIVEX_LIB)
+# ★ 离线写 RunOnce（需要 libhivex + NTFS 写入：两者缺一都不构建）
+if(HIVEX_LIB AND IMG_WITH_NTFS3G)
   add_executable(imgrunonce imgrunonce.c)
   target_include_directories(imgrunonce PRIVATE ${HIVEX_INC})
   target_link_libraries(imgrunonce PRIVATE imgtool ${HIVEX_LIB})

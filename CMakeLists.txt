@@ -85,6 +85,9 @@ if(NOT IMG_WITH_NTFS3G)
   list(REMOVE_ITEM IMG_SOURCES
        src/img_ntfs_fs.c src/img_ntfs_dev.c src/img_ntfs_ops.c src/ntfs_bridge.c
        src/img_bootcheck.c)
+  # ★ 占位实现：命令层与 img_recovery/img_identify 里"顺手做 NTFS"的那几支仍在，
+  #   没有符号就谁也别想构建（工程债 #13）。占位函数一律 ENOTSUP，命令入口另有闸。
+  list(APPEND IMG_SOURCES src/img_ntfs_stub.c)
   if(IMG_WITH_WIM)
     message(WARNING "imgtool: NTFS 关闭 → WIM 直灌一并关闭（img_wim_apply 依赖 NTFS 设备层）")
     set(IMG_WITH_WIM OFF)

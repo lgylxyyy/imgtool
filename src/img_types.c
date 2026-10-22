@@ -63,6 +63,7 @@ const char *img_op_name(img_op_t o){
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
 const char *img_tmpdir(void){
     static char cached[512];
     if(cached[0]) return cached;
@@ -84,16 +85,53 @@ const char *img_tmpdir(void){
     return NULL;
 }
 
-/* ---- ntfs/wimlib 占位设备文件（见 img_types.h 说明）---- */
+/* ---- ntfs/wimlib 占位设备文件（见 img_types.h 说明）----
+ * ★ 生命周期（工程债 #14）：这个 0 字节文件以前【永不删除】——每跑一个进程就在
+ *   临时目录里留一个 imgtool-dev-<pid>。长时间用下来能攒出成百上千个。
+ *   现在两条路都堵上：
+ *     ① atexit 删除（正常退出、img_cmd 返回错误码退出都覆盖）；
+ *     ② 每次创建前扫一遍同目录，把【已经死掉的 pid】留下的清掉
+ *        （kill(pid,0)==ESRCH 才算死；别人的活进程不动）。
+ *   SIGKILL 仍然会漏一个，由下一次运行的第 ② 步收走。*/
 #include <fcntl.h>
+#include <dirent.h>
+#include <signal.h>
+#include <errno.h>
+#include <sys/types.h>
+
+static char g_devpath[560];
+static bool g_dev_atexit_done;
+static void dev_placeholder_cleanup(void){ if(g_devpath[0]) unlink(g_devpath); }
+static bool pid_is_alive(long pid){
+    if(pid<=0) return false;
+    if(kill((pid_t)pid,0)==0) return true;
+    return errno != ESRCH;               /* EPERM = 进程在，只是不归我们管 */
+}
+static void dev_placeholder_sweep(const char *td){
+    DIR *d=opendir(td);
+    if(!d) return;
+    struct dirent *de;
+    while((de=readdir(d))){
+        long pid=0;
+        if(sscanf(de->d_name,"imgtool-dev-%ld",&pid)!=1) continue;
+        if(pid==(long)getpid()) continue;
+        if(pid_is_alive(pid)) continue;
+        char victim[1200];
+        snprintf(victim,sizeof victim,"%s/%s",td,de->d_name);
+        unlink(victim);
+    }
+    closedir(d);
+}
+
 const char *img_dev_placeholder(void){
-    static char path[560];
-    if(path[0]) return path;
+    if(g_devpath[0]) return g_devpath;
     const char *td = img_tmpdir();
     if(!td) return NULL;
-    snprintf(path, sizeof path, "%s/imgtool-dev-%ld", td, (long)getpid());
-    int fd = open(path, O_RDWR | O_CREAT, 0666);
-    if(fd < 0){ path[0] = 0; return NULL; }
+    dev_placeholder_sweep(td);
+    snprintf(g_devpath, sizeof g_devpath, "%s/imgtool-dev-%ld", td, (long)getpid());
+    int fd = open(g_devpath, O_RDWR | O_CREAT, 0666);
+    if(fd < 0){ g_devpath[0] = 0; return NULL; }
     close(fd);
-    return path;
+    if(!g_dev_atexit_done){ atexit(dev_placeholder_cleanup); g_dev_atexit_done=true; }
+    return g_devpath;
 }

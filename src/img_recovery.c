@@ -7,7 +7,16 @@
 #include "img_ntfs_fmt.h"
 #include "img_partition.h"
 #include "img_event.h"
+/* WIM 里的候选路径（两种约定都试）—— 即使 WIM 关闭也保留：populate 的默认值是 CAND[0] */
+static const char *const CAND[] = {
+    "/Windows/System32/Recovery/Winre.wim",
+    "/Recovery/WindowsRE/Winre.wim",
+};
+#define NCAND ((int)(sizeof CAND/sizeof CAND[0]))
+
+#if IMG_WITH_WIM
 #include <wimlib.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,12 +24,11 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
-/* WIM 里的候选路径（两种约定都试）*/
-static const char *const CAND[] = {
-    "/Windows/System32/Recovery/Winre.wim",
-    "/Recovery/WindowsRE/Winre.wim",
-};
-#define NCAND ((int)(sizeof CAND/sizeof CAND[0]))
+/* ★ -DIMG_WITH_WIM=OFF 时这一整块（WIM 查找/抽取）不参与编译，只留 ENOTSUP 占位：
+ *   否则 libwim 缺席 = 直接链接失败，"关掉 WIM 就构建不出来"（工程债 #13）。
+ *   下面的 img_recovery_populate 仍在 —— 它靠 NTFS 写入，自称"没有 WIM 就抽不出 Winre.wim"，
+ *   会如实返回不可用，而不是假成功。*/
+#if IMG_WITH_WIM
 
 static bool path_eq_norm(const char *a, const char *b){
     /* 忽略大小写与 / \ 差异 */
@@ -115,6 +123,21 @@ int img_winre_extract_file(const char *wim_path, int index, const char *internal
     if(system(cmd)!=0){ /* 清不掉不致命 */ }
     return IMG_OK;
 }
+
+#else  /* !IMG_WITH_WIM —— 占位实现（签名必须与头文件一致） */
+
+int img_winre_find(const char *wim_path, int index, img_winre_info_t *info){
+    (void)wim_path; (void)index;
+    if(info) memset(info,0,sizeof *info);
+    return IMG_ENOTSUP;
+}
+int img_winre_extract_file(const char *wim_path, int index, const char *internal_path,
+                           const char *dst_path, char *err, size_t errcap){
+    (void)wim_path; (void)index; (void)internal_path; (void)dst_path;
+    if(err && errcap) snprintf(err,errcap,"本构建未启用 WIM/ESD（IMG_WITH_WIM=OFF）");
+    return IMG_ENOTSUP;
+}
+#endif /* IMG_WITH_WIM */
 
 int img_recovery_populate(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
                           const char *winre_src, int winre_index,
