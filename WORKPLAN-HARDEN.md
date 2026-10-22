@@ -456,3 +456,10 @@ $T/imgmkfs $W/tpl.qcow2 --mkfs $LBA TEST
 - Win10 x64：`setup.exe` 本来就是 3、`SystemSetupInProgress=0` → **不需要改**，直接进**桌面** ✅
   （含"网络发现"提示；540s，`-accel tcg,thread=multi`，CPU 975s 满载 = 只是慢）
 - Win11 x64：无 ChildCompletion 节点、`SetupType=1` 仍在 specialize → `win.finish` 不适用，待查
+
+### Win11 精简版 BIOS 尝试：失败，原因是平台限制（2026-10-22）
+`c-win11-bios.qcow2`（26H1 28000.2525 ESD，idx=1）：
+- 引导链 9/9、BCD 正确、0x27 已用，但 **540s 内两次运行 CPU 均 ~606s 且截图停在 logo**；
+  `-no-reboot` 时 60s 内退出（重启循环）；`/Windows/Panther` 无 setup 日志 → 内核阶段失败。
+- 结论：**Win11 走 UEFI**（微软要求 UEFI+SecureBoot+TPM）；BIOS 路径只对 Win7/Win10 验证成功。
+- 若一定要 BIOS 版 Win11，需要串口/内核调试（成本高），不建议。
