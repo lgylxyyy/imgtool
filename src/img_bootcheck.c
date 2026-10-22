@@ -536,12 +536,12 @@ int img_bootcheck_json_array(const img_bootcheck_result_t *r, char *buf, int cap
 
 int img_bootcheck_summary(const img_bootcheck_result_t *r, char *buf, int cap){
     if(!r||!buf||cap<=0) return 0;
-    int req_ok=0, req_n=0, warn_ok=0, warn_n=0, info_n=0;
+    int req_ok=0, req_n=0, warn_ok=0, warn_n=0;
     for(int i=0;i<r->count;i++){
         switch(r->items[i].level){
         case IMG_CK_REQUIRED: req_n++; if(r->items[i].pass) req_ok++; break;
         case IMG_CK_WARN:     warn_n++; if(r->items[i].pass) warn_ok++; break;
-        default: info_n++; break;
+        default: break;   /* 信息项不进摘要计数，总数用 r->count */
         }
     }
     if(img_lang_en())
