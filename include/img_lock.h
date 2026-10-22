@@ -25,6 +25,13 @@ typedef pthread_mutex_t img_lock_t;
 
 int  img_lock_init(img_lock_t *l);      /* 失败返回 IMG_EIO */
 void img_lock_destroy(img_lock_t *l);
+/* 只在【确认没人持有】时才 destroy：拿得到锁 → 解锁并 destroy；
+ * 拿不到（别的线程正在临界区里）→ 返回 IMG_EAGAIN，什么都不做。
+ * 为什么需要：pthread_mutex_destroy 一把仍被持有的 mutex 是 UB，glibc 会直接 abort
+ *   （"pthread_mutex_destroy called on a locked mutex"）—— 真机 App 里
+ *   "关句柄"和"跑命令"来自不同线程时就是这条崩溃路径。
+ * 不 destroy 无害：mutex 没有内禀资源（不持 fd/内存），随宿主结构 free 即可。*/
+int  img_lock_destroy_safe(img_lock_t *l);
 void img_lock_acquire(img_lock_t *l);
 void img_lock_release(img_lock_t *l);
 

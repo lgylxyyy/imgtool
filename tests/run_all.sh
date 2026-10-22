@@ -7,6 +7,7 @@
 #   fd_test              fd 生命周期（坏 fd/所有权/提前关闭）
 #   thread_test          并发（日志线程安全/两镜像并行/同 ctx 串行）
 #   cancel_test          取消（不留半成品/不漏簇/不污染下一次/覆盖写时旧文件完好）
+#   race_test            全局锁并发（首次初始化竞态/环形缓冲读写竞争）
 #   bcd_test             BCD 读写（需 libhivex）
 #   ebr_test             MBR 扩展/逻辑分区：EBR 链写回读、链尾 entry 全零
 #   mbr_bcd_test         BIOS BCD 全对象批量改写（签名+偏移，5 处设备）
@@ -42,6 +43,7 @@ run "corrupt-chain-test（防死循环）"      bash "$ROOT/tests/corrupt-chain-
 run "timeout_test（I/O 看门狗：无进展→超时→fail-fast）" bash -c "./build/tests/timeout_test"
 run "fd_test（fd 生命周期 15 条）"        "$ROOT/build/tests/fd_test" "$W/a.qcow2"
 run "thread_test（并发 4 组）"            "$ROOT/build/tests/thread_test" "$W/a.qcow2" "$W/b.qcow2" 2048 2048 "$W/t.log"
+run "race_test（全局锁：并发首次初始化 + 环形缓冲读写竞争）" "$ROOT/build/tests/race_test" 60
 run "cancel_test（取消 7 条）"            "$ROOT/build/tests/cancel_test" "$W/a.qcow2" 2048 "$W/big.bin"
 if [ -x "$ROOT/build/tests/bcd_test" ]; then
   run "bcd_test（BCD 读写）" "$ROOT/build/tests/bcd_test" "$ROOT/reference/bcd-reference-uefi.bin" "$W/bcd_out.bin"

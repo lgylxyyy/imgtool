@@ -88,3 +88,6 @@ target_link_libraries(qcscan_test PRIVATE imgtool)
 
 add_executable(identify_test identify_test.c)
 target_link_libraries(identify_test PRIVATE imgtool)
+
+add_executable(race_test race_test.c)
+target_link_libraries(race_test PRIVATE imgtool)

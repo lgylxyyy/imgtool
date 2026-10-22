@@ -309,9 +309,24 @@ void img_ring_add(const char *line){
     if(ring_n<RING_CAP) ring_n++;
     img_lock_release(lk);
 }
-int img_ring_count(void){ return ring_n; }
+int img_ring_count(void){
+    img_lock_t *lk=img_global_lock();
+    if(!lk) return ring_n;
+    img_lock_acquire(lk);
+    int n=ring_n;
+    img_lock_release(lk);
+    return n;
+}
+/* ★ 读侧必须和 img_ring_add 用【同一把锁】。add 在锁内 free(旧行)，
+ *   这里若不持锁遍历，就会读到刚被释放的块（malloc 把空闲链指针写进块首
+ *   → 行首字符不再是 'R'，实测 40 轮里 16 轮咬到）。
+ *   锁是非递归的：回调【不得】再调用 ring/日志类 API（本仓库内三个调用点
+ *   只做 memcpy/打印，符合此约束）。 */
 int img_ring_dump(void *ud,int (*cb)(void*,const char*),int max){
     if(!cb) return 0;
+    img_lock_t *lk=img_global_lock();
+    if(!lk) return 0;
+    img_lock_acquire(lk);
     if(max<=0||max>ring_n) max=ring_n;
     int start=(ring_head-max+RING_CAP*2)%RING_CAP, cnt=0;
     for(int i=0;i<max;i++){
@@ -320,6 +335,7 @@ int img_ring_dump(void *ud,int (*cb)(void*,const char*),int max){
         cnt++;
         if(cb(ud,ring[idx])) break;
     }
+    img_lock_release(lk);
     return cnt;
 }
 
