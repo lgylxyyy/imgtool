@@ -124,4 +124,9 @@ const char *img_op_name(img_op_t op);
  *   调用方必须报错，不能继续往 /tmp 上撞。 */
 const char *img_tmpdir(void);
 
+/* ntfs-3g / wimlib 需要一个"已存在的普通文件"当设备名占位（它们会 realpath 它，
+   wimlib 还要 stat 判类型）。★ 绝不能写死相对路径：App 进程的工作目录是 "/"，
+   根本创建不了文件（真机上 wim.apply 就是这么废掉的）。返回 NULL = 没有可写目录。 */
+const char *img_dev_placeholder(void);
+
 #endif

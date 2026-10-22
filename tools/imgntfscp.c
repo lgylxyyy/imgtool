@@ -29,9 +29,9 @@ int main(int argc,char**argv){
 
     img_ntfs_ctx_activate(q,lba,pb);
     /* ntfs_mount() 内部对设备名调 realpath() → 造同名空文件 */
-    int d=open("imgtool-dev",O_RDWR|O_CREAT|O_TRUNC,0666); if(d>=0)close(d);
+    const char *dn=img_dev_placeholder(); if(!dn) dn="imgtool-dev";
     optind=1; opterr=1; optarg=NULL; optopt=0;
-    char *a[]={(char*)"ntfscp",(char*)"-f",(char*)"imgtool-dev",(char*)argv[3],(char*)argv[4],NULL};
+    char *a[]={(char*)"ntfscp",(char*)"-f",(char*)dn,(char*)argv[3],(char*)argv[4],NULL};
     int rc=ntfscp_main(5,a);
     img_ntfs_ctx_deactivate();
     if(rc!=0){ printf("❌ ntfscp rc=%d\n", rc); return 1; }

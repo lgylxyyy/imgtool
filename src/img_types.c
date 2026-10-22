@@ -61,6 +61,7 @@ const char *img_op_name(img_op_t o){
 /* ---- 可写临时目录（见 img_types.h 的说明）---- */
 #include <unistd.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 const char *img_tmpdir(void){
     static char cached[512];
@@ -81,4 +82,18 @@ const char *img_tmpdir(void){
         cached[0] = 0;
     }
     return NULL;
+}
+
+/* ---- ntfs/wimlib 占位设备文件（见 img_types.h 说明）---- */
+#include <fcntl.h>
+const char *img_dev_placeholder(void){
+    static char path[560];
+    if(path[0]) return path;
+    const char *td = img_tmpdir();
+    if(!td) return NULL;
+    snprintf(path, sizeof path, "%s/imgtool-dev-%ld", td, (long)getpid());
+    int fd = open(path, O_RDWR | O_CREAT, 0666);
+    if(fd < 0){ path[0] = 0; return NULL; }
+    close(fd);
+    return path;
 }

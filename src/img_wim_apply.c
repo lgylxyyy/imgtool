@@ -146,10 +146,8 @@ int img_wim_apply(const char *wim_path, int image_idx,
     /* wimlib 先 stat/mkdir 探测目标类型 —— 必须是【已存在的普通文件】才进 NTFS 卷模式
      * （不存在 → 它 mkdir 当目录；是目录 → 目录模式）。
      * 这个占位文件本身【从不被真正读写】，I/O 全在我们的回调里。 */
-    const char *dummy = "imgtool-dev";
-    int fd = open(dummy, O_RDWR|O_CREAT, 0666);
-    if(fd<0) return IMG_EIO;
-    close(fd);
+    const char *dummy = img_dev_placeholder();
+    if(!dummy) return IMG_ENOTSUP;   /* 没有可写临时目录：调用方出 TMPDIR-UNAVAILABLE */
 
     img_ntfs_ctx_activate(q, part_lba, pb);     /* 让回调指向这个分区 */
 

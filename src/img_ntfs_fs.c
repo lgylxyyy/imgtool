@@ -36,10 +36,9 @@ img_ntfs_fs *img_ntfs_mount_rw(img_qcow2 *q, uint64_t part_lba, uint64_t part_by
     img_ntfs_ctx_activate(q, part_lba, part_bytes);
     /* 我们的上下文要能被全局回调找到；activate 已设，但多一份保活避免被置换 */
     /* 造占位名：ntfs_mount 内部对设备名调 realpath() 查 /proc/mounts */
-    int dfd = open("imgtool-dev", O_RDWR|O_CREAT|O_TRUNC, 0666);
-    if(dfd>=0) close(dfd);
+    const char *dn = img_dev_placeholder(); if(!dn) dn = "imgtool-dev";
 
-    struct ntfs_device *dev = ntfs_device_alloc("imgtool-dev", 0, img_ntfs_device_ops(), NULL);
+    struct ntfs_device *dev = ntfs_device_alloc(dn, 0, img_ntfs_device_ops(), NULL);
     if(!dev){ img_ntfs_ctx_deactivate(); img_ntfs_ctx_free(ctx); return NULL; }
 
     ntfs_volume *vol = ntfs_device_mount(dev, 0);   /* 0 = 读写 */

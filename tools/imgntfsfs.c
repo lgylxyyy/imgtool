@@ -28,9 +28,9 @@ static img_qcow2 *open_q(const char*p){
 /* 用上游工具读（前插） */
 static void upstream_ls(img_qcow2 *q, uint64_t lba, uint64_t sz, const char *path){
     img_ntfs_ctx_activate(q,lba,sz);
-    int d=open("imgtool-dev",O_RDWR|O_CREAT|O_TRUNC,0666); if(d>=0)close(d);
+    const char *dn=img_dev_placeholder(); if(!dn) dn="imgtool-dev";
     optind=1;
-    const char *a[]={"ntfsls","-a","-p",path,"imgtool-dev"};
+    const char *a[]={"ntfsls","-a","-p",path,dn};
     ntfsls_main(5,(char**)a);
     img_ntfs_ctx_deactivate();
 }

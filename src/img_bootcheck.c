@@ -25,9 +25,8 @@ static bool ntfs_path_exists(img_qcow2 *q, uint64_t lba, uint64_t bytes, const c
     if(!q) return false;
     if(img_ntfs_probe(q,lba,NULL)!=IMG_OK) return false;
     img_ntfs_ctx_activate(q,lba,bytes);
-    int dfd = open("imgtool-dev", O_RDWR|O_CREAT|O_TRUNC, 0666);
-    if(dfd>=0) close(dfd);
-    struct ntfs_device *dev = ntfs_device_alloc("imgtool-dev",0,img_ntfs_device_ops(),NULL);
+    const char *dn = img_dev_placeholder(); if(!dn) dn = "imgtool-dev";
+    struct ntfs_device *dev = ntfs_device_alloc(dn,0,img_ntfs_device_ops(),NULL);
     if(!dev){ img_ntfs_ctx_deactivate(); return false; }
 
     ntfs_volume *vol = ntfs_device_mount(dev, NTFS_MNT_RDONLY);
