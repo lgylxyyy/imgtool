@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <strings.h>
 #include <stdint.h>
 #include <unistd.h>
@@ -50,6 +51,7 @@ struct img_iso {
     uint32_t iso_root_len;
     bool     iso_joliet;
     char     vol[128];
+    int      rd_ok, rd_fail;      /* 成功/失败的扇区读次数：用来区分“读不出”与“不是 ISO” */
     char     err[200];
 };
 
@@ -61,7 +63,9 @@ static int rd_lb(img_iso *s, uint64_t lb, void *buf, uint32_t nlb){
     return IMG_OK;
 }
 static int rd_abs(img_iso *s, uint64_t lb, void *buf){
-    return img_io_read_full(s->io, lb * s->lb_size, buf, s->lb_size);
+    int r = img_io_read_full(s->io, lb * s->lb_size, buf, s->lb_size);
+    if(r == IMG_OK) s->rd_ok++; else s->rd_fail++;
+    return r;
 }
 
 /* ---------- 打开：AVDP → VDS → LVD → FSD ---------- */
@@ -253,10 +257,22 @@ int img_iso_open_io(img_iso **out, img_io *io, char *err, size_t errcap){
     int rc=open_iso9660(s,blk,err,errcap);
     if(rc==IMG_OK){ free(blk); *out=s; return IMG_OK; }
 
+    /* ★ 三件事必须分开报，否则排查方向全错（真机上被这条坑过一次）：
+     *   一次扇区都没读成功 → 是读的问题（权限/挂载被回收），不是镜像坏了
+     *   读成功但认不出结构 → 才是真的“不是 UDF/ISO9660” */
+    int unreadable = (s->rd_ok == 0 && s->rd_fail > 0);
+    int rd_fail = s->rd_fail;
     free(blk); free(s);
-    if(err) snprintf(err,errcap,
-        "不是 UDF 也不是 ISO9660（Windows 安装盘的 ISO9660 目录树是空的，install.wim 只在 UDF 里）");
-    return IMG_EFORMAT;
+    if(err){
+        if(unreadable)
+            snprintf(err,errcap,
+                "ISO 文件能打开但一个扇区都没读出来（试了 %d 次，errno=%d %s）——"
+                "查权限/挂载，别怀疑镜像", rd_fail, errno, strerror(errno));
+        else
+            snprintf(err,errcap,
+                "不是 UDF 也不是 ISO9660（Windows 安装盘的 ISO9660 目录树是空的，install.wim 只在 UDF 里）");
+    }
+    return unreadable ? IMG_EIO : IMG_EFORMAT;
 }
 int img_iso_open_path(img_iso **out, const char *path, char *err, size_t errcap){
     if(err && errcap) err[0]=0;

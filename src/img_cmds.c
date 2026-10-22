@@ -1644,6 +1644,17 @@ static const img_arg A_ISOLS[] = {
     {"iso",  IMG_A_STR, true,  NULL, "ISO 文件路径（UDF bridge；不修改它）", NULL},
     {"path", IMG_A_STR, false, "/",  "ISO 内的目录（大小写不敏感）", NULL},
 };
+/* img_iso_open_* 的 rc → 错误码：以前一律 HOST-OPEN-FAIL，把“不是 ISO”也说成“打不开”，
+   真机排查时被带偏过一次，这里按语义分开。 */
+static const char *iso_open_code(int rc){
+    switch(rc){
+    case IMG_ENOENT:  return "HOST-OPEN-FAIL";   /* 文件根本不存在/不是普通文件 */
+    case IMG_EIO:     return "ISO-READ-FAIL";    /* 能打开但读不出内容 */
+    case IMG_ENOMEM:  return "ISO-READ-FAIL";    /* 内存不足，也归读不出 */
+    default:          return "ISO-FORMAT-BAD";   /* 认不出 UDF/ISO9660 */
+    }
+}
+
 static int cmd_iso_ls(img_ctx *ctx, const img_args *in, img_result *out){
     (void)ctx;
     const char *isop=img_args_get(in,"iso");
@@ -1651,7 +1662,7 @@ static int cmd_iso_ls(img_ctx *ctx, const img_args *in, img_result *out){
     char err[256]="";
     img_iso *iso=NULL;
     int rc=img_iso_open_path(&iso,isop,err,sizeof err);
-    if(rc!=IMG_OK){ img_result_fail(out,rc,"HOST-OPEN-FAIL",isop,err[0]?err:"无法打开 ISO",NULL); return rc; }
+    if(rc!=IMG_OK){ img_result_fail(out,rc,iso_open_code(rc),isop,err[0]?err:"无法打开 ISO",NULL); return rc; }
     static char jb[256*1024];
     /* ★ raw 类型必须是【一个完整的 JSON 值】：条目之间只有逗号是不够的，得包成数组 */
     jb[0]='['; isolist_t acc={jb,sizeof jb-2,1,0,false};
@@ -1684,7 +1695,7 @@ static int cmd_iso_extract(img_ctx *ctx, const img_args *in, img_result *out){
     char err[256]="";
     img_iso *iso=NULL;
     int rc=img_iso_open_path(&iso,isop,err,sizeof err);
-    if(rc!=IMG_OK){ img_result_fail(out,rc,"HOST-OPEN-FAIL",isop,err[0]?err:"无法打开 ISO",NULL); return rc; }
+    if(rc!=IMG_OK){ img_result_fail(out,rc,iso_open_code(rc),isop,err[0]?err:"无法打开 ISO",NULL); return rc; }
     uint64_t fsz=0; bool isdir=false;
     rc=img_iso_stat(iso,path,&fsz,&isdir);
     if(rc!=IMG_OK){ img_iso_close(iso);
@@ -2329,7 +2340,7 @@ static int cmd_wim_identify(img_ctx *ctx, const img_args *in, img_result *out){
     if(is_iso){
         img_iso *iso=NULL;
         int rc=img_iso_open_path(&iso,src,err,sizeof err);
-        if(rc!=IMG_OK){ img_result_fail(out,rc,"HOST-OPEN-FAIL",src,err[0]?err:"ISO 无法打开",NULL); return rc; }
+        if(rc!=IMG_OK){ img_result_fail(out,rc,iso_open_code(rc),src,err[0]?err:"ISO 无法打开",NULL); return rc; }
         const char *cands[2]={"/sources/install.wim","/sources/install.esd"};
         const char *hit=NULL; uint64_t fsz=0; bool d=false;
         for(int i=0;i<2;i++){
