@@ -432,7 +432,15 @@ static int cmd_wim_apply_cmd(img_ctx *ctx, const img_args *in, img_result *out){
         if(rc==IMG_ENOTSUP) return feat_unavail(out,"可写临时目录",
                                     "先调 Native.setTmpdir(context.getCacheDir() 的路径)");
         const char *code=(rc==IMG_ECANCELLED)?"CMD-CANCELLED":"WIM-APPLY-FAIL";
-        img_result_fail(out,rc,code,wim,img_strerror(rc),NULL);
+        /* ★ hint 里带上 wimlib 的原始码 + 最常见的出路：中断过就别想"接着灌"，
+         *   必须 --format=on 重来（实测中断后 --format=off 重跑 103ms 就失败，
+         *   而当时我们只报 WIM-APPLY-FAIL，谁也猜不到原因）。*/
+        static char hint[220];
+        int wr=img_wim_last_rc();
+        snprintf(hint,sizeof hint,
+                 "wimlib 返回 %d；若上次灌入被中断/掉电过，目标分区已经半满，"
+                 "请加 --format=on 重新格式化后再灌（会清空该分区）", wr);
+        img_result_fail(out,rc,code,wim,hint,NULL);
         return rc;
     }
     img_result_u64(out,"index",(uint64_t)idx);

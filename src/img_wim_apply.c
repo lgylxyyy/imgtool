@@ -128,6 +128,10 @@ int img_wim_estimate(const char *wim_path, int image_idx, img_wim_size_t *out){
     return IMG_OK;
 }
 
+static int g_last_wrc = 0;
+/* 上一次 img_wim_apply 里 wimlib 的原始返回码（0=成功）。诊断用，见命令层 WIM-APPLY-FAIL 的 hint。*/
+int img_wim_last_rc(void){ return g_last_wrc; }
+
 int img_wim_apply(const char *wim_path, int image_idx,
                   img_qcow2 *q, uint64_t part_lba,
                   const img_wim_apply_opts_t *opts, img_prog *prog){
@@ -180,6 +184,9 @@ int img_wim_apply(const char *wim_path, int image_idx,
     wimlib_register_progress_function(w, on_progress, &cc);
 
     r = wimlib_extract_image(w, image_idx, dummy, ef);
+    /* ★ 把 wimlib 的原始错误码留痕：我们把失败统一压成 IMG_EIO 便于调用方处理，
+     *   但真因（WIMLIB_ERR_*）不能丢 —— 否则"中断后重跑失败"这类问题只能靠猜。*/
+    g_last_wrc = r;
     wimlib_free(w);
     img_ntfs_ctx_deactivate();
     /* ★ 是我们主动取消导致的失败 → 报 IMG_ECANCELLED（不要报 I/O 失败）：

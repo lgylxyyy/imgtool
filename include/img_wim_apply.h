@@ -61,6 +61,9 @@ typedef struct {
 } img_wim_apply_opts_t;
 void img_wim_apply_defaults(img_wim_apply_opts_t *o);
 
+/* 上一次 img_wim_apply 里 wimlib 的原始错误码（0=成功）。
+ * 我们对外统一为 IMG_EIO，但诊断时没这个数字就只能瞎猜（实测中断后重跑就吃过这个亏）。*/
+int img_wim_last_rc(void);
 int img_wim_apply(const char *wim_path, int image_idx,
                   img_qcow2 *q, uint64_t part_lba,
                   const img_wim_apply_opts_t *opts, img_prog *prog);
