@@ -186,6 +186,7 @@ static pthread_t     g_wd_thread;
 
 void img_io_touch(void){ atomic_store_explicit(&g_last_io_ms, now_ms(), memory_order_relaxed); }
 bool img_io_timed_out(void){ return g_io_timed_out!=0; }
+void img_io_timeout_reset(void){ g_io_timed_out = 0; }
 
 static void *wd_main(void *ud){
     (void)ud;

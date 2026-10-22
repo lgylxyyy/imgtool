@@ -326,6 +326,7 @@ const img_cmd *img_cmd_find(const char *name){
     return NULL;
 }
 int img_cmd_exec(const char *name, img_ctx *ctx, const img_args *in, img_result *out){
+    img_io_timeout_reset();   /* ★ 上一条命令的超时判定不许带进这一条 */
     const img_cmd *c=img_cmd_find(name);
     img_result_begin(out,name);
     if(!c){

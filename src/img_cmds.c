@@ -36,7 +36,7 @@
 /* ★ 排查用：打开 qcow2 失败时，把"再打开一次实际读到什么"一起报出来。
  *   真机上遇到过"同一张盘、老进程读不出、冷进程读得出"的情况，光有 QC-OPEN-FAIL
  *   根本分不清是文件坏了、还是这次读本身出了问题。 */
-static void qc_open_fail(img_result *out, img_ctx *ctx){
+static int qc_open_fail(img_result *out, img_ctx *ctx){
     const char *path = img_ctx_path(ctx);
     unsigned char h[16]; int nh = 0, e = 0; long long sz = -1;
     memset(h, 0, sizeof h);
@@ -49,9 +49,20 @@ static void qc_open_fail(img_result *out, img_ctx *ctx){
     char hex[64]; hex[0] = 0;
     for(int i = 0; i < nh && i < 16; i++) snprintf(hex + i*2, sizeof(hex) - i*2, "%02x", h[i]);
     char msg[320];
+    if(img_io_timed_out()){
+        /* I/O 看门狗已判超时 → 后续读全部 fail-fast，看起来就像"文件坏了"。
+         * 说清楚，否则排查方向直接被带偏（真机上就绕了一大圈）。 */
+        snprintf(msg, sizeof msg,
+                 "I/O 看门狗已判超时，本进程的读写被短路；复查文件本身：前 %d 字节=%s 大小=%lld",
+                 nh, hex[0] ? hex : "(空)", sz);
+        img_result_fail(out, IMG_ETIMEDOUT, "IO-TIMEOUT", path, msg,
+                        "重跑一次命令即可（新命令会清掉超时判定）");
+        return IMG_ETIMEDOUT;
+    }
     snprintf(msg, sizeof msg, "不是合法 qcow2；复查：前 %d 字节=%s 文件大小=%lld errno=%d %s",
              nh, hex[0] ? hex : "(空)", sz, e, e ? strerror(e) : "无");
     img_result_fail(out, IMG_EFORMAT, "QC-OPEN-FAIL", path, msg, NULL);
+    return IMG_EFORMAT;
 }
 
 static int feat_unavail(img_result *out, const char *feat, const char *howto){
@@ -380,7 +391,7 @@ static int cmd_wim_apply_cmd(img_ctx *ctx, const img_args *in, img_result *out){
     if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
 
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
 
     /* ① 里程碑：格式化（默认开） */
     if(do_fmt){
@@ -441,7 +452,7 @@ static void scan_count_cb(void *ud, const char *name, bool is_dir, uint64_t size
 static int cmd_part_scan(img_ctx *ctx, const img_args *in, img_result *out){
     uint64_t lba=img_args_u64(in,"lba",0);
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     img_parttable_t *t=NULL;
     int rc=img_ctx_parttable(ctx,&t);
     if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
@@ -543,7 +554,7 @@ static int cmd_ntfs_list(img_ctx *ctx, const img_args *in, img_result *out){
     uint64_t lba=img_args_u64(in,"lba",0);
     const char *path=img_args_get(in,"path"); if(!path||!*path) path="/";
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
     if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
     uint64_t pb=0;
@@ -599,7 +610,7 @@ static int cmd_ntfs_rename(img_ctx *ctx, const img_args *in, img_result *out){
     }
     if(!names||!names[0]){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","names","名单不能为空",NULL); return IMG_EINVAL; }
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
     if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
     uint64_t pb=0;
@@ -822,7 +833,7 @@ static int cmd_winre_auto(img_ctx *ctx, const img_args *in, img_result *out){
     uint64_t lba=img_args_u64(in,"lba",0);
     bool enable = img_args_bool(in,"enable",true);
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
     if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
     uint64_t pb=0;
@@ -884,7 +895,7 @@ static int cmd_ntfs_exists(img_ctx *ctx, const img_args *in, img_result *out){
     const char *path=img_args_get(in,"path");
     if(!path||path[0]!='/'){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","必须是以 / 开头的绝对路径",NULL); return IMG_EINVAL; }
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
     if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
     uint64_t pb=0;
@@ -915,7 +926,7 @@ static int cmd_fat_exists(img_ctx *ctx, const img_args *in, img_result *out){
     const char *path=img_args_get(in,"path");
     if(!path||path[0]!='/'){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","必须是以 / 开头的绝对路径",NULL); return IMG_EINVAL; }
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     img_fat32_fs *fs=img_fat32_mount(q,lba,false);      /* 只读：探测不该改盘 */
     if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL",path,"不是合法 FAT32（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
     bool ex=img_fat32_path_exists(fs,path);
@@ -943,7 +954,7 @@ static int cmd_part_copy(img_ctx *ctx, const img_args *in, img_result *out){
     uint64_t slba=img_args_u64(in,"src-lba",0), dlba=img_args_u64(in,"dst-lba",0);
     const char *src_path=img_args_get(in,"src");
     img_qcow2 *dq=img_ctx_qcow2(ctx);
-    if(!dq){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!dq){ return qc_open_fail(out,ctx); }
     img_parttable_t *dt=NULL; int rc=img_ctx_parttable(ctx,&dt);
     if(rc||!dt) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",NULL,NULL,NULL), rc?rc:IMG_ESTATE;
     img_parttable_t st; {   /* 源：只读打开（★ 全程不写源，是这类迁移安全性的根）*/
@@ -1046,7 +1057,7 @@ static int cmd_mbrboot(img_ctx *ctx, const img_args *in, img_result *out){
     else { FILE *ur=fopen("/dev/urandom","rb"); sig=0; if(ur){ if(fread(&sig,1,4,ur)!=4) sig=0; fclose(ur);} if(!sig) sig=0x11223344; }
     t->disk_signature = sig;
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     rc=img_parttable_write(q,t);
     if(rc){ img_result_fail(out,rc,"PART-WRITE-FAIL",NULL,"写回分区表失败",NULL); return rc; }
     img_result_u64(out,"disk_signature",sig);
@@ -1072,7 +1083,7 @@ static const img_arg A_PARTLAYOUT[] = {
 static int apply_custom_guids(const img_args *in, img_parttable_t *t);
 static int cmd_part_layout(img_ctx *ctx, const img_args *in, img_result *out){
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     uint64_t disk_sectors = img_qcow2_size(q)/512u;
     uint64_t sr_mb=img_args_u64(in,"sr-mb",100), sys_gb=img_args_u64(in,"sys-gb",0),
              rec_gb=img_args_u64(in,"rec-gb",0);
@@ -1444,7 +1455,7 @@ static int cmd_fs_format(img_ctx *ctx, const img_args *in, img_result *out){
         return IMG_EINVAL;
     }
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
     if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
     uint64_t pb=0;
@@ -1504,7 +1515,7 @@ static int cmd_ntfs_put(img_ctx *ctx, const img_args *in, img_result *out){
     struct stat st;
     if(stat(src,&st)!=0 || !S_ISREG(st.st_mode)){ img_result_fail(out,IMG_ENOENT,"SRC-NOTFOUND",src,NULL,NULL); return IMG_ENOENT; }
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
     if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
     uint64_t pb=0;
@@ -1545,7 +1556,7 @@ static int cmd_ntfs_export(img_ctx *ctx, const img_args *in, img_result *out){
     const char *path=img_args_get(in,"path"), *dst=img_args_get(in,"dst");
     if(!path||path[0]!='/'||!dst){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","需要 / 开头的 path 与 dst",NULL); return IMG_EINVAL; }
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
     if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
     uint64_t pb=0;
@@ -1626,7 +1637,7 @@ static int cmd_boot_check(img_ctx *ctx, const img_args *in, img_result *out){
     else if(strcasecmp(m,"auto")){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","mode","只接受 auto | uefi | bios",NULL); return IMG_EINVAL; }
     unsigned flags = img_args_bool(in,"expect-recovery",false) ? IMG_BOOTCHK_EXPECT_RECOVERY : 0;
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     img_bootcheck_result_t r; memset(&r,0,sizeof r);
     img_span sp; img_span_prep(&sp,"bc","check","引导链自检");
     img_span_begin(&sp);
@@ -1766,7 +1777,7 @@ static int cmd_fat_export(img_ctx *ctx, const img_args *in, img_result *out){
     const char *path=img_args_get(in,"path"), *dst=img_args_get(in,"dst");
     if(!path||path[0]!='/'||!dst){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","需要 / 开头的 path 与 dst",NULL); return IMG_EINVAL; }
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
     if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
     uint64_t pb=0;
@@ -1810,7 +1821,7 @@ static int cmd_part_attr(img_ctx *ctx, const img_args *in, img_result *out){
     uint64_t attr=strtoull(as,&end,0);
     if(end && *end){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","attr","不是合法十六进制数",NULL); return IMG_EINVAL; }
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     int rc=img_part_set_attributes(q,lba,attr);
     if(rc==IMG_ENOTSUP){ img_result_fail(out,rc,"CMD-ARG-BAD","img","MBR 分区没有 GPT attributes（只有 GPT 才有）",NULL); return rc; }
     if(rc!=IMG_OK){ img_result_fail(out,rc,"PART-WRITE-FAIL",NULL,"设属性失败",NULL); return rc; }
@@ -1874,7 +1885,7 @@ static int rec_populate_common(img_ctx *ctx, const img_args *in, img_result *out
     uint64_t os_lba=img_args_u64(in,"os-lba",0);
 
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
     if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
     uint64_t pb=0;
@@ -2006,7 +2017,7 @@ static img_plan_arch arch_from_ver(const img_winver_t *v, img_qcow2 *q,
 
 static int cmd_bcd_create(img_ctx *ctx, const img_args *in, img_result *out){
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
     if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
     if(t->table==IMG_TABLE_NONE){ img_result_fail(out,IMG_EINVAL,"PART-READ-FAIL",NULL,"该镜像还没有分区表","先 imglayout / img.create"); return IMG_EINVAL; }
@@ -2258,7 +2269,7 @@ static int cmd_boot_plan(img_ctx *ctx, const img_args *in, img_result *out){
     } else {
         if(!lba){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","--img 要配 --lba",NULL); return IMG_EINVAL; }
         img_qcow2 *q=img_ctx_qcow2(ctx);
-        if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+        if(!q){ return qc_open_fail(out,ctx); }
         img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
         if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
         uint64_t pb=0;
@@ -2326,7 +2337,7 @@ static const img_arg A_QCVERIFY[] = {
 static int cmd_qc_verify(img_ctx *ctx, const img_args *in, img_result *out){
     (void)in;
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     img_qcow2_scan_t sc; int rc=img_qcow2_scan(q,&sc);
     if(rc!=IMG_OK){ img_result_fail(out,rc,"QC-OPEN-FAIL",img_ctx_path(ctx),"扫描失败",NULL); return rc; }
     img_result_u64(out,"guest_bytes",sc.guest_bytes);
@@ -2438,7 +2449,7 @@ static int cmd_win_version(img_ctx *ctx, const img_args *in, img_result *out){
     if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（读系统盘里的注册表/内核）","重新编译时开启该功能并安装对应系统库");
     uint64_t lba=img_args_u64(in,"lba",0);
     img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ qc_open_fail(out,ctx); return IMG_EFORMAT; }
+    if(!q){ return qc_open_fail(out,ctx); }
     img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
     if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
     uint64_t pb=0;

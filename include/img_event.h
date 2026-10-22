@@ -171,6 +171,10 @@ void img_io_watchdog_start(int timeout_ms);   /* 0=关闭 */
 void img_io_watchdog_stop(void);
 bool img_io_timed_out(void);                  /* 是否已判超时（I/O 入口据此 fail-fast）*/
 void img_io_touch(void);                      /* I/O 层每完成一次读写调一次 */
+/* 清掉"已判超时"。★ 每条命令开始时必须调：这个标志是进程级的，
+   残留会让之后所有 I/O 立刻失败（真机上表现为"所有镜像都不是合法 qcow2"，
+   只有重启进程才好）。 */
+void img_io_timeout_reset(void);
 
 /* ---------- 取消（P0-2）----------
  * 全局标志：任何线程可置位，正在跑的操作在"安全检查点"退出。
