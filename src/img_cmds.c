@@ -3146,8 +3146,15 @@ static int cmd_win_finish(img_ctx *ctx, const img_args *in, img_result *out){
     rc=img_win_finish(q,lba,pb,dry,&fi,err,sizeof err);
     img_span_end(&sp,rc);
     if(rc!=IMG_OK){
-        img_result_fail(out,rc,rc==IMG_ESTATE?"PART-FS-BAD":"WIN-FINISH-FAIL",img_ctx_path(ctx),
-                        err[0]?err:"收尾失败",NULL);
+        /* 错误码要能分开"盘不像 Windows"和"卷坏了"：前者是用户选错分区，
+         * 后者才是真故障。以前一律 WIN-FINISH-FAIL，真机上只能靠猜。*/
+        const char *code = (rc==IMG_ENOENT)?"WIN-SYSTEM-HIVE-NOTFOUND"
+                         : (rc==IMG_ESTATE) ?"PART-FS-BAD"
+                                            :"WIN-FINISH-FAIL";
+        const char *hint = (rc==IMG_ENOENT)
+                           ? "这个分区里没有 \\Windows\\System32\\config\\SYSTEM（不像 Windows 系统分区）"
+                           : NULL;
+        img_result_fail(out,rc,code,img_ctx_path(ctx),err[0]?err:"收尾失败",hint);
         return rc;
     }
     img_result_bool(out,"dry_run",dry);

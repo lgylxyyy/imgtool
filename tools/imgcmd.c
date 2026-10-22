@@ -276,9 +276,16 @@ static void print_help(const img_cmd *c){
                            case IMG_A_I64: ty=lang_en()?"integer":"整数"; break;
                            case IMG_A_BOOL:ty=lang_en()?"boolean":"布尔"; break;
                            case IMG_A_ENUM: ty=lang_en()?"enum":"枚举"; break; default: break; }
-            printf("    --%-12s %-6s %s%s%s\n", a->name, ty,
-                   a->required?(lang_en()?"required ":"必填  "):(lang_en()?"optional ":"可选  "),
-                   a->def?a->def:"", a->help? a->help :"");
+            /* ★ 默认值要和帮助文本隔开：以前直接 printf("%s%s") 拼出
+             *   "falsetrue=整棵子树" 这种鬼东西（--help=wim.ls 实测）。*/
+            const char *req = a->required ? (lang_en()?"required":"必填")
+                                          : (lang_en()?"optional":"可选");
+            if(!a->required && a->def && a->def[0])
+                printf("    --%-12s %-6s %s  （默认 %s）%s\n",
+                       a->name, ty, req, a->def, a->help? a->help :"");
+            else
+                printf("    --%-12s %-6s %s  %s\n",
+                       a->name, ty, req, a->help? a->help :"");
         }
     }
 }
