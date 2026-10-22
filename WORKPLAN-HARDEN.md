@@ -461,5 +461,7 @@ $T/imgmkfs $W/tpl.qcow2 --mkfs $LBA TEST
 `c-win11-bios.qcow2`（26H1 28000.2525 ESD，idx=1）：
 - 引导链 9/9、BCD 正确、0x27 已用，但 **540s 内两次运行 CPU 均 ~606s 且截图停在 logo**；
   `-no-reboot` 时 60s 内退出（重启循环）；`/Windows/Panther` 无 setup 日志 → 内核阶段失败。
-- 结论：**Win11 走 UEFI**（微软要求 UEFI+SecureBoot+TPM）；BIOS 路径只对 Win7/Win10 验证成功。
-- 若一定要 BIOS 版 Win11，需要串口/内核调试（成本高），不建议。
+- ★ 修正（同日，用户指出）：**Win11 本身 BIOS 是支持的**（BIOS 32/64 都已实测 ✅）。
+  这一张失败是**该精简版（不忘初心 26H1 28000）的个例**，不能推广成"Win11 不支持 BIOS"。
+  准确表述：同一份 ESD 的这个精简版在 BIOS/MBR 下 logo 后重启循环，原因未定位（可能是精简项/驱动）。
+- 完整支持矩阵见 `../docs/AGENT-MEMORY.md`「Windows 引导支持矩阵」（含 32 位 UEFI = OVMF32 的用法）。
