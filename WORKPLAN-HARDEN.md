@@ -465,3 +465,18 @@ $T/imgmkfs $W/tpl.qcow2 --mkfs $LBA TEST
   这一张失败是**该精简版（不忘初心 26H1 28000）的个例**，不能推广成"Win11 不支持 BIOS"。
   准确表述：同一份 ESD 的这个精简版在 BIOS/MBR 下 logo 后重启循环，原因未定位（可能是精简项/驱动）。
 - 完整支持矩阵见 `../docs/AGENT-MEMORY.md`「Windows 引导支持矩阵」（含 32 位 UEFI = OVMF32 的用法）。
+
+### 内置 NTFS 引导码模板的证据链（2026-10-22 固化）
+
+三方互证，不是凭记忆：
+1. **当时的脚本原文**：`reference/build-bios-full.sh:26`
+   `$T/imgfixboot "$OUT" 2048 --tpl "/workspace/images/Windows 10 Xlite.qcow2" 2048`
+   → 两天测试用的模板 = `images/Windows 10 Xlite.qcow2` 分区 2048 的 $Boot
+2. **三方 sha256 全等**（引导码段）：`1d79bfa4ef4fbfa72806c4fe14fb19c8`
+   = `reference/ntfs-vbr.bin` = `Windows 10 Xlite.qcow2@2048` = `diskB-Windows-BIOS.qcow2@2048`
+   = w10b / c-win11 / d-win7 / e-win7x86 四张验证盘
+3. **git blob 未变**：`9c8277ceed189fff24a3900469d200480ea87938`（58ab4a2 入库时 = 现在）
+
+风险：源头是两个大文件（Xlite ≈10GB、diskB ≈11GB）。若被清理，可用
+`git cat-file -p 9c8277ce…` 取回模板字节，但无法再复核“当时的模板盘”。
+校验入口：`python3 tests/vbr-tpl-test.py`（数组==文件==写入盘，10 条断言）。
