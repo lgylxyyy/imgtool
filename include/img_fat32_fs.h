@@ -31,6 +31,8 @@ void img_fat32_unmount(img_fat32_fs *fs);
 const img_fat32_layout_t *img_fat32_fs_layout(const img_fat32_fs *fs);
 
 bool img_fat32_path_exists(img_fat32_fs *fs, const char *abs_path);
+/* 是否是【目录】（路径不存在/是文件 → false）。移动前查目标父目录用。*/
+bool img_fat32_dir_exists(img_fat32_fs *fs, const char *abs_path);
 /* 剩余空间（字节）。扫描 FAT 数空簇，结果缓存到 FAT 下次被修改 */
 uint64_t img_fat32_free_bytes(img_fat32_fs *fs);
 int  img_fat32_file_size(img_fat32_fs *fs, const char *abs_path, uint64_t *out);
@@ -60,6 +62,10 @@ int img_fat32_list_dir(img_fat32_fs *fs, const char *abs_path,
 
 /* 删除文件或（空）目录 */
 int img_fat32_rm(img_fat32_fs *fs, const char *abs_path);
+
+/* 改名 / 移动（同一分区内；目录也可以，会同步子目录里的 ".." 项）。
+ * 目标已存在 → IMG_EEXIST；把目录移进自己的子树 → IMG_EINVAL。*/
+int img_fat32_rename(img_fat32_fs *fs, const char *src_abs_path, const char *dst_abs_path);
 
 #ifdef __cplusplus
 }

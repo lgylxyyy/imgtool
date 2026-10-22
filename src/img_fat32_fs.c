@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #define FAT32_EOC     0x0FFFFFF8u   /* >= 这个值就是链尾 */
 #define FAT32_MASK    0x0FFFFFFFu
@@ -368,6 +369,15 @@ static int split_parent(img_fat32_fs *fs, const char *path,
     return IMG_OK;
 }
 
+bool img_fat32_dir_exists(img_fat32_fs *fs, const char *abs_path){
+    if(!fs||!abs_path||!*abs_path) return false;
+    if(!strcmp(abs_path,"/")) return true;
+    uint32_t dir; char nm[256];
+    if(split_parent(fs, abs_path, &dir, nm, sizeof nm)!=IMG_OK) return false;
+    dir_ent e;
+    return dir_find(fs, dir, nm, &e)==IMG_OK && e.found && e.is_dir;
+}
+
 bool img_fat32_path_exists(img_fat32_fs *fs, const char *abs_path){
     if(!fs||!abs_path) return false;
     uint32_t dir; char name[256];
@@ -389,7 +399,7 @@ int img_fat32_file_size(img_fat32_fs *fs, const char *abs_path, uint64_t *out){
 /* ---------- 写目录项（含 LFN） ---------- */
 /* 在目录里插入一条：LFN 项（若干）+ 8.3 项。空间不够会扩展目录。 */
 static int dir_add_entry(img_fat32_fs *fs, uint32_t dirclus, const char *name,
-                         uint32_t clus, uint32_t size, bool is_dir);
+                         uint32_t clus, uint32_t size, bool is_dir, uint64_t *out_off);
 /* 定位目录里第一个空槽（0x00 或 0xE5）。不够则扩展目录。 */
 static int dir_make_room(img_fat32_fs *fs, uint32_t dirclus, int nslots,
                          uint64_t *out_off);
@@ -444,8 +454,24 @@ static int dir_make_room(img_fat32_fs *fs, uint32_t dirclus, int nslots, uint64_
 static void put_u16(uint8_t *p, uint16_t v){ p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
 static void put_u32(uint8_t *p, uint32_t v){ p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24); }
 
+/* 当前时间的 FAT/DOS 编码（日期：年-1980 占 7 位 / 月 4 位 / 日 5 位；时间：时 5 位 / 分 6 位 / 秒÷2 5 位）。
+ * ★ 以前新目录项的时间戳全是 0（mtools 显示 "1980-00-00 0:00"，月/日都是 0 不是合法 DOS 日期）。
+ *   Windows 虽容忍，但资源管理器里日期是空的，CHKDSK 也可能报"时间戳异常"。
+ *   新建项一律盖当前时间；改名则保留原项的时间（见 img_fat32_rename）。*/
+static void dos_now(uint16_t *out_date, uint16_t *out_time){
+    time_t now=time(NULL); struct tm tmv; memset(&tmv,0,sizeof tmv);
+#if defined(_WIN32)
+    localtime_s(&tmv,&now);
+#else
+    localtime_r(&now,&tmv);
+#endif
+    int y=tmv.tm_year+1900; if(y<1980) y=1980; if(y>2107) y=2107;
+    *out_date=(uint16_t)(((y-1980)<<9)|((tmv.tm_mon+1)<<5)|tmv.tm_mday);
+    *out_time=(uint16_t)((tmv.tm_hour<<11)|(tmv.tm_min<<5)|(tmv.tm_sec/2));
+}
+
 static int dir_add_entry(img_fat32_fs *fs, uint32_t dirclus, const char *name,
-                         uint32_t clus, uint32_t size, bool is_dir){
+                         uint32_t clus, uint32_t size, bool is_dir, uint64_t *out_off){
     int nchars = (int)strlen(name);
     /* ★ 需不需要 LFN 要看【是否符合 8.3 形状】，不是看长度：
      *   base ≤ 8 且（无扩展名 或 扩展名 ≤ 3）才算 8.3 可容纳。
@@ -523,10 +549,19 @@ static int dir_add_entry(img_fat32_fs *fs, uint32_t dirclus, const char *name,
         }
     }
     d[11] = is_dir ? ATTR_DIR : 0x00;
+    {   uint16_t dt=0, tm=0; dos_now(&dt,&tm);
+        put_u16(d+14, tm);   /* CrtTime    */
+        put_u16(d+16, dt);   /* CrtDate    */
+        put_u16(d+18, dt);   /* LstAccDate */
+        put_u16(d+22, tm);   /* WrtTime    */
+        put_u16(d+24, dt);   /* WrtDate    */
+    }
     put_u16(d+20, (uint16_t)(clus >> 16));   /* FstClusHI */
     put_u16(d+26, (uint16_t)(clus & 0xFFFF));/* FstClusLO */
     put_u32(d+28, is_dir ? 0 : size);
-    return wr(fs, off, d, ENTRY_SIZE);
+    int wrc=wr(fs, off, d, ENTRY_SIZE);
+    if(wrc==IMG_OK && out_off) *out_off=off;
+    return wrc;
 }
 
 /* 在新建子目录的簇头写入 '.' 与 '..' 两项 —— FAT 规范强制要求。
@@ -540,14 +575,17 @@ static int dir_add_entry(img_fat32_fs *fs, uint32_t dirclus, const char *name,
  * 格式（取自 diskA 真值逐字节）：名字 '.'+10空格 / '..'+9空格，attr=0x10，
  * size=0，`.` 指向自身簇，`..` 指向父簇（父是根目录时写 0）。 */
 static int dir_write_dots(img_fat32_fs *fs, uint32_t self, uint32_t parent){
+    uint16_t dt=0, tm=0; dos_now(&dt,&tm);
     uint8_t e[ENTRY_SIZE];
     memset(e,0,ENTRY_SIZE);
     memset(e,' ',11); e[0]='.'; e[11]=ATTR_DIR;
+    put_u16(e+14,tm); put_u16(e+16,dt); put_u16(e+18,dt); put_u16(e+22,tm); put_u16(e+24,dt);
     put_u16(e+20,(uint16_t)(self>>16));
     put_u16(e+26,(uint16_t)(self&0xFFFF));
     if(wr(fs, clus_off(fs,self), e, ENTRY_SIZE)) return IMG_EIO;
     memset(e,0,ENTRY_SIZE);
     memset(e,' ',11); e[0]='.'; e[1]='.'; e[11]=ATTR_DIR;
+    put_u16(e+14,tm); put_u16(e+16,dt); put_u16(e+18,dt); put_u16(e+22,tm); put_u16(e+24,dt);
     uint32_t p = (parent==fs->L.root_cluster) ? 0 : parent;
     put_u16(e+20,(uint16_t)(p>>16));
     put_u16(e+26,(uint16_t)(p&0xFFFF));
@@ -575,7 +613,7 @@ int img_fat32_mkdir_p(img_fat32_fs *fs, const char *abs_path){
         int rc=wr(fs, clus_off(fs,nc), z, csz);
         free(z);
         if(rc) return rc;
-        rc = dir_add_entry(fs, dir, t, nc, 0, true);
+        rc = dir_add_entry(fs, dir, t, nc, 0, true, NULL);
         if(rc) return rc;
         /* ★ 新子目录里必须有 . 与 ..（见 dir_write_dots 注释） */
         rc = dir_write_dots(fs, nc, dir);
@@ -640,7 +678,7 @@ static int put_finalize(img_fat32_fs *fs, uint32_t dir, const char *nm,
         if(old->cluster>=2) free_chain(fs, old->cluster);
         return IMG_OK;
     }
-    return dir_add_entry(fs, dir, nm, first, size, false);
+    return dir_add_entry(fs, dir, nm, first, size, false, NULL);
 }
 
 /* 往 dst 写一段【内存里】的数据（供 put_data 用；大文件请走 put_file 流式路径） */
@@ -869,9 +907,56 @@ int img_fat32_list_dir(img_fat32_fs *fs, const char *abs_path, img_fat32_list_cb
     return IMG_OK;
 }
 
-/* 只数条目（用于判断目录是否为空）*/
+/* 只数条目（用于判断目录是否为空）
+ * ★ list_dir 已经把 "." / ".." 过滤掉了 —— 所以这里数到的就是【真实条目数】，
+ *   判空条件是 cnt==0，不是 cnt>2（旧写法把「3 个文件的目录」当空目录删掉，
+ *   簇链被释放但目录项还在子簇里 → 整棵子树脱链且空间泄漏）。*/
 static void count_cb(void *ud, const char *nm, bool d, uint64_t sz){
     (void)nm;(void)d;(void)sz; (*(int*)ud)++;
+}
+
+/* 把一条目录项（连同紧挨在它前面的 LFN 项）标记为已删除（首字节 0xE5）。
+ * rm 与 rename 共用：两处各写一遍必然分叉（一份修好另一份还会犯）。
+ * ★ 只置 0xE5，不写 0x00：0x00 会让读方认为"目录到此结束"，
+ *   后面所有项集体消失（dir_make_room 里记过同一个坑）。*/
+static int dir_slot_delete(img_fat32_fs *fs, uint64_t slot_off){
+    uint8_t d[ENTRY_SIZE];
+    if(rd(fs, slot_off, d, ENTRY_SIZE)) return IMG_EIO;
+    d[0]=0xE5;
+    /* 往前扫，把属于它的 LFN 项也标删 */
+    uint64_t off=slot_off;
+    while(off >= fs->data_off + ENTRY_SIZE){
+        uint8_t prev[ENTRY_SIZE];
+        if(rd(fs, off-ENTRY_SIZE, prev, ENTRY_SIZE)) break;
+        if((prev[11]&0x0F)==0x0F){
+            prev[0]=0xE5;
+            if(wr(fs, off-ENTRY_SIZE, prev, ENTRY_SIZE)) return IMG_EIO;
+            off-=ENTRY_SIZE;
+        }
+        else break;
+    }
+    return wr(fs, slot_off, d, ENTRY_SIZE);
+}
+
+/* 读子目录首簇里的 ".." 项 → 父目录簇号（根目录记作 0）。
+ * FAT 的父引用【只有这一处】，所以目录移动必须同步它。*/
+static int dir_dotdot_parent(img_fat32_fs *fs, uint32_t dirclus, uint32_t *out){
+    uint8_t e[ENTRY_SIZE];
+    if(rd(fs, clus_off(fs,dirclus)+ENTRY_SIZE, e, ENTRY_SIZE)) return IMG_EIO;
+    if(e[0]!='.' || e[1]!='.') return IMG_ECORRUPT;
+    *out = ((uint32_t)e[20]<<16)|((uint32_t)e[21]<<24)
+         | (uint32_t)e[26]|((uint32_t)e[27]<<8);
+    return IMG_OK;
+}
+static int dir_set_dotdot_parent(img_fat32_fs *fs, uint32_t dirclus, uint32_t parent){
+    uint64_t off = clus_off(fs,dirclus)+ENTRY_SIZE;
+    uint8_t e[ENTRY_SIZE];
+    if(rd(fs, off, e, ENTRY_SIZE)) return IMG_EIO;
+    if(e[0]!='.' || e[1]!='.') return IMG_ECORRUPT;
+    uint32_t p = (parent==fs->L.root_cluster) ? 0 : parent;   /* 根目录的父记作 0 */
+    e[20]=(uint8_t)(p>>16); e[21]=(uint8_t)(p>>24);
+    e[26]=(uint8_t)(p&0xFF); e[27]=(uint8_t)((p>>8)&0xFF);
+    return wr(fs, off, e, ENTRY_SIZE);
 }
 
 int img_fat32_rm(img_fat32_fs *fs, const char *abs_path){
@@ -881,15 +966,10 @@ int img_fat32_rm(img_fat32_fs *fs, const char *abs_path){
     dir_ent e;
     if(dir_find(fs, dir, nm, &e)!=IMG_OK || !e.found) return IMG_ENOENT;
     if(e.is_dir){
-        /* 只允许删空目录：非空时保守返回错误。
-         * ★ 原先这里给 list_dir 传的是 NULL 回调（死代码），改成明确计数。*/
-        uint32_t d2; char nm2[256]; int cnt=0;
-        if(split_parent(fs, abs_path, &d2, nm2, sizeof nm2)==IMG_OK){
-            dir_ent sub;
-            if(dir_find(fs, d2, nm2, &sub)==IMG_OK && sub.found)
-                img_fat32_list_dir(fs, abs_path, count_cb, &cnt);
-        }
-        if(cnt>2) return IMG_ENOTSUP;      /* 只有 . 与 .. 才算空 */
+        /* 只允许删空目录：非空时保守返回错误（不递归）。*/
+        int cnt=0;
+        if(img_fat32_list_dir(fs, abs_path, count_cb, &cnt)!=IMG_OK) return IMG_EIO;
+        if(cnt>0) return IMG_ENOTSUP;
     }
     if(e.cluster>=2){
         /* ★ 必须检查返回值：链损坏时 free_chain 会返回 IMG_ECORRUPT，
@@ -897,18 +977,65 @@ int img_fat32_rm(img_fat32_fs *fs, const char *abs_path){
         int frc = free_chain(fs, e.cluster);
         if(frc!=IMG_OK) return frc;
     }
-    uint8_t d[ENTRY_SIZE];
-    if(rd(fs, e.slot_off, d, ENTRY_SIZE)) return IMG_EIO;
-    d[0]=0xE5;
-    /* 同时把该条目的 LFN 项也标删（往前扫）*/
-    uint64_t off=e.slot_off;
-    while(off >= fs->data_off + ENTRY_SIZE){
-        uint8_t prev[ENTRY_SIZE];
-        if(rd(fs, off-ENTRY_SIZE, prev, ENTRY_SIZE)) break;
-        if((prev[11]&0x0F)==0x0F){ prev[0]=0xE5; wr(fs, off-ENTRY_SIZE, prev, ENTRY_SIZE); off-=ENTRY_SIZE; }
-        else break;
+    return dir_slot_delete(fs, e.slot_off);
+}
+
+/* 改名 / 移动（同一分区内）。目录也可移动：FAT 的父引用只有子目录里的 ".." 一项，
+ * 搬完同步它就行（NTFS 侧不是这样，那边还有 $I30 索引 —— 见 img_ntfs_fs.c）。
+ * 目标已存在 → IMG_EEXISTS（是否覆盖是政策，留给命令层/App）。
+ * 顺序：① 先建新项（指向同一簇）② 目录换了父就改 ".." ③ 再删旧项。
+ *   任何一步失败，数据都还在（最坏情况是出现两条同名项，方向可查、可恢复）。*/
+int img_fat32_rename(img_fat32_fs *fs, const char *src_abs, const char *dst_abs){
+    if(!fs||!src_abs||!dst_abs||!*src_abs||!*dst_abs) return IMG_EINVAL;
+    if(!fs->writable) return IMG_ENOTSUP;
+    uint32_t sdir, ddir; char sname[256], dname[256];
+    if(split_parent(fs, src_abs, &sdir, sname, sizeof sname)!=IMG_OK) return IMG_ENOENT;
+    if(split_parent(fs, dst_abs, &ddir, dname, sizeof dname)!=IMG_OK) return IMG_ENOENT;
+    dir_ent se, de;
+    int rc=dir_find(fs, sdir, sname, &se);
+    if(rc!=IMG_OK) return rc;
+    if(!se.found) return IMG_ENOENT;
+    if(sdir==ddir && !strcasecmp(sname, dname)) return IMG_EINVAL;   /* 自己改自己 */
+    rc=dir_find(fs, ddir, dname, &de);
+    if(rc!=IMG_OK) return rc;
+    if(de.found) return IMG_EEXISTS;
+    if(se.is_dir && se.cluster>=2){
+        /* 目录不能move进自己的子树（否则整棵子树从根上脱链）：
+         * 从目标父目录沿 ".." 往上走，撞见源目录簇就拒绝。*/
+        uint32_t c=ddir; uint64_t guard=0;
+        while(c>=2 && c<FAT32_EOC){
+            if(c==se.cluster) return IMG_EINVAL;
+            if(FAT32_CHAIN_GUARD(fs,guard)) return IMG_ECORRUPT;
+            uint32_t p=0;
+            if(dir_dotdot_parent(fs,c,&p)!=IMG_OK) break;   /* ".." 坏了：只靠上层路径检查 */
+            if(p==0 || p==c) break;
+            c=p;
+        }
     }
-    return wr(fs, e.slot_off, d, ENTRY_SIZE);
+    uint64_t new_off=0;
+    rc=dir_add_entry(fs, ddir, dname, se.cluster, se.size, se.is_dir, &new_off);
+    if(rc) return rc;
+    /* 继承源项的属性与时间戳：Windows 的"改名"是同一对象换名字，不是"新建 + 删旧"。
+     * 不继承的后果：archive/readonly/hidden 位丢失、创建/修改时间变成"现在"，
+     * 备份工具与增量复制会因此认错（改名后整文件被重新备份）。*/
+    {   uint8_t s8[ENTRY_SIZE], n8[ENTRY_SIZE];
+        if(rd(fs, se.slot_off, s8, ENTRY_SIZE)==IMG_OK &&
+           rd(fs, new_off,    n8, ENTRY_SIZE)==IMG_OK){
+            memcpy(n8+11, s8+11, 9);    /* attr · NTRes · CrtTimeTenth · CrtTime · CrtDate · LstAccDate */
+            memcpy(n8+22, s8+22, 4);    /* WrtTime · WrtDate */
+            wr(fs, new_off, n8, ENTRY_SIZE);
+        }
+    }
+    if(se.is_dir && se.cluster>=2 && sdir!=ddir){
+        int prc=dir_set_dotdot_parent(fs, se.cluster, ddir);
+        if(prc!=IMG_OK){
+            /* 回滚刚建的新项，回到"原样"而不是"两条项" */
+            dir_ent ne;
+            if(dir_find(fs, ddir, dname, &ne)==IMG_OK && ne.found) dir_slot_delete(fs, ne.slot_off);
+            return prc;
+        }
+    }
+    return dir_slot_delete(fs, se.slot_off);
 }
 
 /* 剩余空间（字节）：扫一遍 FAT0 数空簇。首次调用后缓存，直到 FAT 被修改。
