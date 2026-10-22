@@ -26,6 +26,7 @@
 #include "img_event.h"
 #include "img_wim_apply.h"
 #include "img_wim_fs.h"
+#include "img_win_finish.h"
 /* ---- 功能开关（CMake 降级判定；缺库时对应 =0，命令仍列在表里但明确报不可用）---- */
 #ifndef IMG_WITH_WIM
 #define IMG_WITH_WIM 0
@@ -2892,6 +2893,51 @@ static int cmd_wim_extract(img_ctx *ctx, const img_args *in, img_result *out){
 #endif
 }
 
+
+/* ================= 命令 6k：win.finish（裸灌后首次启动收尾）====================
+ * 依据：微软 Learn《OS start-up – Computer restarted unexpectedly or encountered
+ * an unexpected error》—— 裸灌系统首次启动弹"计算机意外地重新启动或遇到错误"，
+ * 官方修复是把 HKLM\SYSTEM\Setup\Status\ChildCompletion\setup.exe 由 1 改成 3。
+ * 我们离线改 qcow2 里的 SYSTEM hive（libhivex），因为没有 Windows 运行环境。 */
+static const img_arg A_WINFINISH[] = {
+    {"img",     IMG_A_STR,  true,  NULL,   "镜像路径（qcow2）", NULL},
+    {"lba",     IMG_A_U64,  true,  NULL,   "Windows 系统分区起始 LBA", chk_lba},
+    {"dry-run", IMG_A_BOOL, false, "false","只看不改（诊断 SetupType/SystemSetupInProgress/ChildCompletion）", NULL},
+};
+static int cmd_win_finish(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba=img_args_u64(in,"lba",0);
+    bool dry=img_args_bool(in,"dry-run",false);
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q) return qc_open_fail(out,ctx);
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){
+            pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+
+    img_win_finish_t fi; char err[256]="";
+    img_span sp; img_span_prep(&sp,"win","finish",dry?"诊断首次启动状态":"收尾首次启动");
+    img_span_kv_u64(&sp,"lba",lba); img_span_begin(&sp);
+    rc=img_win_finish(q,lba,pb,dry,&fi,err,sizeof err);
+    img_span_end(&sp,rc);
+    if(rc!=IMG_OK){
+        img_result_fail(out,rc,rc==IMG_ESTATE?"PART-FS-BAD":"WIN-FINISH-FAIL",img_ctx_path(ctx),
+                        err[0]?err:"收尾失败",NULL);
+        return rc;
+    }
+    img_result_bool(out,"dry_run",dry);
+    img_result_bool(out,"found_child_completion",fi.found_node);
+    if(fi.old_setup_exe>=0) img_result_u64(out,"old_setup_exe",(uint64_t)fi.old_setup_exe);
+    img_result_u64(out,"new_setup_exe",(uint64_t)fi.new_setup_exe);
+    img_result_bool(out,"changed",fi.changed);
+    if(fi.setup_type>=0)              img_result_u64(out,"setup_type",(uint64_t)fi.setup_type);
+    if(fi.system_setup_in_progress>=0) img_result_u64(out,"system_setup_in_progress",(uint64_t)fi.system_setup_in_progress);
+    img_result_bool(out,"cmdline_present",fi.cmdline_present);
+    return IMG_OK;
+}
+
 const img_cmd IMG_CMD_TABLE[] = {
     {"img.info",  "1.0", "显示镜像基本信息（大小/分区表/分区数）",
         A_INFO,   (int)(sizeof A_INFO  /sizeof A_INFO[0]),   cmd_img_info},
@@ -2942,6 +2988,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_NTFSEXPORT,(int)(sizeof A_NTFSEXPORT/sizeof A_NTFSEXPORT[0]), cmd_ntfs_export},
     {"ntfs.move",  "1.0", "盘内改名/移动【单条路径】（末段不同=改名，父目录不同=移动；默认不覆盖）",
         A_NTFSMOVE,(int)(sizeof A_NTFSMOVE/sizeof A_NTFSMOVE[0]), cmd_ntfs_move},
+    {"win.finish", "1.0", "裸灌后首次启动收尾：离线把 SYSTEM\\Setup\\Status\\ChildCompletion\\setup.exe 改成 3（微软官方修复）",
+        A_WINFINISH,(int)(sizeof A_WINFINISH/sizeof A_WINFINISH[0]), cmd_win_finish},
     {"ntfs.rm",    "1.0", "删除盘内【一个文件】（目录一律拒绝，更不会递归删）",
         A_NTFSSRM,(int)(sizeof A_NTFSSRM/sizeof A_NTFSSRM[0]), cmd_ntfs_rm},
     {"wim.identify","1.0", "从内容识别 WIM/ESD/ISO 里的 Windows 版本（不信文件名）",
