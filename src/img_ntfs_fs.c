@@ -883,12 +883,22 @@ static int dir_parent_ino(ntfs_inode *sub, uint64_t *out){
     return rc;
 }
 
-/* 把子目录 ".." 的父引用改成 newpar。改三处（Windows 就是这么写的）：
+/* 【实测修正 2026-10-23】三张真实 Windows 盘（diskA-Windows-UEFI-GPT、Win10 Xlite、
+ * 我们自己灌的 w10b）上抽查 /Windows、/Users、/Windows/System32 等目录：
+ *   dotdot_present 全是 false —— 也就是说这些卷的 $I30 里【没有 ".." 索引项】，
+ *   "." 与 ".." 是枚举时现造的（ntfs-3g 的 ntfs_readdir 正是这么干的，
+ *   见 libntfs-3g/dir.c 的 dotdot[] 与 filldir 调用）。
+ * ⇒ 目录的父引用【权威来源是它自己 $FILE_NAME 里的 parent_directory】，
+ *   而 ntfs_link + ntfs_delete 本来就会把它更新到新父 —— 这才是"搬目录安全"的真正理由。
+ * ⇒ 下面这个函数是【保险】：万一某个卷（或某些第三方工具）真的写了 ".." 索引项，
+ *   我们把它一起改掉；没有就直接返回"无需同步"。
+ *
+ * 把子目录 ".." 的父引用改成 newpar。若存在，改三处：
  *     ① 索引项头部的 indexed_file（该条目指向的 inode）        —— ".." 到底指向哪个 inode（最关键的一处）
  *     ② 索引项的排序键 file_name 里的 parent_directory（= 新父的父）
  *     ③ 索引项数据副本里的同一字段
- * 没有 ".." 索引项的目录（ntfs-3g 自己建的）→ *out_had_entry=false，返回 IMG_OK：
- * 那种目录的父引用本来就在自己的 $FILE_NAME 里，而 link+delete 已经把它更新了。
+ * 没有 ".." 索引项的目录（实测所有 Windows 卷都没有）→ *out_had_entry=false，返回 IMG_OK：
+ * 父引用本来就在自己的 $FILE_NAME 里，link+delete 已经把它更新了。
  *
  * ★ 为什么必须我们自己补：上游【没有】"改父引用"的能力 ——
  *   libntfs-3g/dir.c 里 ntfs_link 的注释原文写着

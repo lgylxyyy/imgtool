@@ -94,8 +94,11 @@ int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
  *      / IMG_ENOTSUP(overwrite 时目标是目录) / IMG_EFULL / IMG_EIO。
  * ★ 目录：见 img_ntfs_fs.c 里 move_path 的注释与 tests/ntfs-move-test.sh 的实测结论。*/
 int img_ntfs_move_path(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs, bool overwrite);
-/* 目录父引用自洽检查（只读）：.. 指向谁、按路径算的父是谁、父索引是否指回本目录。
- * 搬过目录之后（ntfs.move / move_into）必须三项全真，否则 ".." 是陈的。
+/* 目录父引用自洽检查（只读）：父引用指向谁、按路径算的父是谁、父索引是否指回本目录。
+ * 搬过目录之后（ntfs.move / move_into）必须全真。
+ * ★ 实测：Windows 卷的 $I30 里【没有 "."/".." 索引项】（dotdot_present=false），
+ *   父引用的权威来源是该目录自己的 $FILE_NAME.parent_directory；
+ *   dotdot_present=true 只在少数写了 ".." 项的卷上出现，那时它才是必须同步的地方。
  * 出参都可以传 NULL。返回 IMG_OK / IMG_ENOENT / IMG_ENOTSUP（路径不是目录）。*/
 int img_ntfs_dir_parent_check(img_ntfs_fs *fs, const char *abs_path,
                               uint64_t *out_ino, uint64_t *out_parent_ino,
