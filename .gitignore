@@ -36,3 +36,6 @@ imgtool-dev
 build-*/
 __pycache__/
 *.pyc
+
+# 本地验证现场（不入手）
+.tmp/
