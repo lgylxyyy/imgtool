@@ -205,6 +205,16 @@ mk(b'', 'empty.bin')
 d = run('file.copy', img=A, dst_lba=AN, src='host:' + os.path.join(W, 'empty.bin'), dst='ntfs:/empty.bin')
 check('空文件复制（驻留 $DATA 边界）', d.get('ok') and data(run('ntfs.exists', img=A, lba=AN, path='/empty.bin')).get('size_bytes') == 0)
 
+# ─────────── 9b. 宿主 → 宿主（引擎本身也支持；App 也可以不经过工具） ───────────
+hh = os.path.join(W, 'hh')
+os.makedirs(os.path.join(hh, 'src', 'sub'), exist_ok=True)
+mk(b'hh1\n', 'hh/src/a.txt'); mk(b'hh2\n', 'hh/src/sub/b.txt')
+d = run('file.copy', src='host:' + os.path.join(hh, 'src'), dst='host:' + os.path.join(hh, 'out'))
+check('宿主目录 → 宿主目录（递归）', d.get('ok') and data(d).get('copied_files') == 2, json.dumps(d)[:200])
+d = run('file.copy', src='host:' + os.path.join(hh, 'src'), dst='host:' + os.path.join(hh, 'src', 'sub', 'loop'))
+check('  宿主→宿主造环也拒绝（零副作用）', code(d) == 'COPY-INTO-SELF'
+      and not os.path.exists(os.path.join(hh, 'src', 'sub', 'loop')), code(d))
+
 # ─────────── 10. 递归开关：拒绝且零副作用 ───────────
 before = data(run('fat.ls', img=A, lba=AESP, path='/')).get('total')
 d = run('file.copy', img=A, src_lba=AN, dst_lba=AESP, src='ntfs:/Users', dst='fat:/NoWay', recursive='false')
