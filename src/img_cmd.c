@@ -31,7 +31,10 @@ static long long now_ms(void){
 /* ================= 参数集合 ================= */
 #define ARGS_MAX 24
 struct img_args {
-    struct { char k[24]; char v[256]; } a[ARGS_MAX];
+    /* v 放大到 2048：路径参数里可能包含 255 字节的文件名 + 很深的目录 +
+     * 镜像绝对路径。旧值 256 会在【参数入口】静默截断 —— CLI/App 都看不出来，
+     * 结果就是"复制成功但名字/位置不对"，比报错坏得多。 */
+    struct { char k[24]; char v[2048]; } a[ARGS_MAX];
     int n;
 };
 img_args *img_args_new(void){ return calloc(1,sizeof(img_args)); }
@@ -39,6 +42,7 @@ void img_args_free(img_args *a){ free(a); }
 int img_args_count(const img_args *a){ return a?a->n:0; }
 int img_args_set(img_args *a, const char *k, const char *v){
     if(!a||!k||!v) return IMG_EINVAL;
+    if(strlen(k)>=sizeof a->a[0].k || strlen(v)>=sizeof a->a[0].v) return IMG_EINVAL;
     for(int i=0;i<a->n;i++) if(!strcmp(a->a[i].k,k)){     /* 覆盖同名 */
         snprintf(a->a[i].v,sizeof a->a[i].v,"%s",v); return IMG_OK;
     }

@@ -378,7 +378,7 @@ static int dir_find(img_fat32_fs *fs, uint32_t dirclus, const char *want, dir_en
         int ext  = dot ? (int)strlen(dot+1) : 0;
         want_is83 = (base>=1 && base<=8 && ext<=3);
     }
-    char wantu[260]; snprintf(wantu,sizeof wantu,"%s",want);
+    char wantu[1024]; snprintf(wantu,sizeof wantu,"%s",want);
     for(char *p=wantu;*p;p++) if(*p>='a'&&*p<='z') *p-=32;
     lfn_acc la; lfn_reset(&la);
     dir_ent fb83; memset(&fb83,0,sizeof fb83);
@@ -398,7 +398,7 @@ static int dir_find(img_fat32_fs *fs, uint32_t dirclus, const char *want, dir_en
             const char *lfn = lfn_value(&la);
             bool had_lfn = la.active && lfn[0];
             if(had_lfn){
-                char a[260]; snprintf(a,sizeof a,"%s",lfn);
+                char a[1024]; snprintf(a,sizeof a,"%s",lfn);
                 for(char *p=a;*p;p++) if(*p>='a'&&*p<='z') *p-=32;
                 if(!strcmp(a,wantu)){                    /* LFN 命中 → 立刻返回 */
                     ent_fill(out, e, coff+i);
@@ -446,7 +446,7 @@ const img_fat32_layout_t *img_fat32_fs_layout(const img_fat32_fs *fs){
  * 用固定数组分词（strtok_r 的回退写法在多级路径下会出错）。 */
 static int split_parent(img_fat32_fs *fs, const char *path,
                         uint32_t *out_dir, char *out_name, size_t namecap){
-    char work[512]; snprintf(work,sizeof work,"%s",path);
+    char work[4096]; snprintf(work,sizeof work,"%s",path);
     const char *parts[64]; int n=0;
     char *save=NULL;
     for(char *t=strtok_r(work,"/\\",&save); t && n<64; t=strtok_r(NULL,"/\\",&save))
@@ -467,7 +467,7 @@ static int split_parent(img_fat32_fs *fs, const char *path,
 bool img_fat32_dir_exists(img_fat32_fs *fs, const char *abs_path){
     if(!fs||!abs_path||!*abs_path) return false;
     if(!strcmp(abs_path,"/")) return true;
-    uint32_t dir; char nm[256];
+    uint32_t dir; char nm[1024];
     if(split_parent(fs, abs_path, &dir, nm, sizeof nm)!=IMG_OK) return false;
     dir_ent e;
     return dir_find(fs, dir, nm, &e)==IMG_OK && e.found && e.is_dir;
@@ -475,7 +475,7 @@ bool img_fat32_dir_exists(img_fat32_fs *fs, const char *abs_path){
 
 bool img_fat32_path_exists(img_fat32_fs *fs, const char *abs_path){
     if(!fs||!abs_path) return false;
-    uint32_t dir; char name[256];
+    uint32_t dir; char name[1024];
     if(split_parent(fs, abs_path, &dir, name, sizeof name)!=IMG_OK) return false;
     dir_ent e;
     return dir_find(fs, dir, name, &e)==IMG_OK && e.found;
@@ -483,7 +483,7 @@ bool img_fat32_path_exists(img_fat32_fs *fs, const char *abs_path){
 
 int img_fat32_file_size(img_fat32_fs *fs, const char *abs_path, uint64_t *out){
     if(!fs||!abs_path||!out) return IMG_EINVAL;
-    uint32_t dir; char name[256];
+    uint32_t dir; char name[1024];
     if(split_parent(fs, abs_path, &dir, name, sizeof name)!=IMG_OK) return IMG_ENOENT;
     dir_ent e;
     if(dir_find(fs, dir, name, &e)!=IMG_OK || !e.found) return IMG_ENOENT;
@@ -697,7 +697,7 @@ static int dir_write_dots(img_fat32_fs *fs, uint32_t self, uint32_t parent){
 
 int img_fat32_mkdir_p(img_fat32_fs *fs, const char *abs_path){
     if(!fs||!abs_path) return IMG_EINVAL;
-    char work[512]; snprintf(work,sizeof work,"%s",abs_path);
+    char work[4096]; snprintf(work,sizeof work,"%s",abs_path);
     uint32_t dir = fs->L.root_cluster;
     char *save=NULL;
     for(char *t=strtok_r(work,"/\\\\",&save); t; t=strtok_r(NULL,"/\\\\",&save)){
@@ -734,7 +734,7 @@ static int put_prepare(img_fat32_fs *fs, const char *dst_abs_path,
         /* ★ 父目录不存在时按头文件承诺【自动建出来】。
          *   原先直接返回 ENOENT —— 头文件写着"自动建父目录"、实现却没有，
          *   于是往空 ESP 放文件必须调用方先 mkdir（实测 142 个文件全失败）。*/
-        char par[512]; snprintf(par,sizeof par,"%s",dst_abs_path);
+        char par[2048]; snprintf(par,sizeof par,"%s",dst_abs_path);
         char *sl=strrchr(par,'/');
         if(!sl) return IMG_ENOENT;
         if(sl==par) par[1]='\0'; else *sl='\0';
@@ -786,7 +786,7 @@ static int put_finalize(img_fat32_fs *fs, uint32_t dir, const char *nm,
 /* 往 dst 写一段【内存里】的数据（供 put_data 用；大文件请走 put_file 流式路径） */
 static int write_data(img_fat32_fs *fs, const void *data, size_t len,
                       const char *dst_abs_path){
-    uint32_t dir; char nm[256]; bool ex=false; dir_ent old;
+    uint32_t dir; char nm[1024]; bool ex=false; dir_ent old;
     int rc=put_prepare(fs,dst_abs_path,&dir,nm,sizeof nm,&ex,&old);
     if(rc) return rc;
     uint32_t csz=(uint32_t)fs->L.sectors_per_cluster*512;
@@ -850,9 +850,9 @@ int img_fat32_write_stream(img_fat32_fs *fs, const char *dst_abs,
     uint64_t len64 = meta->size;
     if(len64 > 0xFFFFFFFFULL) return IMG_ERANGE;         /* FAT32 单文件上限 */
 
-    char ddir[512], dname[256];
+    char ddir[2048], dname[1024];
     {   /* 先确保父目录存在（mkdir_p 已存在则成功） */
-        char par[512]; snprintf(par,sizeof par,"%s",dst_abs);
+        char par[2048]; snprintf(par,sizeof par,"%s",dst_abs);
         char *sl=strrchr(par,'/');
         if(!sl) return IMG_ENOENT;
         if(sl==par) par[1]='\0'; else *sl='\0';
@@ -863,21 +863,21 @@ int img_fat32_write_stream(img_fat32_fs *fs, const char *dst_abs,
     }
     /* 父目录绝对路径 + 名字 */
     {
-        char tmp[512]; snprintf(tmp,sizeof tmp,"%s",dst_abs);
+        char tmp[2048]; snprintf(tmp,sizeof tmp,"%s",dst_abs);
         char *sl=strrchr(tmp,'/');
         if(!sl) return IMG_EINVAL;
         if(sl==tmp) snprintf(ddir,sizeof ddir,"/");
         else { *sl=0; snprintf(ddir,sizeof ddir,"%s",tmp); }
         snprintf(dname,sizeof dname,"%s",sl+1);
         if(!dname[0]) return IMG_EINVAL;
-        if(strlen(dname) > 255) return IMG_ENAMETOOLONG;
+        /* 字符数检查在 dir_add_entry（按 UTF-16 码元）里做；这里不按字节误杀中文名 */
     }
-    uint32_t dirclus=0; char nm[256];
+    uint32_t dirclus=0; char nm[1024];
     if(split_parent(fs, dst_abs, &dirclus, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
 
     /* 冲突策略 */
-    char final_name[256]; snprintf(final_name,sizeof final_name,"%s",dname);
-    char full[1200];
+    char final_name[1024]; snprintf(final_name,sizeof final_name,"%s",dname);
+    char full[4096];
     snprintf(full,sizeof full,"%s%s%s",ddir,strcmp(ddir,"/")?"/":"",final_name);
     bool replaced=false;
     if(img_fat32_path_exists(fs, full)){
@@ -890,7 +890,7 @@ int img_fat32_write_stream(img_fat32_fs *fs, const char *dst_abs,
     }
 
     /* 临时名（探测到确实不存在） */
-    char tmp_name[64], tmp_full[1200];
+    char tmp_name[64], tmp_full[4096];
     bool have=false;
     for(int i=0;i<64 && !have;i++){
         snprintf(tmp_name,sizeof tmp_name,".imgtmp-%d-%d",(int)getpid(),i);
@@ -1016,7 +1016,7 @@ int img_fat32_rd_open(img_fat32_fs *fs, const char *abs_path, img_fat32_rd **out
                       img_src_meta *meta){
     if(out) *out=NULL;
     if(!fs||!abs_path||!out) return IMG_EINVAL;
-    uint32_t dir; char nm[256];
+    uint32_t dir; char nm[1024];
     if(split_parent(fs, abs_path, &dir, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
     dir_ent e; memset(&e,0,sizeof e);
     if(dir_find(fs, dir, nm, &e)!=IMG_OK || !e.found) return IMG_ENOENT;
@@ -1082,7 +1082,7 @@ static int fat_wrap_read(void *ud, uint64_t off, void *buf, size_t want, size_t 
 int img_fat32_read_file(img_fat32_fs *fs, const char *abs_path, void **out, size_t *out_len){
     if(!fs||!abs_path||!out||!out_len) return IMG_EINVAL;
     *out=NULL; *out_len=0;
-    uint32_t dir; char nm[256];
+    uint32_t dir; char nm[1024];
     if(split_parent(fs, abs_path, &dir, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
     dir_ent e;
     if(dir_find(fs, dir, nm, &e)!=IMG_OK || !e.found) return IMG_ENOENT;
@@ -1108,7 +1108,7 @@ int img_fat32_copy_out(img_fat32_fs *fs, const char *abs_path, const char *dst_p
                        img_prog *prog, uint64_t *out_bytes){
     if(out_bytes) *out_bytes=0;
     if(!fs||!abs_path||!dst_path) return IMG_EINVAL;
-    uint32_t dir; char nm[256];
+    uint32_t dir; char nm[1024];
     if(split_parent(fs, abs_path, &dir, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
     dir_ent e;
     if(dir_find(fs, dir, nm, &e)!=IMG_OK || !e.found) return IMG_ENOENT;
@@ -1144,7 +1144,7 @@ int img_fat32_list_dir(img_fat32_fs *fs, const char *abs_path, img_fat32_list_cb
     if(!fs||!cb) return IMG_EINVAL;
     uint32_t dir = fs->L.root_cluster;
     if(abs_path && abs_path[0] && strcmp(abs_path,"/")){   /* 任何非根路径都要查 */
-        uint32_t d; char nm[256];
+        uint32_t d; char nm[1024];
         if(split_parent(fs, abs_path, &d, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
         dir_ent e;
         if(dir_find(fs, d, nm, &e)!=IMG_OK || !e.found || !e.is_dir) return IMG_ENOTSUP;
@@ -1242,7 +1242,7 @@ static int dir_set_dotdot_parent(img_fat32_fs *fs, uint32_t dirclus, uint32_t pa
 
 int img_fat32_rm(img_fat32_fs *fs, const char *abs_path){
     if(!fs||!abs_path) return IMG_EINVAL;
-    uint32_t dir; char nm[256];
+    uint32_t dir; char nm[1024];
     if(split_parent(fs, abs_path, &dir, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
     dir_ent e;
     if(dir_find(fs, dir, nm, &e)!=IMG_OK || !e.found) return IMG_ENOENT;
@@ -1279,7 +1279,7 @@ static void fat_split(const char *abs, char *dir, size_t dcap, char *name, size_
 static int fat_unique_name(img_fat32_fs *fs, const char *dir, const char *base,
                            char *out, size_t cap){
     for (int i = 0; i < 1000; i++) {
-        char cand[320]; int n;
+        char cand[1024]; int n;
         if (i == 0) n = snprintf(cand, sizeof cand, "%s", base);
         else {
             /* 同 NTFS 侧：扩展名之前插 " (N)"，目录则 "名 (N)" */
@@ -1289,7 +1289,7 @@ static int fat_unique_name(img_fat32_fs *fs, const char *dir, const char *base,
             else         n = snprintf(cand, sizeof cand, "%s (%d)", base, i);
         }
         if (n < 0 || (size_t)n >= sizeof cand) continue;
-        char full[1200];
+        char full[4096];
         snprintf(full, sizeof full, "%s%s%s", dir, strcmp(dir, "/") ? "/" : "", cand);
         if (!img_fat32_path_exists(fs, full)) { snprintf(out, cap, "%.*s", (int)(cap - 1), cand); return 0; }
     }
@@ -1297,11 +1297,11 @@ static int fat_unique_name(img_fat32_fs *fs, const char *dir, const char *base,
 }
 
 /* ---------- FAT 递归删除 ---------- */
-typedef struct { char (*nm)[256]; bool *isdir; int n, cap, overflow; } fat_rm_bag;
+typedef struct { char (*nm)[1024]; bool *isdir; int n, cap, overflow; } fat_rm_bag;
 static void fat_rm_collect(void *ud, const char *name, bool is_dir, uint64_t size){
     fat_rm_bag *b=(fat_rm_bag*)ud; (void)size;
     if(b->n>=b->cap){ b->overflow=1; return; }
-    snprintf(b->nm[b->n],256,"%s",name); b->isdir[b->n]=is_dir; b->n++;
+    snprintf(b->nm[b->n],1024,"%s",name); b->isdir[b->n]=is_dir; b->n++;
 }
 static int fat_rm_tree_rec(img_fat32_fs *fs,const char *abs,int depth,int *removed){
     if(depth>32) return IMG_ESTATE;
@@ -1314,7 +1314,7 @@ static int fat_rm_tree_rec(img_fat32_fs *fs,const char *abs,int depth,int *remov
     fat_rm_bag *b=(fat_rm_bag*)calloc(1,sizeof *b);
     if(!b) return IMG_ENOMEM;
     b->cap=512;
-    b->nm=(char (*)[256])calloc((size_t)b->cap,256);
+    b->nm=(char (*)[1024])calloc((size_t)b->cap,1024);
     b->isdir=(bool*)calloc((size_t)b->cap,sizeof(bool));
     if(!b->nm||!b->isdir){ free(b->nm); free(b->isdir); free(b); return IMG_ENOMEM; }
     int rc=img_fat32_list_dir(fs,abs,fat_rm_collect,b);
@@ -1362,7 +1362,7 @@ int64_t img_fat32_dos_to_epoch(uint16_t tm, uint16_t dt){
 }
 int img_fat32_file_times(img_fat32_fs *fs, const char *abs_path, uint16_t out[5]){
     if(!fs||!abs_path||!out) return IMG_EINVAL;
-    uint32_t dclus=0; char nm[256];
+    uint32_t dclus=0; char nm[1024];
     if(split_parent(fs, abs_path, &dclus, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
     dir_ent e; memset(&e,0,sizeof e);
     if(dir_find(fs, dclus, nm, &e)!=IMG_OK || !e.found) return IMG_ENOENT;
@@ -1373,7 +1373,7 @@ int img_fat32_file_times(img_fat32_fs *fs, const char *abs_path, uint16_t out[5]
 /* 把同样的 5 个字段写回某个路径的目录项（其它字段不动） */
 int img_fat32_file_set_times(img_fat32_fs *fs, const char *abs_path, const uint16_t t[5]){
     if(!fs||!abs_path||!t) return IMG_EINVAL;
-    uint32_t dclus=0; char nm[256];
+    uint32_t dclus=0; char nm[1024];
     if(split_parent(fs, abs_path, &dclus, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
     dir_ent e; memset(&e,0,sizeof e);
     if(dir_find(fs, dclus, nm, &e)!=IMG_OK || !e.found) return IMG_ENOENT;
@@ -1400,8 +1400,8 @@ int img_fat32_copy(img_fat32_fs *fs, const char *src_abs, const char *dst_abs,
     if(rc!=IMG_OK) return rc;
 
     /* 目标目录语义：dst 以 / 结尾或已是目录 ⇒ 目标名取源末段 */
-    char final[1200];
-    char sdir[512], sname[256];
+    char final[4096];
+    char sdir[2048], sname[1024];
     fat_split(src_abs, sdir, sizeof sdir, sname, sizeof sname);
     size_t dl=strlen(dst_abs);
     bool dst_is_dir=(dl && dst_abs[dl-1]=='/') || img_fat32_dir_exists(fs,dst_abs);
@@ -1420,7 +1420,7 @@ int img_fat32_copy(img_fat32_fs *fs, const char *src_abs, const char *dst_abs,
 int img_fat32_rename(img_fat32_fs *fs, const char *src_abs, const char *dst_abs){
     if(!fs||!src_abs||!dst_abs||!*src_abs||!*dst_abs) return IMG_EINVAL;
     if(!fs->writable) return IMG_ENOTSUP;
-    uint32_t sdir, ddir; char sname[256], dname[256];
+    uint32_t sdir, ddir; char sname[1024], dname[1024];
     if(split_parent(fs, src_abs, &sdir, sname, sizeof sname)!=IMG_OK) return IMG_ENOENT;
     if(split_parent(fs, dst_abs, &ddir, dname, sizeof dname)!=IMG_OK) return IMG_ENOENT;
     dir_ent se, de;

@@ -107,7 +107,7 @@ static bool nth_component(const char *path, int idx, char *out, size_t cap){
         while(*p && *p!='/') p++;
         if(n==idx){
             size_t l=(size_t)(p-st);
-            if(l>=cap) l=cap-1;
+            if(l>=cap){ out[0]=0; return false; }   /* 宁可查不到，也不拿截断的名字去查 */
             memcpy(out,st,l); out[l]=0;
             return true;
         }
@@ -126,6 +126,9 @@ static bool to_ntfs(const char *s, ntfschar **out, size_t *outlen){
      *   这是 2026-10-24 修的真 bug，不是洁癖。*/
     int n = ntfs_mbstoucs(s, out);
     if(n < 0 || !*out) return false;
+    if(n > 255){                       /* NTFS 单个名字上限 255 字符 */
+        free(*out); *out=NULL; return false;
+    }
     *outlen = (size_t)n;
     return true;
 }
@@ -175,7 +178,7 @@ static ntfs_inode *lookup(ntfs_volume *vol, const char *path, ntfs_inode **paren
     ntfs_inode *cur = ntfs_inode_open(vol, FILE_root);
     if(parent_out) *parent_out = NULL;
     if(!cur) return NULL;
-    char comp[256];
+    char comp[1024];        /* 单个名字最多 255 个 Unicode 字符（UTF-8 可达 765 B）*/
     int idx=0;
     if(parent_out) *parent_out = ntfs_inode_open(vol, FILE_root);
     while(nth_component(path, idx, comp, sizeof comp)){
@@ -817,7 +820,7 @@ int img_ntfs_put_file(img_ntfs_fs *fs, const char *local_path,
 /* 在 dir 里找一个不冲突的名字：base、base (1)、base (2)…（扩展名保持在最后） */
 static int copy_unique_name(ntfs_inode *dir, const char *base, char *out, size_t cap){
     for (int i = 0; i < 1000; i++) {
-        char cand[320];               /* 比 NAME_MAX 宽一点，避免 -Wformat-truncation */
+        char cand[1024];              /* 255 个中文字符最多 765 字节 + 编号后缀 */
         int n;
         if (i == 0) {
             n = snprintf(cand, sizeof cand, "%s", base);
@@ -908,6 +911,14 @@ static int ntfs_wrap_read(void *ud, uint64_t off, void *buf, size_t want, size_t
 }
 
 /* ---------- 流式写：任意源 → 盘内文件 ---------- */
+/* UTF-8 字符数（不是字节数）。名字上限按字符算。*/
+static size_t u8_chars(const char *s){
+    size_t n=0;
+    for(const unsigned char *p=(const unsigned char*)s; *p; p++)
+        if((*p & 0xC0) != 0x80) n++;
+    return n;
+}
+
 int img_ntfs_unique_name(img_ntfs_fs *fs, const char *dir_abs, const char *base,
                          char *out, size_t cap){
     if(!fs||!dir_abs||!base||!out) return IMG_EINVAL;
@@ -935,10 +946,10 @@ int img_ntfs_write_stream(img_ntfs_fs *fs, const char *dst_abs,
     snprintf(dnorm, sizeof dnorm, "%s", dst_abs);
     size_t dl = strlen(dnorm);
     while (dl > 1 && dnorm[dl-1] == '/') dnorm[--dl] = 0;
-    char ddir[512], dname[256];
+    char ddir[2048], dname[1024];
     if (split_abs(dnorm, ddir, sizeof ddir, dname, sizeof dname) != 0) return IMG_EINVAL;
     if (!dname[0]) return IMG_EINVAL;
-    if (strlen(dname) > 255) return IMG_ENAMETOOLONG;   /* NTFS 名字上限 255 字符 */
+    if (u8_chars(dname) > 255) return IMG_ENAMETOOLONG;   /* 按字符算，不按字节 */
 
     /* 目标目录：按需创建（建完由 mkdir_p 自己从盘上验明正身） */
     if (strcmp(ddir, "/") != 0 && ddir[0]) {
@@ -956,12 +967,11 @@ int img_ntfs_write_stream(img_ntfs_fs *fs, const char *dst_abs,
     if (!dpar) return IMG_ENOENT;
 
     /* 冲突策略 */
-    char final_name[256];
+    char final_name[1024];
     snprintf(final_name, sizeof final_name, "%s", dname);
-    char final_abs[1024];
-    snprintf(final_abs, sizeof final_abs, "%.*s%s%.*s",
-             (int)(sizeof final_abs - 300), ddir, strcmp(ddir, "/") ? "/" : "",
-             250, final_name);
+    char final_abs[4096];
+    snprintf(final_abs, sizeof final_abs, "%s%s%s",
+             ddir, strcmp(ddir, "/") ? "/" : "", final_name);
 
     ntfschar *du = NULL; size_t dul = 0;
     if (!to_ntfs(final_name, &du, &dul)) { ntfs_inode_close(dpar); return IMG_EINVAL; }
@@ -979,9 +989,8 @@ int img_ntfs_write_stream(img_ntfs_fs *fs, const char *dst_abs,
             if (copy_unique_name(dpar, dname, final_name, sizeof final_name) != 0) {
                 ntfs_inode_close(dpar); return IMG_EEXISTS;
             }
-            snprintf(final_abs, sizeof final_abs, "%.*s%s%.*s",
-                     (int)(sizeof final_abs - 300), ddir,
-                     strcmp(ddir, "/") ? "/" : "", 250, final_name);
+            snprintf(final_abs, sizeof final_abs, "%s%s%s",
+                     ddir, strcmp(ddir, "/") ? "/" : "", final_name);
         } else {
             replaced = true;
         }
@@ -1057,7 +1066,7 @@ int img_ntfs_write_stream(img_ntfs_fs *fs, const char *dst_abs,
         if (getenv("IMG_NTFS_FS_DEBUG")) fprintf(stderr,"  [cp] close 失败 errno=%d(%s)\n",errno,strerror(errno));
     }
     if (rc != IMG_OK) {           /* 失败：删掉临时文件，绝不留下半成品 */
-        char tmp_abs[600];
+        char tmp_abs[4096];
         snprintf(tmp_abs, sizeof tmp_abs, "%s%s%s", ddir, strcmp(ddir, "/") ? "/" : "", tmp_name);
         { u64 ti=0; bool td=false;
           if (path_ino(fs, tmp_abs, &ti, &td) == IMG_OK && !td) (void)img_ntfs_rm(fs, tmp_abs); }
@@ -1065,7 +1074,7 @@ int img_ntfs_write_stream(img_ntfs_fs *fs, const char *dst_abs,
     }
 
     /* 收尾：先删旧（覆盖时），再把临时名改成目标名 */
-    char tmp_abs[600];
+    char tmp_abs[4096];
     snprintf(tmp_abs, sizeof tmp_abs, "%s%s%s", ddir, strcmp(ddir, "/") ? "/" : "", tmp_name);
     if (replaced) {
         int rr = img_ntfs_rm(fs, final_abs);
@@ -1104,13 +1113,13 @@ int img_ntfs_copy(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs,
     size_t dl = strlen(dnorm);
     bool had_slash = (dl > 1 && dnorm[dl-1] == '/');
     while (dl > 1 && dnorm[dl-1] == '/') dnorm[--dl] = 0;
-    char ddir[512], dname[256];
+    char ddir[2048], dname[1024];
 
     img_ntfs_rd *rd = NULL; img_src_meta meta; memset(&meta,0,sizeof meta);
     int rc = img_ntfs_rd_open(fs, src_abs, &rd, &meta);
     if (rc != IMG_OK) return rc;
 
-    char sdir[512], sname[256];
+    char sdir[2048], sname[1024];
     if (split_abs((char*)src_abs, sdir, sizeof sdir, sname, sizeof sname) != 0) {
         img_ntfs_rd_close(rd); return IMG_EINVAL;
     }
@@ -1119,7 +1128,7 @@ int img_ntfs_copy(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs,
         u64 tino = 0; bool tdir = false;
         if (path_ino(fs, dnorm, &tino, &tdir) == IMG_OK && tdir) dst_is_dir = true;
     }
-    char final[1024];
+    char final[4096];
     if (dst_is_dir) {
         snprintf(final, sizeof final, "%s%s%s", dnorm, strcmp(dnorm,"/") ? "/" : "", sname);
     } else {
@@ -1741,7 +1750,7 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,
                           bool overwrite,bool allow_dir_move){
     if(!fs||!fs->mounted||!src_abs||!dst_abs) return IMG_EINVAL;
     if(src_abs[0]!='/'||dst_abs[0]!='/'||!src_abs[1]||!dst_abs[1]) return IMG_EINVAL;
-    static char sdir[512],sname[256],ddir[512],dname[256];
+    static char sdir[2048],sname[1024],ddir[2048],dname[1024];
     if(split_abs(src_abs,sdir,sizeof sdir,sname,sizeof sname)!=0) return IMG_EINVAL;
     if(split_abs(dst_abs,ddir,sizeof ddir,dname,sizeof dname)!=0) return IMG_EINVAL;
 

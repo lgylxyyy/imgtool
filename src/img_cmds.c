@@ -3854,7 +3854,7 @@ static void file_copy_fill(img_result *out, const char *ss, const char *ds,
     img_result_str(out,"dst",ds);
     if(st->final_path[0]){
         img_result_str(out,"dst_path",st->final_path);
-        char par[1024]; snprintf(par,sizeof par,"%s",st->final_path);
+        char par[2048]; snprintf(par,sizeof par,"%s",st->final_path);
         char *slash=strrchr(par,'/');
         if(slash){ if(slash==par) par[1]=0; else *slash=0; img_result_str(out,"parent",par); }
     }

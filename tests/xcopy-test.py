@@ -177,6 +177,29 @@ p = os.path.join(cnout, '中文 目录', '文件 名.txt')
 check('  中文名 FAT → 宿主：字节一致、名字原样',
       d.get('ok') and os.path.exists(p) and rd(p) == '中文内容\n'.encode(), os.listdir(cnout) if os.path.isdir(cnout) else d)
 
+# ─────────── 8b. 超长中文名（按"字符"不是"字节"） ───────────
+n60 = '中' * 60
+n90 = '甲' * 90
+os.makedirs(os.path.join(W, 'longname'), exist_ok=True)
+mk(b'L\n', 'longname/%s.txt' % n60)
+d = run('file.copy', img=A, dst_lba=AN, src='host:' + os.path.join(W, 'longname'), dst='ntfs:/LN')
+check('60 个汉字的名字 → NTFS', d.get('ok') and data(d).get('copied_files') == 1, json.dumps(d)[:200])
+d = run('file.copy', img=A, src_lba=AN, dst_lba=AN,
+        src='ntfs:/LN/%s.txt' % n60, dst='ntfs:/LN/%s.txt' % n90)
+check('NTFS 内部复制成 90 个汉字（270 字节）的名字', d.get('ok'), json.dumps(d)[:200])
+names = data(run('ntfs.list', img=A, lba=AN, path='/LN')).get('names') or []
+check('  列表里名字长度 = 94（90 汉字 + .txt），没有被截断',
+      sorted(len(x['name']) for x in names) == [64, 94], [len(x['name']) for x in names])
+d = run('file.copy', img=A, src_lba=AN, dst_lba=AESP, src='ntfs:/LN', dst='fat:/LN')
+check('超长名 → FAT32（UTF-16 LFN 支持 255 字符）', d.get('ok') and data(d).get('copied_files') == 2,
+      json.dumps(d)[:200])
+fe = data(run('fat.ls', img=A, lba=AESP, path='/LN')).get('entries') or []
+check('  FAT 上读回的名字长度 = 94', sorted(len(x['name']) for x in fe) == [64, 94],
+      [len(x['name']) for x in fe])
+d = run('file.copy', img=A, src_lba=AESP, src='fat:/LN', dst='host:' + os.path.join(W, 'lnout'))
+check('超长名 → 宿主：ext4 名字上限 255 字节 ⇒ 诚实报 COPY-NAME-TOO-LONG（不截断）',
+      code(d) == 'COPY-NAME-TOO-LONG', code(d))
+
 # ─────────── 9. 空文件 ───────────
 mk(b'', 'empty.bin')
 d = run('file.copy', img=A, dst_lba=AN, src='host:' + os.path.join(W, 'empty.bin'), dst='ntfs:/empty.bin')

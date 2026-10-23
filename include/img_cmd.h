@@ -58,11 +58,13 @@ typedef struct img_result {
     const char *cmd;
     long long   t0_ms;
     /* data: 键值对（字符串/整数/布尔） */
-    struct { char k[40]; int ty; char s[256]; long long n; bool b; const char *raw; } f[IMG_RES_FIELDS];
+    /* s/at 放大到 1024：255 个中文字符 = 765 字节，256 字节会把名字
+     * 【静默截断】（UI 看到的名字与盘上不一致，比报错更坏）。 */
+    struct { char k[40]; int ty; char s[1024]; long long n; bool b; const char *raw; } f[IMG_RES_FIELDS];
     int nf, nf_drop;    /* nf_drop>0 → 结果里会出现 "_overflow"，绝不静默丢字段 */
     /* err */
     int  rc;
-    char code[48], why[256], at[256], suggest[256];
+    char code[48], why[256], at[1024], suggest[256];
 } img_result;
 
 void img_result_begin(img_result *r, const char *cmd);

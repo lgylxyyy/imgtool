@@ -51,7 +51,7 @@
 #endif
 
 #define XC_MAX_DEPTH 32
-#define XC_NAME_MAX  256
+#define XC_NAME_MAX  1024   /* 255 个中文字符 ≈ 765 字节；留足但不无限 */
 
 /* ================= 小工具 ================= */
 static void xstrlcpy(char *d, const char *s, size_t cap){
@@ -111,7 +111,7 @@ static void host_rm_rf(const char *path){
             struct dirent *de;
             while((de=readdir(d))){
                 if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue;
-                char c[1200]; snprintf(c,sizeof c,"%s/%s",path,de->d_name);
+                char c[2048]; snprintf(c,sizeof c,"%s/%s",path,de->d_name);
                 host_rm_rf(c);
             }
             closedir(d);
@@ -141,8 +141,8 @@ typedef struct {
     bool        own_ctx;     /* ctx 是不是自己打开的（共享时不能关） */
     bool        own_mount;   /* fs 句柄是不是自己挂的（同一分区复用时不能重复卸载） */
     uint64_t    lba_used;
-    char        root[1200];  /* 实际源根（WIM 材料化后指向临时目录） */
-    char        tmp_root[512];   /* WIM 临时目录（关闭时要删） */
+    char        root[4096];  /* 实际源根（WIM 材料化后指向临时目录） */
+    char        tmp_root[2048];   /* WIM 临时目录（关闭时要删） */
 } xep;
 
 static int fs_at(img_qcow2 *q, uint64_t lba, img_xkind want){
@@ -348,8 +348,9 @@ typedef struct { xent *v; int n, cap; int overflow; } xlist;
 
 static void xlist_push(xlist *l, const char *name, bool isdir, uint64_t size){
     if(l->n>=l->cap){ l->overflow=1; return; }
-    /* 名字超过 255 字符：不截断、不跳过 —— 直接让整次复制失败并指出原因。
-     * 静默截断会写出"看起来成功、名字却不是原名"的文件，比失败更坏。*/
+    /* 名字长到连缓冲都放不下（≈1023 字节）：不截断、不跳过 —— 直接失败。
+     * 各文件系统自己的 255 字符上限由目标层按"字符/码元"判定
+     * （NTFS: UTF-16 码元；FAT: UTF-16 码元；宿主: 255 字节）。*/
     if(strlen(name) >= XC_NAME_MAX){ l->overflow=2; return; }
     xstrlcpy(l->v[l->n].name,name,XC_NAME_MAX);
     l->v[l->n].isdir=isdir;
@@ -595,13 +596,13 @@ static int dst_write_file(xep *d, const char *final, const img_stream *src,
         return rc;
     }
     if(d->loc.kind==IMG_XK_HOST){
-        char dir[1200]; parent_of(final,dir,sizeof dir);
+        char dir[2048]; parent_of(final,dir,sizeof dir);
         if(dir[0]){
             int rc=host_mkdir_p(dir,0755);
             if(rc!=IMG_OK) return rc;
         }
         size_t dl=strlen(final);
-        char tmp[1400];
+        char tmp[4096];
         int fd=-1;
         for(int i=0;i<64;i++){
             snprintf(tmp,sizeof tmp,"%.*s.imgtmp-%d-%d",(int)((dl<1200)?dl:1200),final,(int)getpid(),i);
@@ -686,7 +687,7 @@ static int resolve_final(xctx *c, const char *spath, const char *dpath, bool top
     if(exists && isdir) dst_is_dir=true;
 
     if(top && dst_is_dir){
-        char dir[1200]; xstrlcpy(dir,dpath,sizeof dir);
+        char dir[2048]; xstrlcpy(dir,dpath,sizeof dir);
         size_t n=strlen(dir);
         while(n>1 && dir[n-1]=='/') dir[--n]=0;
         int rc=join_path(dir,sname,final,cap);
@@ -715,7 +716,7 @@ static int apply_conflict(xctx *c, const char *final, bool *existed,
         if(*ex_is_dir){
             if(c->o->conflict==IMG_COPY_FAIL) return IMG_EEXISTS;
             if(c->o->conflict==IMG_COPY_RENAME){
-                char dir[1200], base[XC_NAME_MAX], uniq[XC_NAME_MAX];
+                char dir[2048], base[XC_NAME_MAX], uniq[XC_NAME_MAX];
                 parent_of(final,dir,sizeof dir);
                 xstrlcpy(base,base_of(final),sizeof base);
                 int rc=dst_unique_name(c->d,dir[0]?dir:"/",base,uniq,sizeof uniq);
@@ -733,7 +734,7 @@ static int apply_conflict(xctx *c, const char *final, bool *existed,
     if(*ex_is_dir) return IMG_ESTATE;         /* 目录挡住文件 */
     if(c->o->conflict==IMG_COPY_FAIL) return IMG_EEXISTS;
     if(c->o->conflict==IMG_COPY_RENAME){
-        char dir[1200], base[XC_NAME_MAX], uniq[XC_NAME_MAX];
+        char dir[2048], base[XC_NAME_MAX], uniq[XC_NAME_MAX];
         parent_of(final,dir,sizeof dir);
         xstrlcpy(base,base_of(final),sizeof base);
         int rc=dst_unique_name(c->d,dir[0]?dir:"/",base,uniq,sizeof uniq);
@@ -747,23 +748,37 @@ static int apply_conflict(xctx *c, const char *final, bool *existed,
     return IMG_OK;
 }
 
+/* 目标名字长度：NTFS/FAT 按字符（255），宿主按字节（255）。超了直接报，不截断。*/
+static size_t u8_chars(const char *s){
+    size_t n=0;
+    for(const unsigned char *p=(const unsigned char*)s; *p; p++)
+        if((*p & 0xC0) != 0x80) n++;
+    return n;
+}
+static bool name_too_long(xep *d, const char *path){
+    const char *b=base_of(path);
+    if(d->loc.kind==IMG_XK_HOST) return strlen(b) > 255;
+    return u8_chars(b) > 255;
+}
+
 static int copy_file(xctx *c, const char *spath, const char *dpath, bool top){
     img_src_meta meta; bool isdir=false;
     int rc=src_stat(c->s,spath,&isdir,&meta);
     if(rc!=IMG_OK){ c->st->side=1; return rc; }
     if(isdir) return IMG_ESTATE;
 
-    char final[1400]; bool existed=false, ed=false;
+    char final[4096]; bool existed=false, ed=false;
     rc=resolve_final(c,spath,dpath,top,final,sizeof final,&existed,&ed);
     if(rc!=IMG_OK) return rc;
-    char target[1400];
+    char target[4096];
     rc=apply_conflict(c,final,&existed,&ed,false,target,sizeof target);
     if(rc!=IMG_OK) return rc;
+    if(name_too_long(c->d,target)){ c->st->side=2; return IMG_ENAMETOOLONG; }
     /* 源和目标是同一个文件：读的同时覆盖会毁掉源。要"自己复制一份"请用 conflict=rename。*/
     if(same_volume(c->s,c->d) && path_cmp(c->s,c->d,spath,target)==0) return IMG_ESAMEFILE;
 
     if(!c->o->create_parents){
-        char par[1400]; parent_of(target,par,sizeof par);
+        char par[2048]; parent_of(target,par,sizeof par);
         bool pd=false;
         if(par[0] && !dst_exists(c->d,par,&pd)){ c->st->side=2; return IMG_ENOENT; }
     }
@@ -783,12 +798,13 @@ static int copy_file(xctx *c, const char *spath, const char *dpath, bool top){
 
 static int copy_dir(xctx *c, const char *spath, const char *dpath, int depth, bool top){
     if(depth>c->max_depth) return IMG_ESTATE;
-    char final[1400]; bool existed=false, ed=false;
+    char final[4096]; bool existed=false, ed=false;
     int rc=resolve_final(c,spath,dpath,top,final,sizeof final,&existed,&ed);
     if(rc!=IMG_OK) return rc;
-    char target[1400];
+    char target[4096];
     rc=apply_conflict(c,final,&existed,&ed,true,target,sizeof target);
     if(rc!=IMG_OK) return rc;
+    if(name_too_long(c->d,target)){ c->st->side=2; return IMG_ENAMETOOLONG; }
     /* 造环：把目录复制进它自己/它的子树 —— 会在建任何东西之前拒绝 */
     if(same_volume(c->s,c->d) && is_under(c->s,c->d,spath,target)) return IMG_ECYCLE;
 
@@ -805,7 +821,7 @@ static int copy_dir(xctx *c, const char *spath, const char *dpath, int depth, bo
     if(rc!=IMG_OK){ c->st->side=1; return rc; }
     for(int i=0;i<l.n && rc==IMG_OK;i++){
         if(l.v[i].skip){ c->st->skipped++; continue; }
-        char cs[1400], cd[1400];
+        char cs[4096], cd[4096];
         if(join_path(spath,l.v[i].name,cs,sizeof cs)!=IMG_OK ||
            join_path(target,l.v[i].name,cd,sizeof cd)!=IMG_OK){ rc=IMG_EINVAL; break; }
         if(l.v[i].isdir) rc=copy_dir(c,cs,cd,depth+1,false);

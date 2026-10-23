@@ -47,7 +47,7 @@ typedef struct {
     char      img[512];    /* qcow2 / iso / wim 路径；host 为空 */
     uint64_t  lba;         /* ntfs/fat 分区起始 LBA；0=自动 */
     int       index;       /* wim 映像索引（默认 1） */
-    char      path[1024];  /* 文件系统内绝对路径 / 宿主绝对路径 */
+    char      path[2048];  /* 文件系统内绝对路径 / 宿主绝对路径 */
 } img_xloc;
 
 typedef struct {
@@ -64,7 +64,7 @@ typedef struct {
     uint64_t dirs;
     uint64_t bytes;
     uint64_t skipped;      /* 跳过的符号链接/不支持项 */
-    char     final_path[1024];   /* 顶层落点（改名后的真实路径；给 UI 刷新用） */
+    char     final_path[2048];   /* 顶层落点（改名后的真实路径；给 UI 刷新用） */
     int      side;               /* 失败发生在哪一侧：0=复制中 / 1=源 / 2=目标 */
     char     first_error[256];
 } img_xcopy_stats;
