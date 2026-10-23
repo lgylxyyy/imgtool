@@ -215,6 +215,28 @@ $MFT $BITMAP: bit(99790)=1（该记录在用，属于 AppxBlockMap.xml）
 
 ---
 
+### 7.1 ✅ 第 3 条（ACL）本轮已修（`imgtool` 7a9ddd4）
+新建对象不再传 `securid=0`（那会触发 ntfs-3g 的 `ntfs_sd_add_everyone()`，给记录塞一条
+**内联 `$SECURITY_DESCRIPTOR` = everyone 全通**），改为把**父目录 `$SI` 偏移 52 的 SecurityID**
+原样传给 `ntfs_create()` —— 等价于 Windows 的"继承父目录 ACL"，且不再新增内联 `$SD`。
+
+真 Windows 盘副本（`w10b` → `acltest`）实测前后对照：
+
+| 对象 | SecurityID | 内联 `$SD` |
+|---|---|---|
+| `/Windows`（Windows 自建） | 260 | 无 |
+| **改之前**建的 `/ProbeDir` | 无（`$SI` 只有 48 B） | ★有（everyone 全通） |
+| **改之后**建的 `/AclNew`、`/AclNew/deep`、里面的文件 | **258 = 根目录的** | **无** |
+
+★断言的教训（我第一版就写错了）：规则**不是"永远不许有内联 `$SD`"**，而是**跟着卷自己的惯例走** ——
+`mkntfs` 快速格式化的卷 `$SI` 是 48 字节（NTFS 1.2），**连根目录都没有 SecurityID 可继承**
+（根自己都带内联 `$SD`），此时退回原行为才是对的。所以回归测的是**条件不变量**：
+`父有 sid ⇒ 子必须同 sid 且无内联 $SD；父无 sid ⇒ 保持原样`。
+
+真机（arm64）复验：多级建目录 / 改名 / 批量搬（`win.recover` 那条路）全部成功；新建对象
+`sid=None`（该卷是 1.2 格式，符合预期）；且**被 `NTFS-DIR-PHANTOM` 拒绝的那次写之后，
+整盘三方对账仍 0 违背** —— 拒绝是干净的，没留半截数据。
+
 ## 8. 跨父目录搬移的解禁条件（下一步）
 
 1. 选一张**独立裁判 0 违背**的 Windows 盘（`tools/ntfs-inventory.py` 先跑一遍）；
