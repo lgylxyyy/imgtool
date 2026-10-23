@@ -269,3 +269,20 @@ $MFT $BITMAP: bit(99790)=1（该记录在用，属于 AppxBlockMap.xml）
 3. `cd C:\MovedByTool\LogFiles` 进得去、`dir /ad` 里 8 个子项一个不少；
 4. `chkdsk C: /scan` **不得出现** `unindexed files` / `found.000` / `Index entry`。
    全过 ⇒ 去掉默认锁（把 `allow_dir_move` 默认值翻成 true）并复核 `ntfs.rename`（`win.recover` 那条）。
+
+### 8.2 ✅ 解禁完成（2026-10-23，依据用户真 Windows TXT）
+
+用户在 Vectras 的 Win10 X-Lite（卷号 **2236-A3D9**）上跑 T1b，桌面 TXT 记录：
+
+```
+dir C:\MovedByTool          → 列出 LogFiles(01/09/2024 02:08 PM) 与 Temp
+cd C:\MovedByTool\LogFiles  → 进得去
+dir /ad                       → 8 个子项一个不少
+chkdsk C: /scan               → 0 unindexed files scanned
+                                0 unindexed files recovered to lost and found
+                                Windows has scanned the file system and found no problems.
+```
+
+⇒ 与上轮"1 unindexed files recovered to found.000"形成对照，**证明跨父搬目录本身无害**，
+上轮的真凶确系幽灵目录。政策：`allow_dir_move` 默认 **true**；额外加"禁止搬进自己子树"
+（`NTFS-MOVE-INTO-SELF`）并在建目录前拦截，保证拒绝零副作用。
