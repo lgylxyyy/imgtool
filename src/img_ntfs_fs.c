@@ -221,6 +221,196 @@ int img_ntfs_file_size(img_ntfs_fs *fs, const char *abs_path, uint64_t *out_size
 
 /* ---------- 递归建目录 ----------
  * 逐级：已有 → 下钻；没有 → 原地创建（S_IFDIR）。每级只前进一次。 */
+static int split_abs(const char *abs,char *dir,size_t dcap,char *name,size_t ncap);   /* 定义在后 */
+
+/* ---------- 前缀工具：取 abs_path 前 idx+1 级（含）组成新路径 ---------- */
+/* ★★★ 写后自证：目录必须"从盘上重新开出来"验明正身（2026-10-23 加的硬闸）★★★
+ * 事故复盘（完整取证见 docs/NTFS移动改名-规范与实现对照.md）：
+ *   真 Windows 盘上 C:\MovedByTool 被 chkdsk 判成
+ *   "1 unindexed files recovered to lost and found / Found missing Index entry
+ *    for file ...\LogFiles <0x1,0x114a>"。
+ *   独立解析器读原始字节查明：根索引写着 MovedByTool → ino 99790，而 99790 号记录
+ *   其实是【别人的文件】AppxBlockMap.xml（flags 无目录位），$MFT 的 $BITMAP 也说 99790 在用，
+ *   并且全 $MFT 里搜不到任何名为 MovedByTool 的 $FILE_NAME ——
+ *   即 ntfs_create() 只把【父索引项】落盘，被建目录自己的记录从未落盘；
+ *   工具却靠"名字能在索引里读到"报了成功，后续写入全挂在一个不存在的父上。
+ * ⇒ 教训一句话：【索引里有名字 ≠ 目录存在】。
+ * 因此每条新建的目录都要重新按 ino 打开记录，四条全过才算成功：
+ *   ① 父索引里能按名字查到引用；② 该 ino 的记录能打开；③ 记录带目录标志；
+ *   ④ 记录的 $FILE_NAME 里存在"同名且父引用指回这个父"的一条。
+ * 返回 IMG_OK / IMG_ENOENT（压根没落盘）/ IMG_ECORRUPT（幽灵目录、记录被占、名字不指回）*/
+static int verify_dir_on_disk(img_ntfs_fs *fs, const char *abs_path, ntfs_inode *par_hint){
+    if(!fs || !fs->vol || !fs->mounted || !abs_path) return IMG_EINVAL;
+    if(!strcmp(abs_path,"/")) return IMG_OK;                 /* 根目录由卷结构自己保证 */
+    char pdir[512], nm[256];
+    if(split_abs((char*)abs_path,pdir,sizeof pdir,nm,sizeof nm)!=0) return IMG_EINVAL;
+
+    ntfs_inode *par = par_hint;
+    bool par_ours = false;
+    if(!par){ par = lookup(fs->vol,pdir,NULL); par_ours = true; }
+    if(!par) return IMG_ENOENT;                              /* 连父都不在：没落盘 */
+
+    ntfschar *u=NULL; size_t ul=0;
+    if(!to_ntfs(nm,&u,&ul)){ if(par_ours) ntfs_inode_close(par); return IMG_EINVAL; }
+    errno=0;
+    MFT_REF ref = ntfs_inode_lookup_by_name(par,u,ul);
+    int lerr = mftref_ok(ref)?0:(errno?errno:ENOENT);
+
+    bool opened=false, isdir=false, backlink=false;
+    u64 ino = mftref_ok(ref)? (u64)(ref & MFT_REF_MASK_CPU) : 0;
+    ntfs_inode *ni = mftref_ok(ref)? ntfs_inode_open(fs->vol,ref) : NULL;
+    if(ni){
+        opened=true;
+        isdir = (ni->mrec->flags & MFT_RECORD_IS_DIRECTORY)!=0;
+        ntfs_attr_search_ctx *ctx = ntfs_attr_get_search_ctx(ni,NULL);
+        if(ctx){
+            while(ntfs_attr_lookup(AT_FILE_NAME,AT_UNNAMED,0,CASE_SENSITIVE,0,NULL,0,ctx)==0){
+                FILE_NAME_ATTR *fn=(FILE_NAME_ATTR*)((u8*)ctx->attr+le16_to_cpu(ctx->attr->value_offset));
+                if(MREF_LE(fn->parent_directory)!=par->mft_no) continue;   /* 别的父的硬链接 */
+                if(fn->file_name_length!=(u16)ul) continue;
+                if(memcmp(fn->file_name,u,ul*sizeof(ntfschar))==0){ backlink=true; break; }
+            }
+            ntfs_attr_put_search_ctx(ctx);
+        }
+        ntfs_inode_close(ni);            /* 关闭失败不改变已确认的事实（记录已读过）*/
+        ni=NULL;
+    }
+    free(u);
+    if(par_ours) ntfs_inode_close(par);
+
+    if(!mftref_ok(ref)){
+        img_ev ev;
+        if(img_ev_init(&ev,IMG_LV_ERROR,"ntfs","dir_verify_no_index",
+                       lerr==ENOENT?IMG_ENOENT:IMG_ECORRUPT,"刚建的目录在父索引里查不到")){
+            img_ev_str(&ev,"path",abs_path); img_ev_str(&ev,"parent",pdir);
+            img_ev_errno(&ev,lerr); img_ev_emit(&ev);
+        }
+        return lerr==ENOENT?IMG_ENOENT:IMG_ECORRUPT;
+    }
+    if(!opened || !isdir || !backlink){
+        img_ev ev;
+        if(img_ev_init(&ev,IMG_LV_ERROR,"ntfs","dir_verify_phantom",IMG_ECORRUPT,
+                       !opened ? "索引项指向的 MFT 记录打不开（盘上没这条记录）"
+                     : !isdir  ? "索引项指向的 MFT 记录不是目录：幽灵目录，ntfs_create 没把记录落盘"
+                               : "目录记录在，但没有同名且指回该父的 $FILE_NAME（记录被别的对象占用/写串）")){
+            img_ev_str(&ev,"path",abs_path); img_ev_str(&ev,"parent",pdir);
+            img_ev_u64(&ev,"ino",ino); img_ev_u64(&ev,"opened",opened?1u:0u);
+            img_ev_u64(&ev,"is_dir",isdir?1u:0u); img_ev_u64(&ev,"backlink",backlink?1u:0u);
+            img_ev_emit(&ev);
+        }
+        return IMG_ECORRUPT;
+    }
+    return IMG_OK;
+}
+
+int img_ntfs_verify_dir(img_ntfs_fs *fs, const char *abs_path){
+    return verify_dir_on_disk(fs,abs_path,NULL);
+}
+
+/* 从盘上按路径重新解析出 ino/是否目录（不看任何内存里的旧对象）。
+ * 返回 IMG_OK / IMG_ENOENT。这是"写完必须重开验"里最便宜的一步。*/
+static int path_ino(img_ntfs_fs *fs, const char *abs_path, u64 *ino_out, bool *isdir_out){
+    if(!fs||!fs->vol||!abs_path) return IMG_EINVAL;
+    ntfs_inode *ni = lookup(fs->vol, abs_path, NULL);
+    if(!ni) return IMG_ENOENT;
+    if(ino_out)  *ino_out  = ni->mft_no;
+    if(isdir_out)*isdir_out = (ni->mrec->flags & MFT_RECORD_IS_DIRECTORY)!=0;
+    ntfs_inode_close(ni);
+    return IMG_OK;
+}
+
+/* 搬移/改名之后的自证：新位置必须查得到（且目录仍是目录、ino 就是原来那条记录），
+ * 旧位置必须查不到。任一不满足 ⇒ IMG_ECORRUPT（卷已不一致，别继续写）。
+ * C:\MovedByTool 那次事故里，这一步就会当场把"父目录是幽灵"抓出来。*/
+static int verify_move_result(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs,
+                              u64 want_ino, bool want_dir){
+    u64 ino=0; bool isdir=false;
+    int r = path_ino(fs,dst_abs,&ino,&isdir);
+    if(r!=IMG_OK){
+        img_ev ev;
+        if(img_ev_init(&ev,IMG_LV_ERROR,"ntfs","move_verify_dst",IMG_ECORRUPT,
+                       "搬完从盘上查：新位置读不出来（父目录可能是幽灵，或索引项没落盘）")){
+            img_ev_str(&ev,"src",src_abs); img_ev_str(&ev,"dst",dst_abs);
+            img_ev_u64(&ev,"want_ino",want_ino); img_ev_emit(&ev);
+        }
+        return IMG_ECORRUPT;
+    }
+    if(ino != want_ino){
+        img_ev ev;
+        if(img_ev_init(&ev,IMG_LV_ERROR,"ntfs","move_verify_ino",IMG_ECORRUPT,
+                       "搬完从盘上查：新位置指向的记录不是原来那条")){
+            img_ev_str(&ev,"src",src_abs); img_ev_str(&ev,"dst",dst_abs);
+            img_ev_u64(&ev,"want_ino",want_ino); img_ev_u64(&ev,"got_ino",ino); img_ev_emit(&ev);
+        }
+        return IMG_ECORRUPT;
+    }
+    if(want_dir && !isdir){
+        img_ev ev;
+        if(img_ev_init(&ev,IMG_LV_ERROR,"ntfs","move_verify_notdir",IMG_ECORRUPT,
+                       "搬完从盘上查：新位置读出来不是目录（父或自身记录被别的对象占用）")){
+            img_ev_str(&ev,"dst",dst_abs); img_ev_u64(&ev,"ino",ino); img_ev_emit(&ev);
+        }
+        return IMG_ECORRUPT;
+    }
+    /* ④ ★ 硬判（[MS-FSA] §2.1.4.19 + on-disk 双份互证）：被搬对象的 MFT 记录里，
+     *    必须有一条 $FILE_NAME 的父引用指到【新父】。这才是 chkdsk Stage2 的判据，
+     *    也正是 C:\MovedByTool 事故里断掉的那一环。
+     *    读的是子记录本身（不是父索引快照），不受 ntfs-3g 索引缓存影响。*/
+    char ddir[512], dnm[256];
+    if(split_abs((char*)dst_abs,ddir,sizeof ddir,dnm,sizeof dnm)==0){
+        u64 dpino=0; bool dirdummy=false;
+        if(path_ino(fs,ddir,&dpino,&dirdummy)==IMG_OK){
+            ntfs_inode *cn=ntfs_inode_open(fs->vol, ino);
+            bool has=false;
+            if(cn){
+                ntfs_attr_search_ctx *ctx=ntfs_attr_get_search_ctx(cn,NULL);
+                if(ctx){
+                    while(ntfs_attr_lookup(AT_FILE_NAME,AT_UNNAMED,0,CASE_SENSITIVE,0,NULL,0,ctx)==0){
+                        FILE_NAME_ATTR *fn=(FILE_NAME_ATTR*)((u8*)ctx->attr+le16_to_cpu(ctx->attr->value_offset));
+                        if(MREF_LE(fn->parent_directory)==dpino){ has=true; break; }
+                    }
+                    ntfs_attr_put_search_ctx(ctx);
+                }
+                ntfs_inode_close(cn);
+            }
+            if(!has){
+                img_ev ev;
+                if(img_ev_init(&ev,IMG_LV_ERROR,"ntfs","move_verify_backlink",IMG_ECORRUPT,
+                               "搬完从盘上查：被搬对象的 $FILE_NAME 里没有指到新父的项（父引用没落盘/写串）")){
+                    img_ev_str(&ev,"src",src_abs); img_ev_str(&ev,"dst",dst_abs);
+                    img_ev_u64(&ev,"ino",ino); img_ev_u64(&ev,"want_parent",dpino); img_ev_emit(&ev);
+                }
+                return IMG_ECORRUPT;
+            }
+        }
+    }
+    /* ⑤ 旧位置应消失 —— ★只作告警，不能当硬判，两个实测踩出来的原因：
+     *   a) NTFS 路径大小写不敏感 ⇒ 纯改大小写的改名（b.txt→B.TXT）之后，按旧写法
+     *      仍会命中【新】那条项，看着像"旧位置还在"；
+     *   b) libntfs-3g 把 close 掉的 inode 连同【索引快照】放进 NIDATA 缓存，再 open
+     *      同一 MFT 号可能拿回旧快照 ⇒ 已删的旧项在缓存里还"在"。
+     *   拿它当硬失败会把好盘报成坏盘（今天跑测试就是这样撞出来的）。*/
+    u64 sink=0; bool sdir=false;
+    if(path_ino(fs,src_abs,&sink,&sdir)==IMG_OK && sink==want_ino){
+        img_ev ev;
+        if(img_ev_init(&ev,IMG_LV_WARN,"ntfs","move_verify_src_left",IMG_OK,
+                       "旧位置仍查到同一条记录（多半是大小写命中或 ntfs-3g 索引缓存，非致命）")){
+            img_ev_str(&ev,"src",src_abs); img_ev_str(&ev,"dst",dst_abs);
+            img_ev_u64(&ev,"src_ino",sink); img_ev_emit(&ev);
+        }
+    }
+    return IMG_OK;
+}
+
+int img_ntfs_verify_path(img_ntfs_fs *fs, const char *abs_path,
+                         uint64_t *ino_out, bool *isdir_out){
+    u64 ino=0; bool isdir=false;
+    int r = path_ino(fs,abs_path,&ino,&isdir);
+    if(ino_out)  *ino_out  = (uint64_t)ino;
+    if(isdir_out)*isdir_out = isdir;
+    return r;
+}
+
 int img_ntfs_mkdir_p(img_ntfs_fs *fs, const char *abs_path){
     if(!fs||!fs->vol||!abs_path) return IMG_EINVAL;
     ntfs_inode *cur = ntfs_inode_open(fs->vol, FILE_root);
@@ -249,6 +439,21 @@ int img_ntfs_mkdir_p(img_ntfs_fs *fs, const char *abs_path){
         }
         if(mftref_ok(ref)){
             next = ntfs_inode_open(fs->vol, ref);
+            /* ★ 已存在的那一级必须【真的是目录】。
+             *   以前这里不判，于是 /某文件/子/... 这种路径会在下一步"往文件里查子项"
+             *   时报一个含义不明的 EIO；而 C:\MovedByTool 那种"索引项指向文件记录"
+             *   的幽灵父，正是在这一步就该被抓住（读的是刚 open 出来的盘上记录）。*/
+            if(next && !(next->mrec->flags & MFT_RECORD_IS_DIRECTORY)){
+                ntfs_inode *bad=next; ntfs_inode_close(bad);
+                free(u); ntfs_inode_close(cur);
+                img_ev ev;
+                if(img_ev_init(&ev,IMG_LV_ERROR,"ntfs","mkdir_path_is_file",IMG_ECORRUPT,
+                               "路径中间那一级不是目录（索引项指向的是文件记录或幽灵目录）")){
+                    img_ev_str(&ev,"path",abs_path); img_ev_str(&ev,"component",comp);
+                    img_ev_u64(&ev,"ino",(u64)(ref & MFT_REF_MASK_CPU)); img_ev_emit(&ev);
+                }
+                return IMG_ECORRUPT;
+            }
         } else {
             /* securid=0 → ntfs-3g 用卷默认继承的安全描述符 */
             next = ntfs_create(cur, 0, u, (u8)ul, S_IFDIR);
@@ -268,7 +473,11 @@ int img_ntfs_mkdir_p(img_ntfs_fs *fs, const char *abs_path){
         idx++;
     }
     ntfs_inode_close(cur);
-    return IMG_OK;
+    /* ★★ 写后自证（防"幽灵目录"）★★
+     * 必须放在这里 —— 循环里父目录的索引项还只在【内存】里，ntfs_inode_close(cur)
+     * 才把它落盘；提前从盘上查重当然查不到（第一版就踩了这个坑）。
+     * 末一级验通 ⇒ 一路上每一级都必然真实存在（否则走不到末级）。*/
+    return verify_dir_on_disk(fs, abs_path, NULL);
 }
 
 /* ---------- 读文件 ---------- */
@@ -728,6 +937,8 @@ int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
             continue;
         }
 
+        bool was_dir = (ni->mrec->flags & MFT_RECORD_IS_DIRECTORY)!=0;
+        u64  moved_ino = (u64)(ref & MFT_REF_MASK_CPU);
         int lr=ntfs_link(ni,dst,u,(u8)ul);                 /* ① 目标目录加同名链接（内存）*/
         int err=0;
         if(lr==0 && ntfs_inode_sync(dst)!=0){              /* ② ★ 落盘（本次事故的根因）*/
@@ -739,7 +950,18 @@ int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
             errno=0;
             int dr=ntfs_delete(fs->vol, path, ni, root, u, (u8)ul); /* ③ 消费 ni+root */
             ni=NULL; root=NULL;
-            if(dr==0){ moved++; if(!dst_is_root) ntfs_inode_close(dst); free(u); continue; }
+            if(dr==0){
+                moved++;
+                if(!dst_is_root) ntfs_inode_close(dst);
+                free(u);
+                /* ★ 写后自证：新位置查得到且是原记录、旧位置查不到。
+                 *   验不过就【立刻收手】—— 卷已经不一致，继续搬只会越描越黑。*/
+                char done[600]; snprintf(done,sizeof done,"%s/%s", dst_dir, nm);
+                char from[600]; snprintf(from,sizeof from,"/%s", nm);
+                int vr=verify_move_result(fs, from, done, moved_ino, was_dir);
+                if(vr!=IMG_OK) return vr;
+                continue;
+            }
             err=errno?errno:EIO;
             /* ④ 回滚：把目标目录里多出来的同名链接删掉（fresh opens，它也会被消费）*/
             char dp[600]; snprintf(dp,sizeof dp,"%s/%s", dst_dir, nm);
@@ -1058,7 +1280,17 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,b
      * 文件不受影响（文件没有父引用这回事）。
      * 两条硬规矩：① 不许把目录搬进它自己的子树（会造出环，Windows 直接懵）；
      *             ② 目标已存在且是目录 → 依旧拒绝（IMG_ESTATE）。*/
-    /* ★★ 跨父目录搬移：收回（2026-10-23 真 Windows 实测判负）★★
+    /* ★★ 跨父目录搬移：暂时仍锁（判负证据已作废，改判为"另有元凶"）★★
+     * 【更正】上轮在这里写的"真 Windows 实测判负"结论**站不住**：
+     *   独立解析器读原始字节查明，那次 found.000 的元凶不是"搬目录"这个动作，
+     *   而是【目标父目录 /MovedByTool 是幽灵】—— 根索引写着它 → ino 99790，
+     *   而 99790 号记录实际是别人的文件 AppxBlockMap.xml，$MFT 里根本没有
+     *   名为 MovedByTool 的 $FILE_NAME。索引项指向不存在的父 ⇒ 任何挂在它下面的
+     *   东西（不管是不是搬来的）都会被 chkdsk 当孤儿。详见
+     *   docs/NTFS移动改名-规范与实现对照.md（含 [MS-FSA] §2.1.5.15.12 逐条对照）。
+     *   干净盘上的受控复现（imgtool 建目录 + 跨父搬目录）三方对账 0 违背。
+     * ⇒ 锁仍留着，但留着的是"证据不足"而不是"已知有害"；解禁条件：
+     *   在一张【体检干净】的盘上做一次跨父搬移，真 Windows 能进能列、chkdsk 无怨。
      * 用户在 Vectras 的 Win10 X-Lite（卷标 "Windows X-Lite"、卷号 2B00-726F）上跑：
      *   cd C:\MovedByTool\LogFiles      → "The system cannot find the path specified."
      *   chkdsk C: /scan                  → "1 unindexed files recovered to lost and found.
@@ -1185,6 +1417,7 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,b
     errno=0;
     int dr=ntfs_delete(fs->vol,src_abs,ni,spar,su,(u8)sul);
     ni=NULL; spar=NULL;
+    u64 moved_ino = (u64)(sref & MFT_REF_MASK_CPU);
     free(du);
     if(dr!=0){
         int e=errno;
@@ -1197,7 +1430,9 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,b
         return (e==ENOENT)?IMG_ENOENT:IMG_EIO;
     }
     free(su);
-    return IMG_OK;
+    /* ④ ★ 写后自证：新位置查得到、记录就是原来那条、旧位置查不到。
+     *    没这一步的话，"父目录是幽灵"会一路报成功（2026-10-23 真盘事故）。*/
+    return verify_move_result(fs, src_abs, dst_abs, moved_ino, isdir);
 }
 
 /* 卷是否被标脏。用【只读】挂载 —— 脏卷本身能只读挂上，我们要读的就是它的 flags。

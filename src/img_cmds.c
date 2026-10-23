@@ -740,7 +740,15 @@ static int cmd_ntfs_rename(img_ctx *ctx, const img_args *in, img_result *out){
     int moved=0;
     rc=img_ntfs_move_into(fs,final,list,nn,&moved);
     img_ntfs_umount(fs);
-    if(rc!=IMG_OK){ img_result_fail(out,rc,"FAT-RM-FAIL",final,"搬移失败（名字不存在/只读/卷损坏）",NULL); return rc; }
+    if(rc!=IMG_OK){
+        const char *code = (rc==IMG_ECORRUPT)?"NTFS-DIR-PHANTOM"
+                         : (rc==IMG_ENOENT)?"NTFS-PATH-NOTFOUND"
+                         : (rc==IMG_ENOTSUP)?"NTFS-SRC-IS-DIR":"NTFS-MOVE-FAIL";
+        img_result_fail(out,rc,code,final,
+            rc==IMG_ECORRUPT?"搬完从盘上复查没过：目录或名字没真落盘（卷已不一致，停止继续写）":
+                             "搬移失败（名字不存在/只读/卷损坏）",
+            rc==IMG_ECORRUPT?"立刻停止写这张盘；换备份镜像；用 tools/ntfs-inventory.py 或 chkdsk /scan 定位":NULL);
+        return rc; }
     img_result_u64(out,"moved",(uint64_t)moved);
     img_result_u64(out,"requested",(uint64_t)nn);
     img_result_str(out,"dir_used",final);
@@ -946,7 +954,8 @@ static int cmd_winre_auto(img_ctx *ctx, const img_args *in, img_result *out){
         if(img_ntfs_path_exists(fs,path)){
             rc=img_ntfs_rm(fs,path);
             if(rc){ img_ntfs_umount(fs);
-                    img_result_fail(out,rc,"FAT-RM-FAIL",path,"删除脚本失败",NULL); return rc; }
+                    img_result_fail(out,rc,rc==IMG_ECORRUPT?"NTFS-DIR-PHANTOM":"NTFS-RM-FAIL",
+                                    path,"删除脚本失败",NULL); return rc; }
         }
         img_result_bool(out,"removed",true);
     }
@@ -1648,7 +1657,9 @@ static int cmd_ntfs_put(img_ctx *ctx, const img_args *in, img_result *out){
     rc=img_ntfs_put_file(fs,src,dst,img_cmd_prog());
     img_span_end(&sp,rc);
     img_ntfs_umount(fs);
-    if(rc){ img_result_fail(out,rc,"FAT-PUT-FAIL",dst,"写入失败（空间/只读/路径）",NULL); return rc; }
+    if(rc){ img_result_fail(out,rc,rc==IMG_ECORRUPT?"NTFS-DIR-PHANTOM":"FAT-PUT-FAIL",dst,
+                rc==IMG_ECORRUPT?"建父目录后从盘上复查没过（幽灵目录：记录没落盘）":"写入失败（空间/只读/路径）",
+                rc==IMG_ECORRUPT?"停止继续写这张盘；换备份；跑 tools/ntfs-inventory.py 体检":NULL); return rc; }
     img_result_str(out,"path",dst);
     img_result_u64(out,"written_bytes",(uint64_t)st.st_size);
     return IMG_OK;
@@ -2880,6 +2891,7 @@ static const char *ntfs_move_code(int rc){
         case IMG_ENOTSUP:  return "NTFS-SRC-IS-DIR";   /* 目录跨父搬移：真 Windows 实测判负，已收回（见 move_path 里的 chkdsk 证据）*/
         case IMG_ESTATE:   return "NTFS-DEST-IS-DIR";  /* 目标是目录：不许拿文件顶掉它 */
         case IMG_EFULL:    return "FAT-ENOSPC";
+        case IMG_ECORRUPT: return "NTFS-DIR-PHANTOM";  /* 写后自证没过：目录/名字没真落盘 */
         case IMG_EINVAL:   return "CMD-ARG-BAD";
         default:           return "NTFS-MOVE-FAIL";
     }

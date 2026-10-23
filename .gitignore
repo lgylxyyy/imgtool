@@ -34,3 +34,5 @@ tools/imgtest_progress
 *~
 imgtool-dev
 build-*/
+__pycache__/
+*.pyc

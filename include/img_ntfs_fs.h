@@ -16,6 +16,7 @@
 #include "img_qcow2.h"
 #include "img_progress.h"
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -119,4 +120,14 @@ int img_ntfs_precheck(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
 #ifdef __cplusplus
 }
 #endif
+
+/* 写后自证（2026-10-23 加，防"幽灵目录/幽灵项"）：
+ * img_ntfs_verify_dir(abs)  —— 这个目录必须【从盘上】查得到，且它的 MFT 记录真的是目录，
+ *                              且记录里有一条"同名 + 父引用指回上一层"的 $FILE_NAME。
+ * img_ntfs_verify_path(abs) —— 从盘上按路径重新解析 ino/是否目录（只读，不改任何东西）。
+ * 两者失败都返回 IMG_ECORRUPT/IMG_ENOENT，绝不"看起来成功"。 */
+int img_ntfs_verify_dir (img_ntfs_fs *fs, const char *abs_path);
+int img_ntfs_verify_path(img_ntfs_fs *fs, const char *abs_path,
+                         uint64_t *ino_out, bool *isdir_out);
+
 #endif
