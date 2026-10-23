@@ -136,6 +136,46 @@ check('往【文件】下面建目录 → NTFS-DIR-PHANTOM',
       code(put('/file.txt/sub/z.txt', b'Z' * 10)) == 'NTFS-DIR-PHANTOM')
 
 subprocess.run(['qemu-img', 'convert', '-O', 'raw', IMG, RAW], check=True)
+
+# ── 权限模型（2026-10-23 的 §7 真问题）──────────────────────────────
+# 规则不是"永远不许有内联 $SD"，而是【跟着卷自己的惯例走】：
+#   · 父目录 $SI 带 SecurityID（NTFS 3.0 卷，真 Windows 盘都是这种）
+#       ⇒ 新建对象必须继承同一个 sid，且【不再新增内联 $SD】（= Windows/wimlib 的做法）
+#   · 父目录 $SI 只有 48 字节（NTFS 1.2，我们 mkntfs 快速格式化的卷就是这样，
+#     连根目录自己都带内联 $SD）⇒ 无从继承，保持 ntfs-3g 原行为，不算违背。
+# 真 Windows 盘上的效果已实测（docs/NTFS移动改名-规范与实现对照.md §7 与
+# HANDOFF §1.20）：新建 /AclNew 与其子目录、文件全部 sid=258（=根目录）、无内联 $SD。
+_nt = invlib.Ntfs(RAW, LBA)
+
+
+def _si(ino):
+    ats, _r = _nt.attrs(ino)
+    return [x for x in ats if x['type'] == 0x10][0]['val']
+
+
+def _sid(ino):
+    v = _si(ino)
+    return struct.unpack_from('<I', v, 52)[0] if len(v) >= 56 else None
+
+
+def _inline_sd(ino):
+    return any(a['type'] == 0x50 for a in _nt.attrs(ino)[0])
+
+
+check('根目录 $SI 有 SecurityID（NTFS 3.0 卷）⇒ 才需要验继承' if _sid(5) is not None
+      else '本卷 $SI 是 48 字节（NTFS 1.2）⇒ 继承无从谈起，只验不崩',
+      True)
+if _sid(5) is not None:
+    for pth, par in (('/vdir', '/'), ('/vdir/sub', '/vdir'), ('/vdir/sub/f.txt', '/vdir/sub')):
+        i = _nt.resolve(pth)
+        check('  %s：继承父 sid=%s 且不新增内联 $SD' % (pth, _sid(_nt.resolve(par))),
+              i is not None and _sid(i) == _sid(_nt.resolve(par)) and not _inline_sd(i),
+              'sid=%s inline_sd=%s' % (_sid(i) if i else None, _inline_sd(i) if i else None))
+else:
+    for pth in ('/vdir', '/vdir/sub', '/vdir/sub/f.txt'):
+        i = _nt.resolve(pth)
+        check('  %s：NTFS 1.2 卷保持原行为（可建可读写）' % pth, i is not None and _inline_sd(i))
+
 rc, out = inventory(RAW, LBA)
 check('★正常流程后独立裁判必须 0 违背（退出码 0）', rc == 0, out[-500:])
 check('  裁判确实扫到了（报告里有目录数）', '目录数=' in out, out[:200])

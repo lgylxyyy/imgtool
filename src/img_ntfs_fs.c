@@ -411,6 +411,38 @@ int img_ntfs_verify_path(img_ntfs_fs *fs, const char *abs_path,
     return r;
 }
 
+/* ---------- 权限：继承父目录的 SecurityID（别再塞 everyone 内联 ACL）----------
+ * 实测差异（docs/NTFS移动改名-规范与实现对照.md §7）：
+ *   Windows / wimlib 建的对象 → $SI 里带 SecurityID，ACL 走 $Secure:$SDS 的共享条目；
+ *   imgtool 建的对象          → ntfs-3g 在 securid=0 时走 ntfs_sd_add_everyone()，
+ *                              给记录加一条【内联 $SECURITY_DESCRIPTOR = 人人全通】。
+ *   ⇒ win.recover 造出来的 Windows.old 这类目录会变成"人人可写"，权限和系统原生不一样。
+ * 做法：新建对象时把【父目录 $SI 的 SecurityID】原样传给 ntfs_create()，
+ *       这正是 Windows 的"继承父目录 ACL"，也不再新增内联 $SD。
+ * 取不到（卷没有 $Secure、或父 $SI 短得读不到该字段）就返回 0 ⇒ 维持原行为，绝不因
+ * 权限这一步失败而中断写盘。                                                   */
+static u32 inherit_securid(ntfs_inode *dir){
+    if(!dir) return 0;
+    ntfs_attr_search_ctx *ctx = ntfs_attr_get_search_ctx(dir, NULL);
+    if(!ctx) return 0;
+    u32 id = 0;
+    if(ntfs_attr_lookup(AT_STANDARD_INFORMATION, AT_UNNAMED, 0, CASE_SENSITIVE,
+                        0, NULL, 0, ctx) == 0){
+        ATTR_RECORD *a = ctx->attr;
+        if(a->non_resident == 0){
+            /* NTFS 3.0 的 $SI 长 72 字节，security_id 在偏移 52；
+             * NTFS 1.2 的老卷只有 48 字节 ⇒ 没有这两个字段，返回 0 走老路。 */
+            u32 vlen = le32_to_cpu(a->value_length);
+            if(vlen >= 56){
+                u8 *v = (u8*)a + le16_to_cpu(a->value_offset);
+                id = *(const le32*)(v + 52);
+            }
+        }
+    }
+    ntfs_attr_put_search_ctx(ctx);
+    return le32_to_cpu(id);
+}
+
 int img_ntfs_mkdir_p(img_ntfs_fs *fs, const char *abs_path){
     if(!fs||!fs->vol||!abs_path) return IMG_EINVAL;
     ntfs_inode *cur = ntfs_inode_open(fs->vol, FILE_root);
@@ -456,7 +488,8 @@ int img_ntfs_mkdir_p(img_ntfs_fs *fs, const char *abs_path){
             }
         } else {
             /* securid=0 → ntfs-3g 用卷默认继承的安全描述符 */
-            next = ntfs_create(cur, 0, u, (u8)ul, S_IFDIR);
+            /* securid=继承父目录 ⇒ 引用 $Secure:$SDS；取不到才退回 ntfs-3g 的老路 */
+            next = ntfs_create(cur, inherit_securid(cur), u, (u8)ul, S_IFDIR);
             if(getenv("IMG_NTFS_FS_DEBUG"))
                 fprintf(stderr,"  [dbg]   ntfs_create → %p errno=%d (%s)\n",
                         (void*)next, errno, strerror(errno));
@@ -571,7 +604,7 @@ int img_ntfs_put_file_mem(img_ntfs_fs *fs, const void *data, size_t len,
     ntfs_inode *file;
     if(lerr!=0 && lerr!=ENOENT){ free(uname); ntfs_inode_close(dir); return IMG_EIO; }
     if(mftref_ok(ref)) file = ntfs_inode_open(fs->vol, ref);
-    else               file = ntfs_create(dir, 0, uname, (u8)ulen, S_IFREG);
+    else               file = ntfs_create(dir, inherit_securid(dir), uname, (u8)ulen, S_IFREG);
     free(uname);
     ntfs_inode_close(dir);
     if(!file) return IMG_EIO;
@@ -635,7 +668,7 @@ int img_ntfs_put_file(img_ntfs_fs *fs, const char *local_path,
     if(mftref_ok(ref)){
         file = ntfs_inode_open(fs->vol, ref);
     } else {
-        file = ntfs_create(dir, 0, u, (u8)ul, S_IFREG);
+        file = ntfs_create(dir, inherit_securid(dir), u, (u8)ul, S_IFREG);
     }
     free(u);
     ntfs_inode_close(dir);
