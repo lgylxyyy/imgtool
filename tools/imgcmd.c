@@ -361,7 +361,10 @@ int main(int argc, char **argv){
             if(!isbool){ fprintf(stderr,"参数 %s 缺少 =值（例如 --lba=2048）\n",a); img_args_free(args); return 2; }
             val="true";
         }
-        img_args_set(args,key,val);
+        if(img_args_set(args,key,val)!=IMG_OK){
+            fprintf(stderr,"参数 %s 过长（单个值上限 2047 字节）或名称非法\n",key);
+            img_args_free(args); return 2;
+        }
     }
 
     if(list){ static char buf[96*1024]; if(img_cmd_list_json(buf,sizeof buf)>0) fputs(buf,stdout);
