@@ -1,0 +1,2 @@
+32b233afb2a8b4c517003796d435358dcad78e421a3ed386b8ee275a6957dbd0  reference/esp/BOOTX64.EFI
+32b233afb2a8b4c517003796d435358dcad78e421a3ed386b8ee275a6957dbd0  reference/esp/bootmgfw.efi
