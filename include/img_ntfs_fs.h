@@ -165,5 +165,9 @@ int img_ntfs_copy(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs,
 int img_ntfs_verify_dir (img_ntfs_fs *fs, const char *abs_path);
 int img_ntfs_verify_path(img_ntfs_fs *fs, const char *abs_path,
                          uint64_t *ino_out, bool *isdir_out);
+/* 读 $SI 四个时间（unix 秒 UTC）：out = [create, modify, access, mft_change] */
+int img_ntfs_file_times(img_ntfs_fs *fs, const char *abs_path, uint64_t out[4]);
+/* 按 unix 秒设置 $SI 四时间（in=[create,modify,access,mft_change]；0=该项不动） */
+int img_ntfs_set_times(img_ntfs_fs *fs, const char *abs_path, const uint64_t in[4]);
 
 #endif

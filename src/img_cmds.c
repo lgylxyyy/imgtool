@@ -169,6 +169,8 @@ static const img_arg A_FATPUT[] = {
      *   查不到时允许 App 把宿主剩余传进来（拿 fd 查不到的云端提供者就是此类情况）。*/
     {"host_free", IMG_A_U64,  false, NULL, "宿主剩余可用字节（一般不用传，工具自己查；查不到时才传）", NULL},
     {"reserve",   IMG_A_BOOL, false, "false","写前用 fallocate 真预留宿主空间（立即占用，保证不会中途 ENOSPC）", NULL},
+    {"preserve_times", IMG_A_BOOL, false, "false",
+     "保留【宿主文件】的修改/访问时间（FAT 精度 2 秒）", NULL},
 };
 static int cmd_fat_put(img_ctx *ctx, const img_args *in, img_result *out){
     uint64_t lba=img_args_u64(in,"lba",0);
@@ -254,6 +256,13 @@ static int cmd_fat_put(img_ctx *ctx, const img_args *in, img_result *out){
 
     long long t0=now_ms_();
     int rc=img_fat32_put_file(fs,src,dst,img_cmd_prog());
+    if(rc==IMG_OK && img_args_bool(in,"preserve_times",false)){
+        struct stat st2; if(stat(src,&st2)==0){
+            uint16_t tm=0,dt=0; img_fat32_epoch_to_dos((int64_t)st2.st_mtime,&tm,&dt);
+            uint16_t t5[5]={tm,dt,dt,tm,dt};
+            (void)img_fat32_file_set_times(fs,dst,t5);
+        }
+    }
     long long ms=now_ms_()-t0;
     img_fat32_unmount(fs);
 
@@ -278,20 +287,38 @@ static const img_arg A_FATLS[] = {
      * 但"够用"不是"不炸"的理由。 */
     {"offset", IMG_A_U64, false, "0",   "从第几项开始（分页；默认 0）", NULL},
     {"limit",  IMG_A_U64, false, "500", "本页最多多少项（1~2000；默认 500）", NULL},
+    {"times",  IMG_A_BOOL, false, "false", "顺带取创建/修改时间（unix 秒 UTC）", NULL},
 };
 #define FAT_LIST_MAX 2000
 #define FAT_LIST_DEFAULT 500
 typedef struct { char *p, *end;
                  uint64_t total, offset, limit;
-                 int n; bool truncated; } lsbuf;
+                 int n; bool truncated;
+                 img_fat32_fs *fs; const char *dir; bool want_times; } lsbuf;
 static void ls_cb(void *ud, const char *name, bool isdir, uint64_t size){
     lsbuf *b=(lsbuf*)ud;
     uint64_t idx=b->total++;                              /* 先计数，再决定要不要写进本页 */
     if(idx < b->offset) return;
     if((uint64_t)b->n >= b->limit) return;
-    char item[512];
-    int n=snprintf(item,sizeof item,"%s{\"name\":\"%s\",\"dir\":%s,\"size\":%llu}",
-                   b->n?",":"", name?name:"", isdir?"true":"false",(unsigned long long)size);
+    char item[768];
+    int n;
+    if (b->want_times && b->fs) {
+        char full[1200]; uint16_t t5[5] = {0,0,0,0,0};
+        snprintf(full, sizeof full, "%s%s%s", b->dir,
+                 (b->dir[0] && b->dir[strlen(b->dir)-1] == '/') ? "" : "/", name ? name : "");
+        int64_t ft = 0, mt = 0;
+        if (img_fat32_file_times(b->fs, full, t5) == IMG_OK) {
+            ft = img_fat32_dos_to_epoch(t5[0], t5[1]);     /* 创建 */
+            mt = img_fat32_dos_to_epoch(t5[3], t5[4]);     /* 最后写 */
+        }
+        n = snprintf(item, sizeof item,
+                     "%s{\"name\":\"%s\",\"dir\":%s,\"size\":%llu,\"ctime\":%lld,\"mtime\":%lld}",
+                     b->n?",":"", name?name:"", isdir?"true":"false",
+                     (unsigned long long)size, (long long)ft, (long long)mt);
+    } else {
+        n = snprintf(item, sizeof item, "%s{\"name\":\"%s\",\"dir\":%s,\"size\":%llu}",
+                     b->n?",":"", name?name:"", isdir?"true":"false",(unsigned long long)size);
+    }
     if(n<=0) return;
     size_t need=(size_t)n+3;                              /* 还要留得下 "]\0" */
     if(b->p+need>=b->end){ b->truncated=true; return; }
@@ -316,7 +343,8 @@ static int cmd_fat_ls(img_ctx *ctx, const img_args *in, img_result *out){
      *   （与 iso.ls / ntfs.list 同一类缺陷，这次一并补上）*/
     IMG_THREAD_LOCAL static char g_ls_json[65536];
     g_ls_json[0]='[';
-    lsbuf b={g_ls_json+1, g_ls_json+sizeof g_ls_json-4, 0, offset, limit, 0, false};
+    lsbuf b={g_ls_json+1, g_ls_json+sizeof g_ls_json-4, 0, offset, limit, 0, false,
+             fs, path, img_args_bool(in,"times",false)};
     int rc=img_fat32_list_dir(fs,path,ls_cb,&b);
     b.p[0]=']'; b.p[1]=0;
     img_fat32_unmount(fs);
@@ -585,6 +613,7 @@ static const img_arg A_NTFSLIST[] = {
     {"offset", IMG_A_U64, false, "0",   "从第几项开始（分页；默认 0）", NULL},
     {"limit",  IMG_A_U64, false, "500", "本页最多多少项（1~2000；默认 500）", NULL},
     {"sizes",  IMG_A_BOOL, false, "false","顺带取真实文件大小（逐条开 inode，大目录明显变慢；默认关）", NULL},
+    {"times",  IMG_A_BOOL, false, "false","顺带取创建/修改时间（unix 秒 UTC；逐条开 inode，大目录变慢）", NULL},
 };
 /* 按 LBA 从分区表取分区字节数（与文件系统无关，FAT/NTFS 都用 ⇒ 不能放在 NTFS 守卫里） */
 static uint64_t ntfs_part_bytes(img_parttable_t *t,uint64_t lba){
@@ -604,7 +633,8 @@ typedef struct { char *b; size_t cap, len;
                  uint64_t total;            /* 目录里一共多少项（不受分页影响）*/
                  uint64_t offset, limit;
                  int n;                     /* 本页已序列化项数 */
-                 bool truncated; } list_buf_t;
+                 bool truncated;
+                 img_ntfs_fs *fs; const char *dir; bool want_times; } list_buf_t;
 static void list_json_cb(void *ud, const char *name, bool is_dir, uint64_t size){
     list_buf_t *a=(list_buf_t*)ud;
     uint64_t idx = a->total++;                 /* 先计数，再决定要不要写进本页 */
@@ -618,8 +648,22 @@ static void list_json_cb(void *ud, const char *name, bool is_dir, uint64_t size)
         else if(*p<0x20) k+=snprintf(item+k,sizeof item-(size_t)k,"\\u%04x",*p);
         else item[k++]=(char)*p;
     }
-    k+=snprintf(item+k,sizeof item-(size_t)k,"\",\"dir\":%s,\"size\":%llu}",
-                is_dir?"true":"false",(unsigned long long)size);
+    if(a->want_times && a->fs){
+        char full[1200]; uint64_t t4[4]={0,0,0,0};
+        snprintf(full,sizeof full,"%s%s%s",a->dir,
+                 (a->dir[0]&&a->dir[strlen(a->dir)-1]=='/')?"":"/", name);
+        if(img_ntfs_file_times(a->fs,full,t4)==IMG_OK)
+            k+=snprintf(item+k,sizeof item-(size_t)k,
+                        "\",\"dir\":%s,\"size\":%llu,\"ctime\":%llu,\"mtime\":%llu}",
+                        is_dir?"true":"false",(unsigned long long)size,
+                        (unsigned long long)t4[0],(unsigned long long)t4[1]);
+        else
+            k+=snprintf(item+k,sizeof item-(size_t)k,"\",\"dir\":%s,\"size\":%llu}",
+                        is_dir?"true":"false",(unsigned long long)size);
+    } else {
+        k+=snprintf(item+k,sizeof item-(size_t)k,"\",\"dir\":%s,\"size\":%llu}",
+                    is_dir?"true":"false",(unsigned long long)size);
+    }
     if(a->len+(size_t)k+2 < a->cap){ memcpy(a->b+a->len,item,(size_t)k); a->len+=(size_t)k; a->n++; }
     else a->truncated=true;
 }
@@ -649,7 +693,8 @@ static int cmd_ntfs_list(img_ctx *ctx, const img_args *in, img_result *out){
     /* ★ TLS：ntfs.list 走的是 ctx（同一 ctx 内部串行），但不同 ctx 可并行；
      *   jbuf 原是进程级 static → 两盘并发列目录会互相覆盖（与 iso.ls 同一类缺陷）。*/
     IMG_THREAD_LOCAL static char jbuf[256*1024];
-    list_buf_t acc={jbuf,sizeof jbuf,0,0,offset,limit,0,false};
+    list_buf_t acc={jbuf,sizeof jbuf,0,0,offset,limit,0,false,
+                    fs,path,img_args_bool(in,"times",false)};
     bool want_sizes = img_args_bool(in,"sizes",false);
     rc = want_sizes ? img_ntfs_list_dir_sizes(fs,path,list_json_cb,&acc)
                     : img_ntfs_list_dir(fs,path,list_json_cb,&acc);
@@ -1634,6 +1679,8 @@ static const img_arg A_NTFSPUT[] = {
     {"src", IMG_A_STR, true,  NULL,   "本地源文件路径", NULL},
     {"dst", IMG_A_STR, true,  NULL,   "分区内目标绝对路径（/ 开头）", NULL},
     {"mkdir", IMG_A_BOOL,false,"true","父目录不存在时自动创建", NULL},
+    {"preserve_times", IMG_A_BOOL,false,"false",
+     "保留【宿主文件】的修改/访问时间（创建时间按修改时间填；精确到 100ns）", NULL},
 };
 static int cmd_ntfs_put(img_ctx *ctx, const img_args *in, img_result *out){
     if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 写入）","重新编译时开启该功能并安装对应系统库");
@@ -1663,6 +1710,11 @@ static int cmd_ntfs_put(img_ctx *ctx, const img_args *in, img_result *out){
     img_span_kv_str(&sp,"path",dst); img_span_kv_u64(&sp,"size_bytes",(uint64_t)st.st_size);
     img_span_begin(&sp);
     rc=img_ntfs_put_file(fs,src,dst,img_cmd_prog());
+    if(rc==IMG_OK && img_args_bool(in,"preserve_times",false)){
+        uint64_t t4[4]={ (uint64_t)st.st_mtime, (uint64_t)st.st_mtime,
+                         (uint64_t)st.st_atime, 0 };
+        (void)img_ntfs_set_times(fs,dst,t4);
+    }
     img_span_end(&sp,rc);
     img_ntfs_umount(fs);
     if(rc){ img_result_fail(out,rc,rc==IMG_ECORRUPT?"NTFS-DIR-PHANTOM":"FAT-PUT-FAIL",dst,

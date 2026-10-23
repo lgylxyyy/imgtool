@@ -64,6 +64,11 @@ int img_fat32_list_dir(img_fat32_fs *fs, const char *abs_path,
 int img_fat32_rm(img_fat32_fs *fs, const char *abs_path);
 /* 递归删除目录树（默认 rm 只删文件/空目录）。removed=删掉的条目总数。 */
 int img_fat32_rm_tree(img_fat32_fs *fs, const char *abs_path, int *removed);
+/* 目录项时间（FAT 原始 5 字段：创建时间/日期、访问日期、写时间/日期） */
+int  img_fat32_file_times(img_fat32_fs *fs, const char *abs_path, uint16_t out[5]);
+int  img_fat32_file_set_times(img_fat32_fs *fs, const char *abs_path, const uint16_t t[5]);
+void img_fat32_epoch_to_dos(int64_t t, uint16_t *tm, uint16_t *dt);
+int64_t img_fat32_dos_to_epoch(uint16_t tm, uint16_t dt);
 
 /* 改名 / 移动（同一分区内；目录也可以，会同步子目录里的 ".." 项）。
  * 目标已存在 → IMG_EEXIST；把目录移进自己的子树 → IMG_EINVAL。*/

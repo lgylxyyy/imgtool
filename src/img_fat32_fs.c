@@ -128,6 +128,7 @@ __attribute__((unused)) static uint32_t chain_nth(img_fat32_fs *fs, uint32_t sta
 typedef struct { uint32_t cluster; uint32_t size; bool is_dir; bool found;
                  uint64_t slot_off;     /* 8.3 项在盘上的偏移 */
                  uint64_t lfn_first;    /* 该条目的第一个 LFN 项偏移（0=无）*/
+                 uint16_t crt_time, crt_date, acc_date, wrt_time, wrt_date;  /* FAT 原始时间字段 */
                  char     lfn[260]; } dir_ent;
 
 /* FAT 规范里的 LFN 校验和：sum = ((sum&1)<<7) + (sum>>1) + name[i]，对 11 字节 8.3 名算 */
@@ -178,6 +179,11 @@ static void ent_fill(dir_ent *o, const uint8_t *e, uint64_t slot_off){
     o->size     = (uint32_t)e[28]|((uint32_t)e[29]<<8)|((uint32_t)e[30]<<16)|((uint32_t)e[31]<<24);
     o->cluster  = ((uint32_t)e[20]<<16)|((uint32_t)e[21]<<24) | ((uint32_t)e[26]|((uint32_t)e[27]<<8));
     o->slot_off = slot_off;
+    o->crt_time = (uint16_t)(e[14] | (e[15] << 8));
+    o->crt_date = (uint16_t)(e[16] | (e[17] << 8));
+    o->acc_date = (uint16_t)(e[18] | (e[19] << 8));
+    o->wrt_time = (uint16_t)(e[22] | (e[23] << 8));
+    o->wrt_date = (uint16_t)(e[24] | (e[25] << 8));
 }
 /* 把 8.3 项名字拼成点号形（大写） */
 static void ent_83_name(const uint8_t *e, char out[12]){
@@ -1068,6 +1074,52 @@ int img_fat32_rm_tree(img_fat32_fs *fs,const char *abs_path,int *removed){
     return fat_rm_tree_rec(fs,abs_path,0,removed);
 }
 
+/* ---------- FAT 目录项时间（本地时间，2 秒粒度，1980 起） ---------- */
+/* 读某个路径的 5 个原始字段：crt_time/crt_date/acc_date/wrt_time/wrt_date */
+/* FAT 的 (时间,日期) 两个 u16 → unix 秒（按 UTC 解释，和写入时一致） */
+int64_t img_fat32_dos_to_epoch(uint16_t tm, uint16_t dt){
+    if (!dt) return 0;
+    struct tm g; memset(&g, 0, sizeof g);
+    g.tm_year = 1980 + ((dt >> 9) & 0x7f) - 1900;
+    g.tm_mon  = ((dt >> 5) & 0x0f) - 1;
+    g.tm_mday = dt & 0x1f;
+    g.tm_hour = (tm >> 11) & 0x1f;
+    g.tm_min  = (tm >> 5) & 0x3f;
+    g.tm_sec  = (tm & 0x1f) * 2;
+    if (g.tm_mon < 0 || g.tm_mday < 1) return 0;
+    return (int64_t)timegm(&g);
+}
+int img_fat32_file_times(img_fat32_fs *fs, const char *abs_path, uint16_t out[5]){
+    if(!fs||!abs_path||!out) return IMG_EINVAL;
+    uint32_t dclus=0; char nm[256];
+    if(split_parent(fs, abs_path, &dclus, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
+    dir_ent e; memset(&e,0,sizeof e);
+    if(dir_find(fs, dclus, nm, &e)!=IMG_OK || !e.found) return IMG_ENOENT;
+    out[0]=e.crt_time; out[1]=e.crt_date; out[2]=e.acc_date;
+    out[3]=e.wrt_time; out[4]=e.wrt_date;
+    return IMG_OK;
+}
+/* 把同样的 5 个字段写回某个路径的目录项（其它字段不动） */
+int img_fat32_file_set_times(img_fat32_fs *fs, const char *abs_path, const uint16_t t[5]){
+    if(!fs||!abs_path||!t) return IMG_EINVAL;
+    uint32_t dclus=0; char nm[256];
+    if(split_parent(fs, abs_path, &dclus, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
+    dir_ent e; memset(&e,0,sizeof e);
+    if(dir_find(fs, dclus, nm, &e)!=IMG_OK || !e.found) return IMG_ENOENT;
+    uint8_t d[ENTRY_SIZE];
+    if(rd(fs, e.slot_off, d, ENTRY_SIZE)) return IMG_EIO;
+    put_u16(d+14,t[0]); put_u16(d+16,t[1]); put_u16(d+18,t[2]);
+    put_u16(d+22,t[3]); put_u16(d+24,t[4]);
+    return wr(fs, e.slot_off, d, ENTRY_SIZE) ? IMG_EIO : IMG_OK;
+}
+/* 宿主 epoch 秒 → FAT 的 (时间,日期) 两个 u16（按 UTC 解释，避免时区漂移） */
+void img_fat32_epoch_to_dos(int64_t t, uint16_t *tm, uint16_t *dt){
+    struct tm g; time_t tt=(time_t)t;
+    if(!gmtime_r(&tt,&g)){ *tm=0; *dt=0; return; }
+    int y=g.tm_year+1900; if(y<1980){ *tm=0; *dt=0; return; }
+    *tm=(uint16_t)((g.tm_hour<<11)|(g.tm_min<<5)|(g.tm_sec/2));
+    *dt=(uint16_t)(((y-1980)<<9)|((g.tm_mon+1)<<5)|g.tm_mday);
+}
 int img_fat32_copy(img_fat32_fs *fs, const char *src_abs, const char *dst_abs,
                    int conflict, img_prog *prog,
                    char *out_path, size_t out_cap, uint64_t *out_size, bool *out_replaced){
@@ -1117,9 +1169,13 @@ int img_fat32_copy(img_fat32_fs *fs, const char *src_abs, const char *dst_abs,
 
     if (prog) { img_prog_phase(prog, IMG_PH_EXTRACT, "盘内复制");
                 img_prog_op(prog, IMG_OP_WRITE); img_prog_bytes(prog, 0, ssz); }
+    uint16_t stm[5]; bool have_times = (img_fat32_file_times(fs, src_abs, stm) == IMG_OK);
     rc = img_fat32_put_data(fs, buf, blen, tmp_full);
     free(buf);
     if (rc != IMG_OK) return rc;
+    /* ★ 保留创建/修改/访问时间：写完之后把源的 5 个原始字段抄到临时项上，
+     *   随后 rename 会连时间一起继承过去（rename 的实现就是照抄源项）。 */
+    if (have_times) (void)img_fat32_file_set_times(fs, tmp_full, stm);
     if (prog) img_prog_bytes(prog, ssz, ssz);
 
     if (replaced) {

@@ -122,6 +122,42 @@ check('  覆盖后内容是新的', exported('/src/c.bin', 'c') == A)
 d = run('ntfs.copy', img=IMG, lba=LBA, src='/src/nope.bin', dst='/src/x.bin')
 check('源不存在 ⇒ NTFS-PATH-NOTFOUND', code(d) == 'NTFS-PATH-NOTFOUND', json.dumps(d)[:160])
 
+# ─────────── 时间戳（应用户问：创建/修改时间要能同步） ───────────
+import time as _t
+def times_of(pth):
+    """pth 是盘内绝对路径；只看它所在目录的那一页"""
+    d, n = pth.rsplit('/', 1)
+    d = d or '/'
+    r = run('ntfs.list', img=IMG, lba=LBA, path=d, limit=200, times='true')
+    for x in (data(r).get('names') or []):
+        if x['name'] == n:
+            return (x.get('ctime'), x.get('mtime'))
+    return (None, None)
+
+OLD = 1557126489            # 2019-05-06 07:08:09 UTC
+lp = mk(b'TIME-PAYLOAD', 'time.bin')
+os.utime(lp, (OLD, OLD))
+check('put --preserve_times=true（宿主 2019-05-06 07:08:09）',
+      put(lp, '/t/a.bin') and run('ntfs.put', img=IMG, lba=LBA, src=lp, dst='/t/a.bin',
+                                  mkdir='true', preserve_times='true').get('ok'))
+ct, mt = times_of('/t/a.bin')
+check('  盘上 ctime/mtime 就是宿主那个时间（±2 s）',
+      ct and mt and abs(ct - OLD) <= 2 and abs(mt - OLD) <= 2, (ct, mt))
+
+d = run('ntfs.copy', img=IMG, lba=LBA, src='/t/a.bin', dst='/t/b.bin')
+ct2, mt2 = times_of('/t/b.bin')
+check('复制（--preserve_times 默认 true）后时间一致',
+      d.get('ok') and ct2 == ct and mt2 == mt, (ct2, mt2, ct, mt))
+d = run('ntfs.move', img=IMG, lba=LBA, src='/t/b.bin', dst='/t/c.bin')
+ct3, mt3 = times_of('/t/c.bin')
+check('改名/移动后时间仍一致（只动索引，不碰 $SI）',
+      d.get('ok') and ct3 == ct and mt3 == mt, (ct3, mt3, ct, mt))
+d = run('ntfs.copy', img=IMG, lba=LBA, src='/t/a.bin', dst='/t/d.bin', preserve_times='false')
+ct4, mt4 = times_of('/t/d.bin')
+_now = int(_t.time())
+check('显式 --preserve_times=false ⇒ 时间变成"现在"',
+      d.get('ok') and ct4 and abs(ct4 - _now) < 300, (ct4, _now))
+
 # ─────────── 删除 ───────────
 d = run('ntfs.rm', img=IMG, lba=LBA, path='/src/b.001.bin')
 check('删文件', d.get('ok') and not exists('/src/b.001.bin'), json.dumps(d)[:160])
@@ -149,6 +185,25 @@ check('FAT 同名 + rename ⇒ .001', d.get('ok') and data(d).get('path') == '/f
       json.dumps(d)[:200])
 d = run('fat.copy', img=IMG, lba=ESP, src='/fa.bin', dst='/sub/deep/fc.bin')
 check('FAT 复制到不存在的多级目录 ⇒ 自动建父目录', d.get('ok'), json.dumps(d)[:200])
+
+# ─────────── FAT 时间戳保留 ───────────
+def fat_times(name):
+    d = run('fat.ls', img=IMG, lba=ESP, path='/', limit=200, times='true')
+    for x in (data(d).get('entries') or []):
+        if x['name'] == name:
+            return (x.get('ctime'), x.get('mtime'))
+    return (None, None)
+
+lp2 = mk(b'FAT-TIME', 'ft.bin')
+os.utime(lp2, (OLD, OLD))
+run('fat.put', img=IMG, lba=ESP, src=lp2, dst='/fta.bin', preserve_times='true')
+cta, mta = fat_times('fta.bin')
+check('FAT put --preserve_times（2 秒精度，允许 ±2 s）',
+      cta and mta and abs(mta - OLD) <= 2, (cta, mta))
+d = run('fat.copy', img=IMG, lba=ESP, src='/fta.bin', dst='/ftb.bin')
+ctb, mtb = fat_times('ftb.bin')
+check('FAT 复制后时间一致（创建/修改都抄过来）',
+      d.get('ok') and ctb == cta and mtb == mta, (ctb, mtb, cta, mta))
 
 # ─────────── FAT 递归删除 ───────────
 check('FAT 造一棵树 /FT/A/B/C/x.bin',

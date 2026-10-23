@@ -303,6 +303,67 @@ static int verify_dir_on_disk(img_ntfs_fs *fs, const char *abs_path, ntfs_inode 
     return IMG_OK;
 }
 
+/* 读 $SI 的四个时间（unix 秒，UTC）。App 显示"创建/修改时间"就用它。
+ * 注意：$FN 里的那份是"命名时的缓存副本"，NTFS 允许与 $SI 不一致；
+ * 复制/移动后我们会让两者一致（见 img_ntfs_copy 与 ntfs_link 的注释）。 */
+static uint64_t filetime_to_unix(sle64 ft){
+    uint64_t v = (uint64_t)le64_to_cpu(ft);
+    if (!v) return 0;
+    const uint64_t EPOCH = 11644473600ULL;      /* 1601→1970 的秒数 */
+    return (v / 10000000ULL) > EPOCH ? (v / 10000000ULL) - EPOCH : 0;
+}
+/* 按 unix 秒设置 $SI 的四个时间（用于"从宿主写进盘时保留原时间"）。
+ * in = [create, modify, access, mft_change]；传 0 表示该项不动。
+ * 只在 put 这类"新建/覆盖"场景用；复制请用 img_ntfs_copy(--preserve_times)。 */
+static sle64 unix_to_filetime(uint64_t t){
+    if (!t) return 0;
+    return cpu_to_le64((uint64_t)((t + 11644473600ULL) * 10000000ULL));
+}
+int img_ntfs_set_times(img_ntfs_fs *fs, const char *abs_path, const uint64_t in[4]){
+    if (!fs || !fs->mounted || !abs_path || !in) return IMG_EINVAL;
+    char d[512], n[256];
+    if (split_abs((char*)abs_path, d, sizeof d, n, sizeof n) != 0) return IMG_EINVAL;
+    ntfs_inode *par = lookup(fs->vol, d, NULL);
+    if (!par) return IMG_ENOENT;
+    ntfschar *u = NULL; size_t ul = 0;
+    if (!to_ntfs(n, &u, &ul)) { ntfs_inode_close(par); return IMG_EINVAL; }
+    errno = 0;
+    MFT_REF ref = ntfs_inode_lookup_by_name(par, u, ul);
+    free(u); ntfs_inode_close(par);
+    if (!mftref_ok(ref)) return IMG_ENOENT;
+    ntfs_inode *ni = ntfs_inode_open(fs->vol, ref);
+    if (!ni) return IMG_EIO;
+    if (in[0]) ni->creation_time          = unix_to_filetime(in[0]);
+    if (in[1]) ni->last_data_change_time  = unix_to_filetime(in[1]);
+    if (in[2]) ni->last_access_time       = unix_to_filetime(in[2]);
+    if (in[3]) ni->last_mft_change_time   = unix_to_filetime(in[3]);
+    ntfs_inode_mark_dirty(ni);
+    int rc = ntfs_inode_close(ni) ? IMG_EIO : IMG_OK;
+    return rc;
+}
+
+int img_ntfs_file_times(img_ntfs_fs *fs, const char *abs_path, uint64_t out[4]){
+    if (!fs || !fs->mounted || !abs_path || !out) return IMG_EINVAL;
+    char d[512], n[256];
+    if (split_abs((char*)abs_path, d, sizeof d, n, sizeof n) != 0) return IMG_EINVAL;
+    ntfs_inode *par = lookup(fs->vol, d, NULL);
+    if (!par) return IMG_ENOENT;
+    ntfschar *u = NULL; size_t ul = 0;
+    if (!to_ntfs(n, &u, &ul)) { ntfs_inode_close(par); return IMG_EINVAL; }
+    errno = 0;
+    MFT_REF ref = ntfs_inode_lookup_by_name(par, u, ul);
+    free(u); ntfs_inode_close(par);
+    if (!mftref_ok(ref)) return IMG_ENOENT;
+    ntfs_inode *ni = ntfs_inode_open(fs->vol, ref);
+    if (!ni) return IMG_EIO;
+    out[0] = filetime_to_unix(ni->creation_time);
+    out[1] = filetime_to_unix(ni->last_data_change_time);
+    out[2] = filetime_to_unix(ni->last_access_time);
+    out[3] = filetime_to_unix(ni->last_mft_change_time);
+    ntfs_inode_close(ni);
+    return IMG_OK;
+}
+
 int img_ntfs_verify_dir(img_ntfs_fs *fs, const char *abs_path){
     return verify_dir_on_disk(fs,abs_path,NULL);
 }
