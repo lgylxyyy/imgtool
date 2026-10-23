@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
 /* race_test — 库内共享状态的并发复现器（不依赖 TSAN/ASAN/valgrind：本环境三者都起不来）
  *
  * ① 首次触碰全局锁的竞态：进程启动后【第一件事】就让 N 个线程同一瞬间调
@@ -146,7 +149,8 @@ static int child_scenario3(void){
      * 因此默认收到【刚好能撞开】的 2 线程 × 1 次 —— 去 TLS 的反证照样能命中。
      * 真机/CI 想加压：RACE_TH=8 RACE_ITERS=50。*/
     int nth = getenv("RACE_TH") ? atoi(getenv("RACE_TH")) : 2;
-    if(nth<1) nth=1; if(nth>64) nth=64;
+    if(nth<1)  nth=1;
+    if(nth>64) nth=64;
     /* ★ 到达数必须是 nth+1：主线程也在这里等（场景①② 一直这么写）。
      *   写成 nth 会让最后到达的那个线程永远凑不齐 —— 又是一次"自己挂自己"。*/
     pthread_barrier_init(&g_bar,NULL,(unsigned)(nth+1));

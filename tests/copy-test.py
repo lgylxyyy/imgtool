@@ -158,6 +158,37 @@ _now = int(_t.time())
 check('显式 --preserve_times=false ⇒ 时间变成"现在"',
       d.get('ok') and ct4 and abs(ct4 - _now) < 300, (ct4, _now))
 
+# ─────────── touch / 列表 ino / 游标 / rev ───────────
+def ls(path='/', **kw):
+    return data(run('ntfs.list', img=IMG, lba=LBA, path=path, limit=200, **kw))
+
+_ls = ls('/', ino='true')
+check('ntfs.list --ino 每项都带 ino', all(x.get('ino', 0) > 0 for x in _ls['names']), _ls['names'][:3])
+_ino0 = _ls['names'][0]['ino']
+_p = data(run('ntfs.parent', img=IMG, lba=LBA, path='/' + _ls['names'][0]['name']))
+check('  list 的 ino 与 ntfs.parent 的 ino 一致', _p.get('ino') == _ino0, (_ino0, _p.get('ino')))
+check('  rev > 0（目录改动时间）', _ls.get('rev', 0) > 0, _ls.get('rev'))
+
+_c2 = ls('/', after=str(_ino0))
+check('--after=<ino> 游标：从该条之后开始（不重复上一页最后一条）',
+      _c2['names'] and all(x['ino'] != _ino0 for x in _c2['names'])
+      and len(_c2['names']) == len(_ls['names']) - 1, [_c2['names'][:2]])
+
+_old = ls('/', times='true')['names'][0]
+d = run('ntfs.touch', img=IMG, lba=LBA, path='/' + _old['name'], now='true')
+check('ntfs.touch --now ⇒ 时间变成现在（±300 s）',
+      d.get('ok') and abs(data(d).get('mtime', 0) - int(_t.time())) < 300, data(d))
+d = run('ntfs.touch', img=IMG, lba=LBA, path='/t/a.bin', ref='/t/d.bin')
+check('ntfs.touch --ref ⇒ 抄另一个文件的时间',
+      d.get('ok') and data(d).get('mtime') == times_of('/t/d.bin')[1], data(d))
+d = run('ntfs.touch', img=IMG, lba=LBA, path='/t/a.bin', time='1600000000', set='modify')
+_before = times_of('/t/a.bin')
+check('--set=modify 只改 mtime（ctime 不动）',
+      d.get('ok') and data(d).get('mtime') == 1600000000
+      and data(d).get('ctime') == _before[0], data(d))
+d = run('ntfs.touch', img=IMG, lba=LBA, path='/t/a.bin', time='0')
+check('--time=0 ⇒ CMD-ARG-BAD（零值=不改，与 edk2 语义一致）', code(d) == 'CMD-ARG-BAD', code(d))
+
 # ─────────── 删除 ───────────
 d = run('ntfs.rm', img=IMG, lba=LBA, path='/src/b.001.bin')
 check('删文件', d.get('ok') and not exists('/src/b.001.bin'), json.dumps(d)[:160])

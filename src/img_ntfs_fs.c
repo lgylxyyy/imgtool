@@ -342,6 +342,34 @@ int img_ntfs_set_times(img_ntfs_fs *fs, const char *abs_path, const uint64_t in[
     return rc;
 }
 
+/* 按"目录 + 名字"取 ino（给 list --ino / --after 游标用；只查索引，不开 inode） */
+/* 目录的 rev（$SI 改动时间，unix 秒）——列表分页/刷新判断"缓存过期没"用；处理根目录 */
+int img_ntfs_dir_rev(img_ntfs_fs *fs, const char *dir_abs, uint64_t *out_rev){
+    if (!fs || !fs->mounted) return IMG_EINVAL;
+    ntfs_inode *dni = (!dir_abs || !dir_abs[0] || !strcmp(dir_abs,"/"))
+                    ? ntfs_inode_open(fs->vol, FILE_root) : lookup(fs->vol, dir_abs, NULL);
+    if (!dni) return IMG_ENOENT;
+    if (out_rev) *out_rev = (uint64_t)((uint64_t)le64_to_cpu(dni->last_mft_change_time) / 10000000ULL) - 11644473600ULL;
+    ntfs_inode_close(dni);
+    return IMG_OK;
+}
+
+int img_ntfs_dir_lookup_ino(img_ntfs_fs *fs, const char *dir_abs, const char *name,
+                            uint64_t *out_ino){
+    if (!fs || !fs->mounted || !dir_abs || !name || !out_ino) return IMG_EINVAL;
+    ntfs_inode *dir = (strcmp(dir_abs,"/") == 0 || dir_abs[0] == 0)
+                    ? ntfs_inode_open(fs->vol, FILE_root) : lookup(fs->vol, dir_abs, NULL);
+    if (!dir) return IMG_ENOENT;
+    ntfschar *u = NULL; size_t ul = 0;
+    if (!to_ntfs(name, &u, &ul)) { ntfs_inode_close(dir); return IMG_EINVAL; }
+    errno = 0;
+    MFT_REF r = ntfs_inode_lookup_by_name(dir, u, ul);
+    free(u); ntfs_inode_close(dir);
+    if (!mftref_ok(r)) return IMG_ENOENT;
+    *out_ino = (uint64_t)(r & MFT_REF_MASK_CPU);
+    return IMG_OK;
+}
+
 int img_ntfs_file_times(img_ntfs_fs *fs, const char *abs_path, uint64_t out[4]){
     if (!fs || !fs->mounted || !abs_path || !out) return IMG_EINVAL;
     char d[512], n[256];
@@ -1701,6 +1729,27 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,
     if(!same_dir){
         dpar=lookup(fs->vol,ddir,NULL);
         if(!dpar){
+            /* ★★ 造环检查【必须在建目录之前】：否则"搬进自己子树"会先在源目录里
+             *   建出一个空子目录再拒绝 —— 拒绝就不再是零副作用了。*/
+            if(isdir){
+                size_t sl2 = strlen(src_abs);
+                bool prefix = (strncmp(ddir, src_abs, sl2) == 0) &&
+                              (ddir[sl2] == 0 || ddir[sl2] == '/');
+                if(prefix){
+                    char sdp[512], sn2[256];
+                    bool same_parent = (split_abs((char*)src_abs, sdp, sizeof sdp, sn2, sizeof sn2) == 0)
+                                       && strcmp(sdp, ddir) == 0;
+                    if(!same_parent){
+                        img_ev ev;
+                        if(img_ev_init(&ev,IMG_LV_ERROR,"ntfs","move_into_self_early",IMG_ECYCLE,
+                                       "目标父目录在源目录的子树里（会造环）；已在建目录前拦下")){
+                            img_ev_str(&ev,"src",src_abs); img_ev_str(&ev,"dst",dst_abs);
+                        }
+                        ntfs_inode_close(ni); ntfs_inode_close(spar); free(su);
+                        return IMG_ECYCLE;
+                    }
+                }
+            }
             /* 目标父目录：不存在就建（建完由 mkdir_p 自己从盘上验明正身，防幽灵目录）*/
             int mrc = img_ntfs_mkdir_p(fs,ddir);
             if(mrc!=IMG_OK){ ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); return mrc; }
@@ -1708,6 +1757,33 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,
             if(!dpar){ ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); return IMG_EIO; }
         }
         dpar_extra=true;
+    }
+    /* ★★ 解禁目录搬移后必须拦住"搬进自己的子树"（否则父引用成环，Windows 会懵）。
+     *   做法：从目标父目录一路沿 ".." 往上走，撞到源目录本身就拒。深度上限 64。*/
+    if(isdir){
+        uint64_t src_ino = (uint64_t)(sref & MFT_REF_MASK_CPU);
+        uint64_t cur = dpar->mft_no;
+        for(int guard=0; guard<64 && cur; guard++){
+            if(cur == src_ino){
+                img_ev ev;
+                if(img_ev_init(&ev,IMG_LV_ERROR,"ntfs","move_into_self",IMG_ECYCLE,
+                               "不许把目录搬到它自己或它的子树里（会造出环）")){
+                    img_ev_str(&ev,"src",src_abs); img_ev_str(&ev,"dst",dst_abs);
+                    img_ev_u64(&ev,"ino",src_ino); img_ev_emit(&ev);
+                }
+                if(dpar_extra) ntfs_inode_close(dpar);
+                ntfs_inode_close(ni); ntfs_inode_close(spar); free(su);
+                return IMG_ECYCLE;
+            }
+            if(cur == FILE_root) break;
+            ntfs_inode *ci = ntfs_inode_open(fs->vol, cur);
+            if(!ci) break;
+            uint64_t par = 0;
+            int pr = dir_parent_ino(ci, &par);
+            ntfs_inode_close(ci);
+            if(pr != IMG_OK || par == 0 || par == cur) break;
+            cur = par;
+        }
     }
     if(!to_ntfs(dname,&du,&dul)){
         if(dpar_extra) ntfs_inode_close(dpar);

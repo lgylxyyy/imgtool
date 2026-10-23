@@ -84,6 +84,8 @@ static const ETX E_TEXT[] = {                      /* 错误码 → 原因 / 建
      "跑 qc.verify；别在这张盘上继续写","Run qc.verify; stop writing to this image"},
     {"NTFS-MOVE-FAIL","盘内改名/移动失败","Rename/move inside the volume failed",
      "看日志里 move_link_fail / move_sync_fail / move_delete_fail 是哪一步","Check the log: which step failed (link / sync / delete)"},
+    {"NTFS-MOVE-INTO-SELF","不能把目录搬到它自己或它的子树里（会造出环）","Refusing to move a directory into itself or its own subtree",
+     "换一个目标父目录；这是硬性保护，不是参数笔误","Pick a destination outside the directory being moved"},
     {"NTFS-DIR-PHANTOM","写完从盘上复查没过：目录或名字没真正落盘（卷已不一致）","Post-write verification failed: the directory/name was not really on disk (volume is inconsistent)",
      "★立刻停止再写这张盘；改用备份镜像；跑 tools/ntfs-inventory.py 体检。别当成参数错误重试",
      "Abort further writes; use a backup; run tools/ntfs-inventory.py to audit the volume"},

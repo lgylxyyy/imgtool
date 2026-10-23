@@ -117,10 +117,12 @@ root_ino = parent('/').get('ino')
 check('ntfs.parent 认得根（ino==parent_ino）', pd0.get('parent_ino') == root_ino,
       json.dumps(pd0)[:160])
 d = run('ntfs.move', img=IMG, lba=LBA, src='/dirA', dst='/sub/dirA')
-check('目录【跨父搬移】被拒（NTFS-SRC-IS-DIR，真 Windows 判负后收回）',
-      (not d.get('ok')) and code(d) == 'NTFS-SRC-IS-DIR', code(d))
-check('  被拒后目录与内容完好（不是半途失败）',
-      ex('/dirA/x.txt') and not ex('/sub/dirA/x.txt'))
+check('目录【跨父搬移】默认放开（T1b 真 Windows 验收通过后解禁）',
+      d.get('ok'), code(d) or json.dumps(d)[:160])
+check('  搬完新位置有内容、旧位置消失',
+      ex('/sub/dirA/x.txt') and not ex('/dirA/x.txt'))
+d = run('ntfs.move', img=IMG, lba=LBA, src='/sub/dirA', dst='/dirA')
+check('  搬回来（跨父再来一次）', d.get('ok'), code(d) or json.dumps(d)[:160])
 d = run('ntfs.move', img=IMG, lba=LBA, src='/dirA', dst='/dirA2')
 check('目录【同父改名】允许（实测这一种在 Windows 下是好的）', d.get('ok'),
       code(d) or json.dumps(d)[:200])
@@ -131,8 +133,9 @@ check('  改名后 ntfs.parent 仍自洽、inode 号没变（是改名不是重�
       json.dumps(pd1)[:200])
 check('  内容逐字节没变', exported('/dirA2/x.txt') == b'IN-DIR')
 d = run('ntfs.move', img=IMG, lba=LBA, src='/dirA2', dst='/dirA2/inner')
-check('把目录搬进自己的子树也拒（那也是跨父搬移）',
-      (not d.get('ok')) and code(d) == 'NTFS-SRC-IS-DIR', code(d))
+check('把目录搬进自己的子树 ⇒ NTFS-MOVE-INTO-SELF',
+      (not d.get('ok')) and code(d) == 'NTFS-MOVE-INTO-SELF', code(d))
+check('  拒绝且没在子树里留下空目录', not ex('/dirA2/inner'))
 check('造 /pf.txt（给 ntfs.parent 的反例用）', put('/pf.txt', b'F').get('ok'))
 d = run('ntfs.parent', img=IMG, lba=LBA, path='/pf.txt')
 check('ntfs.parent 对文件明确拒绝（NTFS-NOT-A-DIR）', code(d) == 'NTFS-NOT-A-DIR', code(d))
@@ -242,23 +245,32 @@ check('limit 超上限被夹到 2000', d6.get('limit') == 2000, json.dumps(d6)[:
 # 留下了一个空目录（现场：/MovedByTool 就这么冒出来的）。现在政策判定前移到任何写动作之前。
 check('put /SidE/a.bin', put('/SidE/a.bin', b'A' * 900).get('ok'))
 check('搬之前 /NoSide 不存在', not ex('/NoSide'))
-d = run('ntfs.move', img=IMG, lba=LBA, src='/SidE', dst='/NoSide/SidE')
-check('目录跨父搬（默认政策）被拒 = NTFS-SRC-IS-DIR', code(d) == 'NTFS-SRC-IS-DIR', json.dumps(d)[:160])
-check('★拒绝之后目标父目录【没被建出来】（拒绝=零副作用）', not ex('/NoSide'),
-      'App 因此可以放心原样重试')
+
+# ① 旧政策（显式 allow_dir_move=false）必须拒绝，且【零副作用】
+d = run('ntfs.move', img=IMG, lba=LBA, src='/SidE', dst='/NoSide/SidE', allow_dir_move='false')
+check('显式 allow_dir_move=false ⇒ NTFS-SRC-IS-DIR', code(d) == 'NTFS-SRC-IS-DIR', json.dumps(d)[:160])
+check('  拒绝=零副作用（目标父目录没被建出来）', not ex('/NoSide'))
 check('  源目录仍在原位', ex('/SidE/a.bin'))
-_pre = run('ntfs.parent', img=IMG, lba=LBA, path='/SidE')     # 搬前先记下 ino
+
+# ② 默认政策：允许跨父搬目录（2026-10-23 真 Windows 验收通过后解禁）
+_pre = run('ntfs.parent', img=IMG, lba=LBA, path='/SidE')
 _ino = (_pre.get('data') or {}).get('ino')
-d = run('ntfs.move', img=IMG, lba=LBA, src='/SidE', dst='/NoSide/SidE', allow_dir_move='true')
-check('显式 --allow_dir_move=true 才放行跨父搬目录', d.get('ok'), json.dumps(d)[:200])
-check('  搬后新位置可读（内容一致）', exported('/NoSide/SidE/a.bin') == b'A' * 900)
+d = run('ntfs.move', img=IMG, lba=LBA, src='/SidE', dst='/NoSide/SidE')
+check('默认允许跨父搬目录', d.get('ok'), json.dumps(d)[:200])
+check('  搬后内容逐字节一致', exported('/NoSide/SidE/a.bin') == b'A' * 900)
 check('  旧位置已消失', not ex('/SidE/a.bin'))
 _pdd = (run('ntfs.parent', img=IMG, lba=LBA, path='/NoSide/SidE').get('data') or {})
-check('  搬完 ino 与搬前一致（同一份记录，不是"新建+删除"）',
-      _ino is not None and _pdd.get('ino') == _ino, '%s vs %s' % (_ino, _pdd.get('ino')))
-check('  搬完 parent_ino == parent_by_path（父引用指回新父）',
-      _pdd.get('backlink_ok') is True and _pdd.get('parent_ino') == _pdd.get('parent_by_path'),
-      json.dumps(_pdd))
+check('  搬完 ino 与搬前一致（同一份记录）', _ino is not None and _pdd.get('ino') == _ino,
+      '%s vs %s' % (_ino, _pdd.get('ino')))
+check('  搬完父引用指回新父', _pdd.get('backlink_ok') is True
+      and _pdd.get('parent_ino') == _pdd.get('parent_by_path'), json.dumps(_pdd))
+
+# ③ 造环必须拒，而且不许留下任何目录
+d = run('ntfs.move', img=IMG, lba=LBA, src='/NoSide/SidE', dst='/NoSide/SidE/deep/x')
+check('搬进自己的子树 ⇒ NTFS-MOVE-INTO-SELF', code(d) == 'NTFS-MOVE-INTO-SELF', json.dumps(d)[:160])
+check('  拒绝后子树里没被建出空目录', not ex('/NoSide/SidE/deep'))
+
+# ④ 文件跨父移动照旧
 d = run('ntfs.move', img=IMG, lba=LBA, src='/NoSide/SidE/a.bin', dst='/back.bin')
 check('文件跨父移动照旧允许', d.get('ok'), json.dumps(d)[:160])
 

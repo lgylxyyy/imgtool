@@ -167,6 +167,11 @@ int img_ntfs_verify_path(img_ntfs_fs *fs, const char *abs_path,
                          uint64_t *ino_out, bool *isdir_out);
 /* 读 $SI 四个时间（unix 秒 UTC）：out = [create, modify, access, mft_change] */
 int img_ntfs_file_times(img_ntfs_fs *fs, const char *abs_path, uint64_t out[4]);
+/* 按"目录 + 名字"取 ino（只查索引；给 list --ino / --after 游标用） */
+int img_ntfs_dir_lookup_ino(img_ntfs_fs *fs, const char *dir_abs, const char *name,
+                            uint64_t *out_ino);
+/* 目录 rev（$SI 改动时间，unix 秒）；App 用它判断列表缓存是否过期 */
+int img_ntfs_dir_rev(img_ntfs_fs *fs, const char *dir_abs, uint64_t *out_rev);
 /* 按 unix 秒设置 $SI 四时间（in=[create,modify,access,mft_change]；0=该项不动） */
 int img_ntfs_set_times(img_ntfs_fs *fs, const char *abs_path, const uint64_t in[4]);
 

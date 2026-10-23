@@ -614,6 +614,8 @@ static const img_arg A_NTFSLIST[] = {
     {"limit",  IMG_A_U64, false, "500", "本页最多多少项（1~2000；默认 500）", NULL},
     {"sizes",  IMG_A_BOOL, false, "false","顺带取真实文件大小（逐条开 inode，大目录明显变慢；默认关）", NULL},
     {"times",  IMG_A_BOOL, false, "false","顺带取创建/修改时间（unix 秒 UTC；逐条开 inode，大目录变慢）", NULL},
+    {"ino",   IMG_A_BOOL, false, "false", "每项带 ino（App 做 stable id；逐条查索引，略慢）", NULL},
+    {"after", IMG_A_U64, false, "0", "游标：只返回【这一条之后】的项（传上一页最后一项的 ino）", NULL},
 };
 /* 按 LBA 从分区表取分区字节数（与文件系统无关，FAT/NTFS 都用 ⇒ 不能放在 NTFS 守卫里） */
 static uint64_t ntfs_part_bytes(img_parttable_t *t,uint64_t lba){
@@ -634,9 +636,21 @@ typedef struct { char *b; size_t cap, len;
                  uint64_t offset, limit;
                  int n;                     /* 本页已序列化项数 */
                  bool truncated;
-                 img_ntfs_fs *fs; const char *dir; bool want_times; } list_buf_t;
+                 img_ntfs_fs *fs; const char *dir; bool want_times;
+                 /* 用 dir 路径 + 库函数拿 ino（命令层不碰 ntfschar/MFT_REF 这些内部类型）*/
+                 bool want_ino;           /* 返回 ino（App 做 stable id） */
+                 uint64_t after;          /* --after=<ino> 游标 */
+                 bool after_seen; } list_buf_t;
 static void list_json_cb(void *ud, const char *name, bool is_dir, uint64_t size){
     list_buf_t *a=(list_buf_t*)ud;
+    uint64_t ino = 0;
+    if(a->want_ino || a->after)
+        (void)img_ntfs_dir_lookup_ino(a->fs, a->dir, name, &ino);
+    /* --after 游标：跳过"到游标为止"的项（游标那条本身属于上一页） */
+    if(a->after && !a->after_seen){
+        if(ino != a->after) return;
+        a->after_seen = true; return;
+    }
     uint64_t idx = a->total++;                 /* 先计数，再决定要不要写进本页 */
     if(idx < a->offset) return;
     if((uint64_t)a->n >= a->limit) return;     /* 后面的项只计数，不再序列化 */
@@ -654,15 +668,16 @@ static void list_json_cb(void *ud, const char *name, bool is_dir, uint64_t size)
                  (a->dir[0]&&a->dir[strlen(a->dir)-1]=='/')?"":"/", name);
         if(img_ntfs_file_times(a->fs,full,t4)==IMG_OK)
             k+=snprintf(item+k,sizeof item-(size_t)k,
-                        "\",\"dir\":%s,\"size\":%llu,\"ctime\":%llu,\"mtime\":%llu}",
+                        "\",\"dir\":%s,\"size\":%llu,\"ino\":%llu,\"ctime\":%llu,\"mtime\":%llu}",
                         is_dir?"true":"false",(unsigned long long)size,
+                        (unsigned long long)ino,
                         (unsigned long long)t4[0],(unsigned long long)t4[1]);
         else
             k+=snprintf(item+k,sizeof item-(size_t)k,"\",\"dir\":%s,\"size\":%llu}",
                         is_dir?"true":"false",(unsigned long long)size);
     } else {
-        k+=snprintf(item+k,sizeof item-(size_t)k,"\",\"dir\":%s,\"size\":%llu}",
-                    is_dir?"true":"false",(unsigned long long)size);
+        k+=snprintf(item+k,sizeof item-(size_t)k,"\",\"dir\":%s,\"size\":%llu,\"ino\":%llu}",
+                    is_dir?"true":"false",(unsigned long long)size,(unsigned long long)ino);
     }
     if(a->len+(size_t)k+2 < a->cap){ memcpy(a->b+a->len,item,(size_t)k); a->len+=(size_t)k; a->n++; }
     else a->truncated=true;
@@ -693,9 +708,15 @@ static int cmd_ntfs_list(img_ctx *ctx, const img_args *in, img_result *out){
     /* ★ TLS：ntfs.list 走的是 ctx（同一 ctx 内部串行），但不同 ctx 可并行；
      *   jbuf 原是进程级 static → 两盘并发列目录会互相覆盖（与 iso.ls 同一类缺陷）。*/
     IMG_THREAD_LOCAL static char jbuf[256*1024];
-    list_buf_t acc={jbuf,sizeof jbuf,0,0,offset,limit,0,false,
-                    fs,path,img_args_bool(in,"times",false)};
+    uint64_t after_ino = img_args_u64(in,"after",0);
+    bool want_ino = img_args_bool(in,"ino",false) || after_ino != 0;
+    /* rev：目录 $SI 的"改动时间"（秒）。App 用它判断自己那份缓存过期没（§22）。*/
+    uint64_t rev = 0;
+    (void)img_ntfs_dir_rev(fs, path, &rev);
     bool want_sizes = img_args_bool(in,"sizes",false);
+    list_buf_t acc={jbuf,sizeof jbuf,0,0,offset,limit,0,false,
+                    fs,path,img_args_bool(in,"times",false),
+                    want_ino,after_ino,false};
     rc = want_sizes ? img_ntfs_list_dir_sizes(fs,path,list_json_cb,&acc)
                     : img_ntfs_list_dir(fs,path,list_json_cb,&acc);
     img_ntfs_umount(fs);
@@ -707,6 +728,8 @@ static int cmd_ntfs_list(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_bool(out,"has_more", offset+(uint64_t)acc.n < acc.total);
     img_result_bool(out,"truncated",acc.truncated);
     img_result_bool(out,"sizes",want_sizes);
+    img_result_bool(out,"ino",want_ino);
+    img_result_u64(out,"rev",rev);
     if(!acc.len){ memcpy(jbuf,"[]",2); acc.len=2; }
     else{                                             /* ★ 补方括号（裸项拼接不是合法 JSON —— 实测踩过）*/
         if(acc.len+2 >= (int)sizeof jbuf) acc.len=(int)sizeof jbuf-3;
@@ -2946,8 +2969,8 @@ static const img_arg A_NTFSMOVE[] = {
     {"src",  IMG_A_STR, true,  NULL, "盘内现有路径（/ 开头）", NULL},
     {"dst",  IMG_A_STR, true,  NULL, "盘内新路径（/ 开头；末段不同=改名，父目录不同=移动）", NULL},
     {"overwrite", IMG_A_BOOL, false, "false", "目标已存在时是否覆盖（默认 false=直接报错）", NULL},
-    {"allow_dir_move", IMG_A_BOOL, false, "false",
-     "★默认 false：目录只允许同父改名。true=允许把目录搬到别的父目录（真机验收/专家用，App 别传）", NULL},
+    {"allow_dir_move", IMG_A_BOOL, false, "true",
+     "目录能否搬到别的父目录（默认 true —— 2026-10-23 真 Windows 验收通过后解禁；传 false 可恢复旧政策）", NULL},
 };
 #if IMG_WITH_NTFS3G   /* 只在开启 NTFS 时用到；关掉时不该留下 unused 警告 */
 /* 把 img_ntfs_move_path 的返回码翻成【能分开病因】的错误码：
@@ -2957,10 +2980,11 @@ static const char *ntfs_move_code(int rc){
     switch(rc){
         case IMG_ENOENT:   return "NTFS-PATH-NOTFOUND";
         case IMG_EEXISTS:  return "NTFS-DEST-EXISTS";
-        case IMG_ENOTSUP:  return "NTFS-SRC-IS-DIR";   /* 目录跨父搬移：真 Windows 实测判负，已收回（见 move_path 里的 chkdsk 证据）*/
+        case IMG_ENOTSUP:  return "NTFS-SRC-IS-DIR";   /* 只在 allow_dir_move=false 或"搬进自己子树"时出现 */
         case IMG_ESTATE:   return "NTFS-DEST-IS-DIR";  /* 目标是目录：不许拿文件顶掉它 */
         case IMG_EFULL:    return "FAT-ENOSPC";
         case IMG_ECORRUPT: return "NTFS-DIR-PHANTOM";  /* 写后自证没过：目录/名字没真落盘 */
+        case IMG_ECYCLE:   return "NTFS-MOVE-INTO-SELF"; /* 搬进自己/自己的子树 */
         case IMG_EINVAL:   return "CMD-ARG-BAD";
         default:           return "NTFS-MOVE-FAIL";
     }
@@ -2987,7 +3011,7 @@ static int cmd_ntfs_move(img_ctx *ctx, const img_args *in, img_result *out){
     if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",dst,"不是合法 NTFS（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
     img_span sp; img_span_prep(&sp,"ntfs","move","盘内改名/移动");
     img_span_kv_str(&sp,"src",src); img_span_kv_str(&sp,"dst",dst); img_span_begin(&sp);
-    int mr=img_ntfs_move_path(fs,src,dst,over,img_args_bool(in,"allow_dir_move",false));
+    int mr=img_ntfs_move_path(fs,src,dst,over,img_args_bool(in,"allow_dir_move",true));
     img_span_end(&sp,mr);
     /* ★ 校验必须在 umount 之前问（卸载后就问不到了）
      * ★ 只改大小写（a.txt → A.TXT）时"源还在"这个判断没有意义：
@@ -3061,6 +3085,150 @@ static void copy_parent_info(img_ntfs_fs *fs, const char *abs, char *pout, size_
     if (img_ntfs_list_dir(fs, pout, count_entry_cb, &n) == IMG_OK && total) *total = n;
 }
 #endif
+
+/* ================= 时间戳设置（ntfs.touch / fat.touch） =================
+ * 语义照 edk2 那套（用户给的资料）：**传 0 = 该项保持原值**，不更新。
+ * 三种取值来源（三选一）：--now（现在）/ --time=<unix 秒> / --ref=<盘内另一路径，抄它的时间）。
+ * --set=all|create|modify|access 选要动哪几个（默认 all）。*/
+static const img_arg A_NTFSTOUCH[] = {
+    {"img",  IMG_A_STR, true,  NULL, "镜像路径（qcow2）", NULL},
+    {"lba",  IMG_A_U64, true,  NULL, "NTFS 分区起始 LBA", chk_lba},
+    {"path", IMG_A_STR, true,  NULL, "盘内目标路径（/ 开头）", NULL},
+    {"now",  IMG_A_BOOL, false, "false", "把时间设成【现在】", NULL},
+    {"time", IMG_A_U64, false, "0",     "把时间设成这个 unix 秒（0=不改）", NULL},
+    {"ref",  IMG_A_STR, false, NULL,    "抄这个盘内路径的时间（clone 时间戳）", NULL},
+    {"set",  IMG_A_ENUM, false, "all",  "改哪些：all | create | modify | access", NULL},
+};
+static const img_arg A_FATTOUCH[] = {
+    {"img",  IMG_A_STR, true,  NULL, "镜像路径（qcow2）", NULL},
+    {"lba",  IMG_A_U64, true,  NULL, "FAT32 分区起始 LBA", chk_lba},
+    {"path", IMG_A_STR, true,  NULL, "分区内目标路径（/ 开头）", NULL},
+    {"now",  IMG_A_BOOL, false, "false", "把时间设成【现在】", NULL},
+    {"time", IMG_A_U64, false, "0",     "把时间设成这个 unix 秒（0=不改）", NULL},
+    {"ref",  IMG_A_STR, false, NULL,    "抄这个分区内路径的时间", NULL},
+    {"set",  IMG_A_ENUM, false, "all",  "改哪些：all | create | modify | access", NULL},
+};
+
+#if IMG_WITH_NTFS3G
+static void touch_pick(const char *kind, uint64_t v[4]){
+    int mode = 0;                             /* 0=all 1=create 2=modify 3=access */
+    if (kind) {
+        if (!strcmp(kind,"create")) mode = 1;
+        else if (!strcmp(kind,"modify")) mode = 2;
+        else if (!strcmp(kind,"access")) mode = 3;
+    }
+    if (mode == 0) return;
+    /* v = [create, modify, access, mft_change]；把不想动的清零（0=不改） */
+    for (int i = 0; i < 3; i++)
+        if (i != mode - 1) v[i] = 0;
+}
+#endif
+
+static int cmd_ntfs_touch(img_ctx *ctx, const img_args *in, img_result *out){
+    if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 时间戳）","重新编译时开启该功能并安装对应系统库");
+#if IMG_WITH_NTFS3G
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *path=img_args_get(in,"path");
+    if(!path||path[0]!='/'){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","需要 / 开头的盘内绝对路径",NULL); return IMG_EINVAL; }
+    bool want_now=img_args_bool(in,"now",false);
+    uint64_t t=img_args_u64(in,"time",0);
+    const char *ref=img_args_get(in,"ref");
+    img_qcow2 *q=img_ctx_qcow2(ctx); if(!q) return qc_open_fail(out,ctx);
+    img_parttable_t *tb=NULL; int rc=img_ctx_parttable(ctx,&tb);
+    if(rc||!tb) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=ntfs_part_bytes(tb,lba);
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+    img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",path,"不是合法 NTFS（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
+
+    uint64_t v[4]={0,0,0,0};
+    if(ref){
+        uint64_t rt[4]={0,0,0,0};
+        if(img_ntfs_file_times(fs,ref,rt)!=IMG_OK){
+            img_ntfs_umount(fs);
+            img_result_fail(out,IMG_ENOENT,"NTFS-PATH-NOTFOUND",ref,"--ref 指向的路径不存在",NULL);
+            return IMG_ENOENT;
+        }
+        memcpy(v,rt,sizeof v);
+    } else if(want_now || t){
+        uint64_t x = want_now ? (uint64_t)time(NULL) : t;
+        v[0]=v[1]=v[2]=x;                      /* 创建/修改/访问都设；mft_change 不碰 */
+    } else {
+        img_ntfs_umount(fs);
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","now","要给 --now / --time= / --ref= 之一（都不给就不知道设成什么）",NULL);
+        return IMG_EINVAL;
+    }
+    touch_pick(img_args_get(in,"set"), v);
+    rc = img_ntfs_set_times(fs,path,v);
+    uint64_t after[4]={0,0,0,0};
+    if(rc==IMG_OK) (void)img_ntfs_file_times(fs,path,after);
+    img_ntfs_umount(fs);
+    if(rc){
+        img_result_fail(out,rc,rc==IMG_ENOENT?"NTFS-PATH-NOTFOUND":"NTFS-TOUCH-FAIL",path,"设置时间失败",NULL);
+        return rc;
+    }
+    img_result_str(out,"path",path);
+    img_result_u64(out,"ctime",after[0]);
+    img_result_u64(out,"mtime",after[1]);
+    img_result_u64(out,"atime",after[2]);
+    img_result_u64(out,"mft_change",after[3]);
+    return IMG_OK;
+#else
+    (void)ctx;(void)in;(void)out; return IMG_ENOTSUP;
+#endif
+}
+
+static int cmd_fat_touch(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *path=img_args_get(in,"path");
+    if(!path||path[0]!='/'){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","需要 / 开头的绝对路径",NULL); return IMG_EINVAL; }
+    bool want_now=img_args_bool(in,"now",false);
+    uint64_t t=img_args_u64(in,"time",0);
+    const char *ref=img_args_get(in,"ref");
+    img_qcow2 *q=img_ctx_qcow2(ctx); if(!q) return qc_open_fail(out,ctx);
+    img_parttable_t *tb=NULL; int rc=img_ctx_parttable(ctx,&tb);
+    if(rc||!tb) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=ntfs_part_bytes(tb,lba);
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+    img_fat32_fs *fs=img_fat32_mount(q,lba,true);
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",path,"不是合法 FAT32（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
+    uint16_t cur[5]={0,0,0,0,0};
+    if(img_fat32_file_times(fs,path,cur)!=IMG_OK){
+        img_fat32_unmount(fs);
+        img_result_fail(out,IMG_ENOENT,"FAT-ENTRY-NOTFOUND",path,"路径不存在",NULL);
+        return IMG_ENOENT;
+    }
+    int64_t x = 0;
+    if(ref){
+        uint16_t r5[5]={0,0,0,0,0};
+        if(img_fat32_file_times(fs,ref,r5)!=IMG_OK){ img_fat32_unmount(fs);
+            img_result_fail(out,IMG_ENOENT,"FAT-ENTRY-NOTFOUND",ref,"--ref 指向的路径不存在",NULL); return IMG_ENOENT; }
+        memcpy(cur,r5,sizeof cur);             /* 整体抄过来，不走下面的"只改一项" */
+        x = -1;
+    } else if(want_now || t){
+        x = want_now ? (int64_t)time(NULL) : (int64_t)t;
+    } else {
+        img_fat32_unmount(fs);
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","now","要给 --now / --time= / --ref= 之一",NULL);
+        return IMG_EINVAL;
+    }
+    if(x >= 0){
+        uint16_t tm=0,dt=0; img_fat32_epoch_to_dos(x,&tm,&dt);
+        const char *kind=img_args_get(in,"set");
+        bool all = !kind || !strcmp(kind,"all");
+        if(all || !strcmp(kind,"create")){ cur[0]=tm; cur[1]=dt; }
+        if(all || !strcmp(kind,"modify")){ cur[3]=tm; cur[4]=dt; }
+        if(all || !strcmp(kind,"access")){ cur[2]=dt; }
+    }
+    rc = img_fat32_file_set_times(fs,path,cur);
+    img_fat32_unmount(fs);
+    if(rc){ img_result_fail(out,rc,"FAT-TOUCH-FAIL",path,"设置时间失败",NULL); return rc; }
+    img_result_str(out,"path",path);
+    img_result_u64(out,"ctime",(uint64_t)img_fat32_dos_to_epoch(cur[0],cur[1]));
+    img_result_u64(out,"mtime",(uint64_t)img_fat32_dos_to_epoch(cur[3],cur[4]));
+    img_result_u64(out,"atime",(uint64_t)img_fat32_dos_to_epoch(0,cur[2]));
+    return IMG_OK;
+}
 
 static int cmd_ntfs_copy(img_ctx *ctx, const img_args *in, img_result *out){
     if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 复制）","重新编译时开启该功能并安装对应系统库");
@@ -3519,7 +3687,7 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_NTFSPUT,(int)(sizeof A_NTFSPUT/sizeof A_NTFSPUT[0]), cmd_ntfs_put},
     {"ntfs.export","1.0", "把 NTFS 分区里的文件导出到本地（抽 bootmgr/boot.sdi/winre.wim）",
         A_NTFSEXPORT,(int)(sizeof A_NTFSEXPORT/sizeof A_NTFSEXPORT[0]), cmd_ntfs_export},
-    {"ntfs.move",  "1.0", "盘内改名/移动【单条路径】（末段不同=改名，父目录不同=移动；默认不覆盖）",
+    {"ntfs.move",  "1.0", "盘内改名/移动【单条路径】（末段不同=改名，父目录不同=移动；目录跨父默认允许）",
         A_NTFSMOVE,(int)(sizeof A_NTFSMOVE/sizeof A_NTFSMOVE[0]), cmd_ntfs_move},
     {"win.finish", "1.0", "裸灌后首次启动收尾：离线把 SYSTEM\\Setup\\Status\\ChildCompletion\\setup.exe 改成 3（微软官方修复）",
         A_WINFINISH,(int)(sizeof A_WINFINISH/sizeof A_WINFINISH[0]), cmd_win_finish},
@@ -3529,6 +3697,10 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_NTFSCOPY,(int)(sizeof A_NTFSCOPY/sizeof A_NTFSCOPY[0]), cmd_ntfs_copy},
     {"fat.copy",   "1.0", "FAT32 盘内复制（同卷，≤64 MiB）：可选同名策略",
         A_FATCOPY,(int)(sizeof A_FATCOPY/sizeof A_FATCOPY[0]), cmd_fat_copy},
+    {"ntfs.touch", "1.0", "设置盘内路径的时间（--now / --time= / --ref= 三选一；0=该项不改）",
+        A_NTFSTOUCH,(int)(sizeof A_NTFSTOUCH/sizeof A_NTFSTOUCH[0]), cmd_ntfs_touch},
+    {"fat.touch",  "1.0", "设置 FAT 上路径的时间（同上；精度 2 秒）",
+        A_FATTOUCH,(int)(sizeof A_FATTOUCH/sizeof A_FATTOUCH[0]), cmd_fat_touch},
     {"ntfs.parent","1.0", "只读检查目录的 \"..\" 父引用是否自洽（搬过目录之后必查）",
         A_NTFSRPARENT,(int)(sizeof A_NTFSRPARENT/sizeof A_NTFSRPARENT[0]), cmd_ntfs_parent},
     {"wim.identify","1.0", "从内容识别 WIM/ESD/ISO 里的 Windows 版本（不信文件名）",

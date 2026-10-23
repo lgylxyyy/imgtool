@@ -46,6 +46,7 @@ typedef enum {
     IMG_ETRUNC        = -14,  /* 数据被截断 */
     IMG_ERANGE        = -15,  /* 请求范围越界（偏移/长度超出镜像，含加法溢出） */
     IMG_ETIMEDOUT     = -16,  /* I/O 超时：N 秒内没有任何读写完成（看门狗） */
+    IMG_ECYCLE        = -17,  /* 会造环：把目录搬进它自己/它的子树 */
 } img_err_t;
 
 const char *img_strerror(int err);
