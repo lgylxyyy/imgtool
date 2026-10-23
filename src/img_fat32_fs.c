@@ -1018,9 +1018,11 @@ static int fat_unique_name(img_fat32_fs *fs, const char *dir, const char *base,
         char cand[320]; int n;
         if (i == 0) n = snprintf(cand, sizeof cand, "%s", base);
         else {
+            /* 同 NTFS 侧：扩展名之前插 " (N)"，目录则 "名 (N)" */
             const char *dot = strrchr(base, '.');
-            if (dot && dot != base) n = snprintf(cand, sizeof cand, "%.*s.%03d%s", (int)(dot - base), base, i, dot);
-            else                    n = snprintf(cand, sizeof cand, "%s.%03d", base, i);
+            bool has_ext = dot && dot != base && dot[1];
+            if (has_ext) n = snprintf(cand, sizeof cand, "%.*s (%d)%s", (int)(dot - base), base, i, dot);
+            else         n = snprintf(cand, sizeof cand, "%s (%d)", base, i);
         }
         if (n < 0 || (size_t)n >= sizeof cand) continue;
         char full[1200];

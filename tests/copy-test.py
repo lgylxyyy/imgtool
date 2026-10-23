@@ -109,9 +109,9 @@ check('  父目录 /dest 被自动创建', exists('/dest'))
 d = run('ntfs.copy', img=IMG, lba=LBA, src='/src/a.bin', dst='/src/b.bin', conflict='fail')
 check('同名 + conflict=fail ⇒ NTFS-DEST-EXISTS', code(d) == 'NTFS-DEST-EXISTS', json.dumps(d)[:160])
 d = run('ntfs.copy', img=IMG, lba=LBA, src='/src/a.bin', dst='/src/b.bin', conflict='rename')
-check('同名 + conflict=rename ⇒ 自动 .001',
-      d.get('ok') and data(d).get('path') == '/src/b.001.bin', json.dumps(d)[:200])
-check('  .001 内容正确', exported('/src/b.001.bin', 'b001') == A)
+check('同名 + conflict=rename ⇒ 自动改名为 "b (1).bin"',
+      d.get('ok') and data(d).get('path') == '/src/b (1).bin', json.dumps(d)[:200])
+check('  .001 内容正确', exported('/src/b (1).bin', 'b001') == A)
 check('put /src/c.bin（另一份内容）', put(mk(B, 'c.bin'), '/src/c.bin').get('ok'))
 d = run('ntfs.copy', img=IMG, lba=LBA, src='/src/a.bin', dst='/src/c.bin', conflict='overwrite')
 check('同名 + conflict=overwrite ⇒ 覆盖并 replaced=true',
@@ -215,8 +215,8 @@ check('on_fail=stop：第一条失败就停（不再做后面那条）',
       data(d).get('failed') == 1 and not exists('/batch/e1.bin'), json.dumps(data(d))[:200])
 
 # ─────────── 删除 ───────────
-d = run('ntfs.rm', img=IMG, lba=LBA, path='/src/b.001.bin')
-check('删文件', d.get('ok') and not exists('/src/b.001.bin'), json.dumps(d)[:160])
+d = run('ntfs.rm', img=IMG, lba=LBA, path='/src/b (1).bin')
+check('删文件', d.get('ok') and not exists('/src/b (1).bin'), json.dumps(d)[:160])
 check('建一个非空目录 /deldir/kid/x.bin', put(mk(b'xx', 'x.bin'), '/deldir/kid/x.bin').get('ok'))
 d = run('ntfs.rm', img=IMG, lba=LBA, path='/deldir')
 check('删非空目录（默认）⇒ NTFS-DIR-NOT-EMPTY', code(d) == 'NTFS-DIR-NOT-EMPTY', json.dumps(d)[:160])
@@ -237,7 +237,7 @@ check('  FAT 复制后内容一致', os.path.exists(fat_out) and open(fat_out, '
 d = run('fat.copy', img=IMG, lba=ESP, src='/fa.bin', dst='/fb.bin', conflict='fail')
 check('FAT 同名 + fail ⇒ FAT-ENTRY-EXISTS', code(d) == 'FAT-ENTRY-EXISTS', json.dumps(d)[:160])
 d = run('fat.copy', img=IMG, lba=ESP, src='/fa.bin', dst='/fb.bin', conflict='rename')
-check('FAT 同名 + rename ⇒ .001', d.get('ok') and data(d).get('path') == '/fb.001.bin',
+check('FAT 同名 + rename ⇒ "fb (1).bin"', d.get('ok') and data(d).get('path') == '/fb (1).bin',
       json.dumps(d)[:200])
 d = run('fat.copy', img=IMG, lba=ESP, src='/fa.bin', dst='/sub/deep/fc.bin')
 check('FAT 复制到不存在的多级目录 ⇒ 自动建父目录', d.get('ok'), json.dumps(d)[:200])

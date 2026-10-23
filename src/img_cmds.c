@@ -3059,7 +3059,7 @@ static const img_arg A_NTFSCOPY[] = {
     {"src",  IMG_A_STR, false, NULL, "盘内源文件（/ 开头）；用 list_file 时可省", NULL},
     {"dst",  IMG_A_STR, false, NULL, "盘内目标（/ 开头；给目录或以 / 结尾 ⇒ 沿用源文件名）；用 list_file 时可省", NULL},
     {"conflict", IMG_A_ENUM, false, "fail",
-     "同名怎么办：fail=报错（默认） | overwrite=覆盖 | rename=自动 .001（资源管理器行为）", NULL},
+     "同名怎么办：fail=报错（默认） | overwrite=覆盖 | rename=自动改名为 \"名 (1).扩展名\"", NULL},
     {"preserve_times", IMG_A_BOOL, false, "true", "保留源文件的四个时间戳（$SI/$FN）", NULL},
     {"create_parents", IMG_A_BOOL, false, "true", "目标父目录不存在就建", NULL},
     {"list_file", IMG_A_STR, false, NULL,
@@ -3074,7 +3074,7 @@ static const img_arg A_FATCOPY[] = {
     {"src",  IMG_A_STR, true,  NULL, "分区内源文件（/ 开头）", NULL},
     {"dst",  IMG_A_STR, true,  NULL, "分区内目标（/ 开头；给目录或以 / 结尾 ⇒ 沿用源文件名）", NULL},
     {"conflict", IMG_A_ENUM, false, "fail",
-     "同名怎么办：fail=报错（默认） | overwrite=覆盖 | rename=自动 .001", NULL},
+     "同名怎么办：fail=报错（默认） | overwrite=覆盖 | rename=自动改名为 \"名 (1).扩展名\"", NULL},
 };
 /* ---------- 盘内复制（NTFS） ---------- */
 #if IMG_WITH_NTFS3G

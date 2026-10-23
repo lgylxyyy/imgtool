@@ -805,7 +805,7 @@ int img_ntfs_put_file(img_ntfs_fs *fs, const char *local_path,
  * 官方要求恢复分区里有 Winre.wim + ReAgent.xml；
  * reagentc 靠它把位置注册为 \\?\\GLOBALROOT\\device\\harddiskN\\partitionM\\... */
 /* ---------- 盘内复制：临时名 + 末尾原子改名 ---------- */
-/* 在 dir 里找一个不冲突的名字：base、base.001、base.002…（扩展名保持在最后） */
+/* 在 dir 里找一个不冲突的名字：base、base (1)、base (2)…（扩展名保持在最后） */
 static int copy_unique_name(ntfs_inode *dir, const char *base, char *out, size_t cap){
     for (int i = 0; i < 1000; i++) {
         char cand[320];               /* 比 NAME_MAX 宽一点，避免 -Wformat-truncation */
@@ -813,11 +813,16 @@ static int copy_unique_name(ntfs_inode *dir, const char *base, char *out, size_t
         if (i == 0) {
             n = snprintf(cand, sizeof cand, "%s", base);
         } else {
+            /* Windows 资源管理器风格：在扩展名之前插入 " (N)"，扩展名保持不变；
+             * 目录没有扩展名 ⇒ "目录名 (N)"。
+             * （旧实现写的是 name.001.ext —— 那是 Windows.old 那种"保留旧系统"的编号方式，
+             *   只应该用在 win.recover 里，不该出现在用户的复制粘贴里。）*/
             const char *dot = strrchr(base, '.');
-            if (dot && dot != base)
-                n = snprintf(cand, sizeof cand, "%.*s.%03d%s", (int)(dot - base), base, i, dot);
+            bool has_ext = dot && dot != base && dot[1];
+            if (has_ext)
+                n = snprintf(cand, sizeof cand, "%.*s (%d)%s", (int)(dot - base), base, i, dot);
             else
-                n = snprintf(cand, sizeof cand, "%s.%03d", base, i);
+                n = snprintf(cand, sizeof cand, "%s (%d)", base, i);
         }
         if (n < 0 || (size_t)n >= sizeof cand) continue;    /* 名字过长：跳过这个候选 */
         ntfschar *u = NULL; size_t ul = 0;
