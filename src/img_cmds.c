@@ -3056,12 +3056,17 @@ static const img_arg A_NTFSSRM[] = {
 static const img_arg A_NTFSCOPY[] = {
     {"img",  IMG_A_STR, true,  NULL, "镜像路径（qcow2）", NULL},
     {"lba",  IMG_A_U64, true,  NULL, "NTFS 分区起始 LBA", chk_lba},
-    {"src",  IMG_A_STR, true,  NULL, "盘内源文件（/ 开头）", NULL},
-    {"dst",  IMG_A_STR, true,  NULL, "盘内目标（/ 开头；给目录或以 / 结尾 ⇒ 沿用源文件名）", NULL},
+    {"src",  IMG_A_STR, false, NULL, "盘内源文件（/ 开头）；用 list_file 时可省", NULL},
+    {"dst",  IMG_A_STR, false, NULL, "盘内目标（/ 开头；给目录或以 / 结尾 ⇒ 沿用源文件名）；用 list_file 时可省", NULL},
     {"conflict", IMG_A_ENUM, false, "fail",
      "同名怎么办：fail=报错（默认） | overwrite=覆盖 | rename=自动 .001（资源管理器行为）", NULL},
     {"preserve_times", IMG_A_BOOL, false, "true", "保留源文件的四个时间戳（$SI/$FN）", NULL},
     {"create_parents", IMG_A_BOOL, false, "true", "目标父目录不存在就建", NULL},
+    {"list_file", IMG_A_STR, false, NULL,
+     "★批量：本地清单文件，每行 `盘内源>盘内目标`（# 开头注释、空行忽略）。"
+     "一次挂载全做完，比逐条调用快得多（省掉 N 次 mount）", NULL},
+    {"on_fail", IMG_A_ENUM, false, "continue",
+     "批量时某项失败怎么办：continue=继续（默认） | stop=立刻停", NULL},
 };
 static const img_arg A_FATCOPY[] = {
     {"img",  IMG_A_STR, true,  NULL, "镜像路径（qcow2）", NULL},
@@ -3230,12 +3235,27 @@ static int cmd_fat_touch(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+static const char *batch_code(int rc){
+    switch(rc){
+        case IMG_ENOENT:    return "NTFS-PATH-NOTFOUND\"";
+        case IMG_EEXISTS:   return "NTFS-DEST-EXISTS\"";
+        case IMG_ESTATE:    return "NTFS-DEST-IS-DIR\"";
+        case IMG_ENOTSUP:   return "NTFS-SRC-IS-DIR\"";
+        case IMG_EFULL:     return "FAT-ENOSPC\"";
+        case IMG_ECORRUPT:  return "NTFS-DIR-PHANTOM\"";
+        case IMG_ECYCLE:    return "NTFS-MOVE-INTO-SELF\"";
+        case IMG_ECANCELLED:return "CTL-CANCELLED\"";
+        default:            return "NTFS-COPY-FAIL\"";
+    }
+}
+
 static int cmd_ntfs_copy(img_ctx *ctx, const img_args *in, img_result *out){
     if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 复制）","重新编译时开启该功能并安装对应系统库");
 #if IMG_WITH_NTFS3G
     uint64_t lba=img_args_u64(in,"lba",0);
     const char *src=img_args_get(in,"src"), *dst=img_args_get(in,"dst");
-    if(!src||src[0]!='/'||!dst||dst[0]!='/'){
+    /* 单条复制要求 src/dst 都是绝对路径；批量（list_file）时这两个可以为空 */
+    if(!img_args_get(in,"list_file") && (!src||src[0]!='/'||!dst||dst[0]!='/')){
         img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","dst","src/dst 都必须是 / 开头的盘内绝对路径",NULL);
         return IMG_EINVAL;
     }
@@ -3256,6 +3276,74 @@ static int cmd_ntfs_copy(img_ctx *ctx, const img_args *in, img_result *out){
     }
     o.preserve_times  = img_args_bool(in,"preserve_times",true);
     o.create_parents  = img_args_bool(in,"create_parents",true);
+
+    const char *lst = img_args_get(in,"list_file");
+    if (!lst && (!src || !dst)) {
+        img_ntfs_umount(fs);
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","src","要么给 src+dst，要么给 list_file（二选一）",NULL);
+        return IMG_EINVAL;
+    }
+    if (lst) {
+        /* ---- 批量：每行 源>目标，一次挂载全做完 ---- */
+        FILE *fp = fopen(lst, "r");
+        if (!fp) {
+            img_ntfs_umount(fs);
+            img_result_fail(out,IMG_ENOENT,"SRC-NOTFOUND",lst,"清单文件打不开",NULL);
+            return IMG_ENOENT;
+        }
+        const char *ofail = img_args_get(in,"on_fail");
+        bool stop_on_fail = ofail && !strcmp(ofail,"stop");
+        IMG_THREAD_LOCAL static char items[96*1024];
+        size_t il = 1; items[0] = '['; items[1] = 0;
+        int okn = 0, badn = 0; uint64_t bytes = 0; bool truncated = false;
+        char line[1400];
+        int idx = 0;
+        img_span sp; img_span_prep(&sp,"ntfs","copy-batch","批量盘内复制");
+        img_span_kv_str(&sp,"list",lst); img_span_begin(&sp);
+        while (fgets(line, sizeof line, fp)) {
+            char *nl = strchr(line,'\n'); if (nl) *nl = 0;
+            char *p0 = line;
+            while (*p0 == ' ' || *p0 == '\t') p0++;
+            if (!*p0 || *p0 == '#') continue;
+            char *sep = strchr(p0, '>');
+            if (!sep) { badn++; continue; }
+            *sep = 0;
+            char *src = p0;
+            char *dst = sep + 1;
+            while (*src == ' ' || *src == '\t') src++;
+            char *e = src + strlen(src); while (e > src && (e[-1]==' '||e[-1]=='\t')) *--e = 0;
+            while (*dst == ' ' || *dst == '\t') dst++;
+            e = dst + strlen(dst); while (e > dst && (e[-1]==' '||e[-1]=='\t')) *--e = 0;
+            if (!*src || !*dst) { badn++; continue; }
+            idx++;
+            img_copy_result r; memset(&r, 0, sizeof r);
+            int rc2 = img_ntfs_copy(fs, src, dst, &o, img_cmd_prog(), &r);
+            int need = snprintf(items + il, sizeof items - il,
+                "%s{\"src\":\"%s\",\"dst\":\"%s\",\"ok\":%s,\"ino\":%llu,\"size\":%llu%s%s}",
+                okn + badn ? "," : "", src, dst, rc2 == IMG_OK ? "true" : "false",
+                (unsigned long long)r.ino, (unsigned long long)r.size,
+                rc2 == IMG_OK ? "" : ",\"code\":\"",
+                rc2 == IMG_OK ? "" : batch_code(rc2));
+            if (need > 0 && il + (size_t)need < sizeof items) il += (size_t)need;
+            else truncated = true;
+            if (rc2 == IMG_OK) { okn++; bytes += r.size; }
+            else { badn++; if (stop_on_fail) break; }
+        }
+        fclose(fp);
+        if (il + 2 < sizeof items) { items[il++] = ']'; items[il] = 0; }
+        img_span_kv_u64(&sp,"copied",(uint64_t)okn);
+        img_span_kv_u64(&sp,"failed",(uint64_t)badn);
+        /* ★ 批量语义：命令本身成功（App 能拿到明细）；逐项成败在 failed/items 里。
+         *   否则一旦有一项失败就丢失全部明细（v1 就是这么错的）。*/
+        img_span_end(&sp, IMG_OK);
+        img_ntfs_umount(fs);
+        img_result_u64(out,"copied",(uint64_t)okn);
+        img_result_u64(out,"failed",(uint64_t)badn);
+        img_result_u64(out,"bytes",bytes);
+        img_result_bool(out,"truncated",truncated);
+        img_result_raw(out,"items", items[1] ? items : "[]");
+        return IMG_OK;
+    }
 
     img_span sp; img_span_prep(&sp,"ntfs","copy","盘内复制");
     img_span_kv_str(&sp,"src",src); img_span_kv_str(&sp,"dst",dst);

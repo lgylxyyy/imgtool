@@ -189,6 +189,31 @@ check('--set=modify 只改 mtime（ctime 不动）',
 d = run('ntfs.touch', img=IMG, lba=LBA, path='/t/a.bin', time='0')
 check('--time=0 ⇒ CMD-ARG-BAD（零值=不改，与 edk2 语义一致）', code(d) == 'CMD-ARG-BAD', code(d))
 
+# ─────────── 批量粘贴（--list_file） ───────────
+for i in (1, 2, 3):
+    _r = put(mk(bytes([i]) * (100 * i), 'b%d.bin' % i), '/src/b%d.bin' % i)
+    check('  批量源 /src/b%d.bin' % i, _r.get('ok'), json.dumps(_r)[:160])
+lst = os.path.join(W, 'paste.txt')
+with open(lst, 'w') as f:
+    f.write('# 批量\n\n')
+    for i in (1, 2, 3):
+        f.write('/src/b%d.bin>/batch/d%d.bin\n' % (i, i))
+    f.write('/src/nope.bin>/batch/x.bin\n')          # 故意放一条坏路径
+d = run('ntfs.copy', img=IMG, lba=LBA, list_file=lst)
+_d = data(d)
+check('批量复制：3 成功 / 1 失败', d.get('ok') and _d.get('copied') == 3 and _d.get('failed') == 1,
+      json.dumps(_d)[:200])
+check('  明细 items 是合法 JSON 且带 ino',
+      isinstance(_d.get('items'), list) and len(_d['items']) == 4
+      and all('ino' in x for x in _d['items']), _d.get('items'))
+check('  三个目标都在', all(exists('/batch/d%d.bin' % i) for i in (1, 2, 3)))
+check('  内容逐字节一致', exported('/batch/d2.bin', 'bd2') == bytes([2]) * 200)
+with open(lst, 'w') as f:
+    f.write('/src/nope.bin>/batch/y.bin\n/src/b1.bin>/batch/e1.bin\n')   # 第一行就失败
+d = run('ntfs.copy', img=IMG, lba=LBA, list_file=lst, on_fail='stop')
+check('on_fail=stop：第一条失败就停（不再做后面那条）',
+      data(d).get('failed') == 1 and not exists('/batch/e1.bin'), json.dumps(data(d))[:200])
+
 # ─────────── 删除 ───────────
 d = run('ntfs.rm', img=IMG, lba=LBA, path='/src/b.001.bin')
 check('删文件', d.get('ok') and not exists('/src/b.001.bin'), json.dumps(d)[:160])
