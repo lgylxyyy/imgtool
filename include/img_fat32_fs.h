@@ -66,6 +66,20 @@ int img_fat32_rm(img_fat32_fs *fs, const char *abs_path);
 /* 改名 / 移动（同一分区内；目录也可以，会同步子目录里的 ".." 项）。
  * 目标已存在 → IMG_EEXIST；把目录移进自己的子树 → IMG_EINVAL。*/
 int img_fat32_rename(img_fat32_fs *fs, const char *src_abs_path, const char *dst_abs_path);
+/* 盘内复制（FAT32）：src/dst 都是分区内绝对路径。dst 是目录（或以 / 结尾）时
+ * 目标名取 src 末段。conflict: 0=fail(EEXISTS) 1=overwrite 2=rename(.001)。
+ * ★FAT 没有"原子改名"以外的保护：实现是"写临时名 → 删除旧项 → 改名"，
+ *   中途掉电会留下 .imgtmp 残件（不会留下半截目标）。时间戳按 FAT 惯例盖当前时间。 */
+int img_fat32_copy(img_fat32_fs *fs, const char *src_abs, const char *dst_abs,
+                   int conflict, img_prog *prog,
+                   char *out_path, size_t out_cap, uint64_t *out_size, bool *out_replaced);
+/* 盘内复制（FAT32）：src/dst 都是分区内绝对路径。dst 是目录（或以 / 结尾）时
+ * 目标名取 src 末段。conflict: 0=fail(EEXISTS) 1=overwrite 2=rename(.001)。
+ * ★FAT 没有"原子改名"以外的保护：实现是"写临时名 → 删除旧项 → 改名"，
+ *   中途掉电会留下 .imgtmp 残件（不会留下半截目标）。时间戳按 FAT 惯例盖当前时间。 */
+int img_fat32_copy(img_fat32_fs *fs, const char *src_abs, const char *dst_abs,
+                   int conflict, img_prog *prog,
+                   char *out_path, size_t out_cap, uint64_t *out_size, bool *out_replaced);
 
 #ifdef __cplusplus
 }

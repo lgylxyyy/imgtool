@@ -996,6 +996,102 @@ int img_fat32_rm(img_fat32_fs *fs, const char *abs_path){
  * 目标已存在 → IMG_EEXISTS（是否覆盖是政策，留给命令层/App）。
  * 顺序：① 先建新项（指向同一簇）② 目录换了父就改 ".." ③ 再删旧项。
  *   任何一步失败，数据都还在（最坏情况是出现两条同名项，方向可查、可恢复）。*/
+/* ---------- 盘内复制（FAT32） ---------- */
+static void fat_split(const char *abs, char *dir, size_t dcap, char *name, size_t ncap){
+    const char *sl = strrchr(abs, '/');
+    if (!sl) { snprintf(dir, dcap, "/"); snprintf(name, ncap, "%s", abs); return; }
+    size_t dl = (size_t)(sl - abs);
+    if (dl == 0) snprintf(dir, dcap, "/");
+    else { if (dl >= dcap) dl = dcap - 1; memcpy(dir, abs, dl); dir[dl] = 0; }
+    snprintf(name, ncap, "%s", sl + 1);
+}
+
+static int fat_unique_name(img_fat32_fs *fs, const char *dir, const char *base,
+                           char *out, size_t cap){
+    for (int i = 0; i < 1000; i++) {
+        char cand[320]; int n;
+        if (i == 0) n = snprintf(cand, sizeof cand, "%s", base);
+        else {
+            const char *dot = strrchr(base, '.');
+            if (dot && dot != base) n = snprintf(cand, sizeof cand, "%.*s.%03d%s", (int)(dot - base), base, i, dot);
+            else                    n = snprintf(cand, sizeof cand, "%s.%03d", base, i);
+        }
+        if (n < 0 || (size_t)n >= sizeof cand) continue;
+        char full[1200];
+        snprintf(full, sizeof full, "%s%s%s", dir, strcmp(dir, "/") ? "/" : "", cand);
+        if (!img_fat32_path_exists(fs, full)) { snprintf(out, cap, "%.*s", (int)(cap - 1), cand); return 0; }
+    }
+    return -1;
+}
+
+int img_fat32_copy(img_fat32_fs *fs, const char *src_abs, const char *dst_abs,
+                   int conflict, img_prog *prog,
+                   char *out_path, size_t out_cap, uint64_t *out_size, bool *out_replaced){
+    if (!fs || !src_abs || !dst_abs) return IMG_EINVAL;
+    if (out_replaced) *out_replaced = false;
+    uint64_t ssz = 0;
+    int rc = img_fat32_file_size(fs, src_abs, &ssz);
+    if (rc != IMG_OK) return rc;
+    if (ssz > (64u << 20)) return IMG_EFULL;   /* 大文件请走 export+put（暂不做流式，见文档） */
+
+    void *buf = NULL; size_t blen = 0;
+    rc = img_fat32_read_file(fs, src_abs, &buf, &blen);
+    if (rc != IMG_OK) return rc;
+
+    /* 目标目录语义 */
+    char sdir[512], sname[256], ddir[512], dname[256];
+    fat_split(src_abs, sdir, sizeof sdir, sname, sizeof sname);
+    size_t dl = strlen(dst_abs);
+    bool dst_is_dir = (dl && dst_abs[dl - 1] == '/') || img_fat32_dir_exists(fs, dst_abs);
+    if (dst_is_dir) { snprintf(ddir, sizeof ddir, "%s", dst_abs); snprintf(dname, sizeof dname, "%s", sname); }
+    else fat_split(dst_abs, ddir, sizeof ddir, dname, sizeof dname);
+
+    if (strcmp(ddir, "/") != 0) {
+        if (!img_fat32_dir_exists(fs, ddir)) {
+            rc = img_fat32_mkdir_p(fs, ddir);
+            if (rc != IMG_OK) { free(buf); return rc; }
+        }
+    }
+
+    char final_name[256]; snprintf(final_name, sizeof final_name, "%s", dname);
+    char full[1200];
+    snprintf(full, sizeof full, "%s%s%s", ddir, strcmp(ddir, "/") ? "/" : "", final_name);
+    bool replaced = false;
+    if (img_fat32_path_exists(fs, full)) {
+        if (conflict == 0) { free(buf); return IMG_EEXISTS; }
+        if (conflict == 2) {
+            if (fat_unique_name(fs, ddir, dname, final_name, sizeof final_name) != 0) { free(buf); return IMG_EEXISTS; }
+            snprintf(full, sizeof full, "%s%s%s", ddir, strcmp(ddir, "/") ? "/" : "", final_name);
+        } else replaced = true;
+    }
+
+    /* 临时名 → 写完再改名（FAT 没有原子替换，所以覆盖时先删旧） */
+    char tmp_name[64], tmp_full[1200];
+    snprintf(tmp_name, sizeof tmp_name, ".imgtmp");
+    snprintf(tmp_full, sizeof tmp_full, "%s%s%s", ddir, strcmp(ddir, "/") ? "/" : "", tmp_name);
+    if (img_fat32_path_exists(fs, tmp_full)) (void)img_fat32_rm(fs, tmp_full);
+
+    if (prog) { img_prog_phase(prog, IMG_PH_EXTRACT, "盘内复制");
+                img_prog_op(prog, IMG_OP_WRITE); img_prog_bytes(prog, 0, ssz); }
+    rc = img_fat32_put_data(fs, buf, blen, tmp_full);
+    free(buf);
+    if (rc != IMG_OK) return rc;
+    if (prog) img_prog_bytes(prog, ssz, ssz);
+
+    if (replaced) {
+        int rr = img_fat32_rm(fs, full);
+        if (rr != IMG_OK && rr != IMG_ENOENT) { (void)img_fat32_rm(fs, tmp_full); return rr; }
+    }
+    rc = img_fat32_rename(fs, tmp_full, full);
+    if (rc != IMG_OK) { (void)img_fat32_rm(fs, tmp_full); return rc; }
+
+    if (!img_fat32_path_exists(fs, full)) return IMG_ECORRUPT;   /* 写后自证 */
+    if (out_path) snprintf(out_path, out_cap, "%.*s", (int)(out_cap - 1), full);
+    if (out_size) *out_size = ssz;
+    if (out_replaced) *out_replaced = replaced;
+    return IMG_OK;
+}
+
 int img_fat32_rename(img_fat32_fs *fs, const char *src_abs, const char *dst_abs){
     if(!fs||!src_abs||!dst_abs||!*src_abs||!*dst_abs) return IMG_EINVAL;
     if(!fs->writable) return IMG_ENOTSUP;

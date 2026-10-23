@@ -83,6 +83,9 @@ int img_ntfs_label(img_ntfs_fs *fs, char *out, size_t cap);
  * ★ 先 sync 父目录再删 —— 否则 ntfs_delete 收尾会读到未落盘的目录项（move_into 踩过）。
  * 非空目录返回 IMG_ESTATE（不递归删，避免误删整棵树）。 */
 int img_ntfs_rm(img_ntfs_fs *fs, const char *abs_path);
+/* 递归删除（目录树）。默认的 img_ntfs_rm 只删文件/空目录；递归必须显式调用本函数。
+ * removed=删掉的条目总数（含子项）；返回 IMG_ESTATE 表示非空且没开递归/或超深。 */
+int img_ntfs_rm_tree(img_ntfs_fs *fs, const char *abs_path, int *removed);
 /* 搬移原语：把【给定名字】移进 dst_dir（dst_dir 不存在则先建）
  * ★ 层归属：这是机制不是政策 —— 搬谁由调用方（App）给名单；
  *   搬完每个名字保持不变（/Windows → /Windows.old/Windows）。
@@ -129,6 +132,36 @@ int img_ntfs_precheck(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
  *                              且记录里有一条"同名 + 父引用指回上一层"的 $FILE_NAME。
  * img_ntfs_verify_path(abs) —— 从盘上按路径重新解析 ino/是否目录（只读，不改任何东西）。
  * 两者失败都返回 IMG_ECORRUPT/IMG_ENOENT，绝不"看起来成功"。 */
+
+/* ---------- 盘内复制（2026-10-23 新增；契约见 docs/…/工具能力与App集成手册.md §22） ----------
+ * 语义对齐 Windows「同卷复制」：新 inode、内容逐字节、继承父目录 ACL（不是 everyone）、
+ * 可选保留 $SI/$FN 四个时间。写的时候先落到同目录临时名 `.imgtmp-*`（隐藏），
+ * 全部写完再【一次原子改名】到目标名 ⇒ 别人永远看不到半截文件，崩溃只留临时文件。
+ * dst 是目录（或路径以 / 结尾）时，目标名取 src 的末段。
+ * conflict: fail=已存在就报错 / overwrite=覆盖（目标若是目录则拒） / rename=自动 .001 编号
+ * 返回：IMG_OK / IMG_EEXISTS / IMG_ESTATE(目标目录) / IMG_EFULL / IMG_EIO / IMG_ENOTSUP(源是目录) */
+typedef enum {
+    IMG_COPY_FAIL      = 0,   /* 已存在 ⇒ EEXISTS（默认，最安全） */
+    IMG_COPY_OVERWRITE = 1,   /* 覆盖已存在的文件 */
+    IMG_COPY_RENAME    = 2    /* 自动改名 xxx.001（MT/资源管理器行为） */
+} img_copy_conflict_t;
+
+typedef struct {
+    int  conflict;          /* img_copy_conflict_t；默认 IMG_COPY_FAIL */
+    bool preserve_times;    /* 抄源的 $SI/$FN 四时间 */
+    bool create_parents;    /* 目标父目录不存在就建（默认 true） */
+} img_copy_opts;
+
+typedef struct {
+    char     path[512];     /* 实际写入的盘内绝对路径（改名后可能不是用户给的） */
+    uint64_t ino;           /* 新文件 inode（App 用来做 stable id / 局部刷新） */
+    uint64_t size;
+    bool     replaced;      /* 是否覆盖了原有文件 */
+} img_copy_result;
+
+int img_ntfs_copy(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs,
+                  const img_copy_opts *opt, img_prog *prog, img_copy_result *out);
+
 int img_ntfs_verify_dir (img_ntfs_fs *fs, const char *abs_path);
 int img_ntfs_verify_path(img_ntfs_fs *fs, const char *abs_path,
                          uint64_t *ino_out, bool *isdir_out);
