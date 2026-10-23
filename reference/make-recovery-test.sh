@@ -1,8 +1,10 @@
 #!/bin/bash
-# 在 diskA 基础上加【恢复分区】并打【BCD 恢复条目】→ 供 QEMU 实测
+# 在 UEFI 真值素材盘基础上（原 diskA 已丢失，见 docs/清理记录…§1.5）加【恢复分区】并打【BCD 恢复条目】→ 供 QEMU 实测
 # 用法: make-recovery-test.sh <源qcow2> <输出qcow2>
 set -e
-SRC="${1:-/workspace/images/diskA-Windows-UEFI-GPT.qcow2}"
+# diskA 已丢失（2026-10-23 误删，见 docs/清理记录-2026-10-23.md §1.5）⇒ 默认换成幸存的
+# 真值 UEFI 盘；第一参数或环境变量 SRC 都可覆盖。
+SRC="${1:-${SRC:-/workspace/images/Windows 11 UEFI.qcow2}}"
 DST="${2:-/workspace/images/TEST-2-带恢复分区-预期0xc0000098.qcow2}"
 T=/workspace/imgtool/build/tools
 ISO=$(ls /workspace/images/*19044*.iso | head -1)

@@ -81,7 +81,7 @@ import subprocess
 with open('$W/src_esp.raw','wb') as out:
     for i in range(204800//2048):
         off=(2048+i*2048)*512
-        out.write(subprocess.run(['$T/imgdump','/workspace/images/diskA-Windows-UEFI-GPT.qcow2',str(off),str(2048*512)],capture_output=True).stdout)"
+        out.write(subprocess.run(['$T/imgdump','${REFIMG:-/workspace/images/Windows 11 UEFI.qcow2}',str(off),str(2048*512)],capture_output=True).stdout)"
 for p in "/EFI/Microsoft/Boot/bootmgfw.efi" "/EFI/Boot/bootx64.efi"; do
   mcopy -n -i "$W/src_esp.raw" "::$p" -o 2>/dev/null && echo "  复制 $p" || true
 done

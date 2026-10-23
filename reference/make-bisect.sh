@@ -4,7 +4,9 @@
 #   TEST-6 = diskA + 只改 BCD 加恢复条目，【不加恢复分区】
 set -e
 T=/workspace/imgtool/build/tools
-SRC=/workspace/images/diskA-Windows-UEFI-GPT.qcow2
+# diskA 已在 2026-10-23 的误删事件中丢失（见 docs/清理记录-2026-10-23.md §1.5）；
+# 换成仍在的真值 UEFI 素材盘，也可用环境变量 SRC=... 覆盖。
+SRC="${SRC:-/workspace/images/Windows 11 UEFI.qcow2}"
 ISO=$(ls /workspace/images/*19044*.iso | head -1)
 
 mkwinre(){  # $1=目标qcow2  $2=恢复分区LBA
