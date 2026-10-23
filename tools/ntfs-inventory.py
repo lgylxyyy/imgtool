@@ -646,15 +646,16 @@ def _cli():
             print('   ★新增', k[:220])
         for k in gone[:5]:
             print('   (基线里有、现在没有：通常是删除/改名后正常消失)', k[:160])
-        return n, [x for x in probs], skipped, new
+        # ★ 这里必须返回【整数】。早先返回的是 (n, probs, skipped, new) 四元组，
+        #   sys.exit(元组) 会把它当错误信息打到 stderr 并以 1 退出 —— 于是
+        #   "新增 0 条"却报失败，白折腾了半天。
+        return 1 if new else 0
     print('\n===== 不变量违背：%d 条（另解析跳过 %d 条）=====' % (len(probs), len(skipped)))
     for x in skipped[:3]:
         print('   ·跳过 ino=%s %s' % (x[0], x[1]))
     kind = {}
     for p in probs:
         kind.setdefault(p[0], []).append(p)
-    if newonly is not None:
-        return 1 if newonly else 0
     for k, v in sorted(kind.items(), key=lambda x: -len(x[1])):
         print('\n【%s】%d 类' % (k, len(v)))
         for p in v[:6]:
