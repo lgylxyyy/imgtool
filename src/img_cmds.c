@@ -3312,7 +3312,6 @@ static int cmd_ntfs_copy(img_ctx *ctx, const img_args *in, img_result *out){
         size_t il = 1; items[0] = '['; items[1] = 0;
         int okn = 0, badn = 0; uint64_t bytes = 0; bool truncated = false;
         char line[1400];
-        int idx = 0;
         img_span sp; img_span_prep(&sp,"ntfs","copy-batch","批量盘内复制");
         img_span_kv_str(&sp,"list",lst); img_span_begin(&sp);
         while (fgets(line, sizeof line, fp)) {
@@ -3330,7 +3329,6 @@ static int cmd_ntfs_copy(img_ctx *ctx, const img_args *in, img_result *out){
             while (*dst == ' ' || *dst == '\t') dst++;
             e = dst + strlen(dst); while (e > dst && (e[-1]==' '||e[-1]=='\t')) *--e = 0;
             if (!*src || !*dst) { badn++; continue; }
-            idx++;
             img_copy_result r; memset(&r, 0, sizeof r);
             int rc2 = img_ntfs_copy(fs, src, dst, &o, img_cmd_prog(), &r);
             int need = snprintf(items + il, sizeof items - il,
