@@ -555,6 +555,45 @@ int img_ntfs_list_dir(img_ntfs_fs *fs, const char *abs_path,
     return r<0?IMG_EIO:IMG_OK;
 }
 
+
+/* 带真实大小的列目录（--sizes 才走这条路）。
+ * 为什么默认不做：ntfs_readdir 的回调【不给大小】（见 libntfs-3g/dir.c 的
+ * ntfs_filldir：只给 name/mref/dt_type），要拿大小只能逐条 ntfs_inode_open
+ * 读 ni->data_size —— System32 那种 4000 项的目录会多出几千次 MFT 记录读取。
+ * 所以：默认 size 恒 0（快），显式要才付这个钱。 */
+typedef struct { img_ntfs_list_cb cb; void *ud; ntfs_volume *vol; } ntfs_sizectx;
+static int ntfs_size_fill(void *dirent, const ntfschar *name, const int name_len,
+                          const int name_type, const s64 pos,
+                          const MFT_REF mref, const unsigned dt_type){
+    ntfs_sizectx *c=(ntfs_sizectx*)dirent;
+    (void)name_type; (void)pos;
+    uint64_t ino=((uint64_t)le64_to_cpu(mref) & 0xFFFFFFFFFFFFULL);
+    if(ino < (uint64_t)FILE_first_user) return 0;
+    if(name_len==1 && name[0]=='.')  return 0;
+    if(name_len==2 && name[0]=='.' && name[1]=='.') return 0;
+    char *out=NULL;
+    if(ntfs_ucstombs(name, name_len, &out, -1)<0 || !out) return 0;
+    uint64_t sz=0;
+    if(dt_type!=NTFS_DT_DIR){
+        ntfs_inode *ni=ntfs_inode_open(c->vol, mref);
+        if(ni){ if(ni->data_size>0) sz=(uint64_t)ni->data_size; ntfs_inode_close(ni); }
+    }
+    c->cb(c->ud, out, dt_type==NTFS_DT_DIR, sz);
+    free(out);
+    return 0;
+}
+int img_ntfs_list_dir_sizes(img_ntfs_fs *fs, const char *abs_path,
+                            img_ntfs_list_cb cb, void *ud){
+    if(!fs||!fs->mounted||!cb) return IMG_EINVAL;
+    ntfs_inode *di=lookup(fs->vol, (abs_path&&abs_path[0])?abs_path:"/", NULL);
+    if(!di) return IMG_ENOENT;
+    ntfs_sizectx c={cb,ud,fs->vol};
+    s64 pos=0;
+    int r=ntfs_readdir(di,&pos,&c,ntfs_size_fill);
+    ntfs_inode_close(di);
+    return r<0?IMG_EIO:IMG_OK;
+}
+
 /* ---------- 空闲/已用：直接数 $Bitmap（NTFS 位图：1=已分配 0=空闲）---------- */
 int img_ntfs_free_bytes(img_ntfs_fs *fs, uint64_t *out_free, uint64_t *out_used){
     if(!fs||!fs->vol||!fs->vol->lcnbmp_na) return IMG_EINVAL;
@@ -756,6 +795,208 @@ static int split_abs(const char *abs,char *dir,size_t dcap,char *name,size_t nca
     return 0;
 }
 
+/* ---------- 目录移动要用的两个小工具（只用 libntfs-3g 的公开 API） ----------
+ * ★ 关键事实（第一次实现就踩了）："." 与 ".." 【不是】inode 的 $FILE_NAME 属性，
+ *   它们只是父目录……不，是【该目录自己的 $I30 索引里的两条索引项】。
+ *   一个目录 inode 的 $FILE_NAME 只有它自己的名字（实测 ino=64 只有一条 "B"）。
+ *   所以读写 ".." 必须走 $I30 索引：ntfs_index_ctx_get(ni,"$I30") + ntfs_index_lookup(键=名字)。
+ *   索引项里 parent_directory 出现在两处：entry->key.file_name（排序键）与 ictx->data（值副本），
+ *   两处都要改，否则读到的还是旧父。 */
+
+static const ntfschar IMG_DOTDOT[2] = { const_cpu_to_le16('.'), const_cpu_to_le16('.') };
+
+/* 造一个只带名字的 $I30 查找键（collate 只比名字，见 libntfs-3g/collate.c 的
+ * ntfs_collate_file_name，其它字段留 0 就行）。调用方 free。 */
+static FILE_NAME_ATTR *name_key(const ntfschar *nm, int nlen){
+    size_t sz = 0x42 + (size_t)nlen*sizeof(ntfschar);
+    FILE_NAME_ATTR *k = (FILE_NAME_ATTR*)calloc(1, sz);
+    if(!k){ errno=ENOMEM; return NULL; }
+    k->file_name_length = (u8)nlen;
+    memcpy(k->file_name, nm, (size_t)nlen*sizeof(ntfschar));
+    return k;
+}
+
+/* 在目录 sub 自己的 $I30 里定位 ".." 那条索引项。
+ * 成功返回 IMG_OK 并把 ictx 留在"已找到"状态（调用方负责 ctx_put）。*/
+static int dotdot_lookup(ntfs_inode *sub, ntfs_index_context **out_icx){
+    *out_icx=NULL;
+    FILE_NAME_ATTR *key = name_key(IMG_DOTDOT, 2);
+    if(!key) return IMG_ENOMEM;
+    ntfs_index_context *ictx = ntfs_index_ctx_get(sub, NTFS_INDEX_I30, 4);
+    if(!ictx){ free(key); return IMG_EIO; }
+    int lk = ntfs_index_lookup(key, (int)(0x42 + 2*sizeof(ntfschar)), ictx);
+    int le = errno;
+    size_t klen = 0x42 + 2*sizeof(ntfschar);
+    memset(key,0,klen);            /* 复用同一块内存做第二次尝试的键 */
+    free(key);
+    if(lk){
+        img_ev ev;
+        if(img_ev_init(&ev,IMG_LV_DEBUG,"ntfs","dotdot_lookup",IMG_ENOENT,".. 索引项没找到")){
+            img_ev_u64(&ev,"ino",sub->mft_no); img_ev_errno(&ev,le); img_ev_emit(&ev);
+        }
+        ntfs_index_ctx_put(ictx);
+        return (le==ENOENT)?IMG_ENOENT:IMG_EIO;
+    }
+    if(!ictx->data || !ictx->data_len){
+        img_ev ev;
+        if(img_ev_init(&ev,IMG_LV_DEBUG,"ntfs","dotdot_nodata",IMG_ENOENT,".. 命中但没有数据段")){
+            img_ev_u64(&ev,"ino",sub->mft_no);
+            img_ev_u64(&ev,"data_len",(uint64_t)ictx->data_len); img_ev_emit(&ev);
+        }
+        ntfs_index_ctx_put(ictx);
+        return IMG_ENOENT;
+    }
+    *out_icx = ictx;
+    return IMG_OK;
+}
+
+/* 取一个目录的父 inode 号。两条来源，按可靠性依次尝试：
+ *   ① 自己 $I30 里 ".." 索引项的 **mft_ref**（Windows 建的目录都有这一项）
+ *   ② 自己 $FILE_NAME 属性里那条"本名"的 parent_directory
+ *      （ntfs-3g 建的目录【没有 "."/".." 索引项】—— 上游只在 ntfs_readdir 里
+ *       现造这两条，见 libntfs-3g/dir.c 的 dotdot[] 与 filldir 调用）*/
+static int dir_parent_ino(ntfs_inode *sub, uint64_t *out){
+    ntfs_index_context *ictx=NULL;
+    if(dotdot_lookup(sub,&ictx)==IMG_OK){
+        uint64_t p = ictx->entry ? MREF_LE(ictx->entry->indexed_file) : 0;
+        if(!p){
+            FILE_NAME_ATTR *fnx=(FILE_NAME_ATTR*)ictx->data;
+            if(fnx) p = MREF_LE(fnx->parent_directory);
+        }
+        ntfs_index_ctx_put(ictx);
+        if(p){ if(out) *out=p; return IMG_OK; }
+    }
+    /* 退到 ② */
+    ntfs_attr_search_ctx *ctx=ntfs_attr_get_search_ctx(sub,NULL);
+    if(!ctx) return IMG_EIO;
+    int rc=IMG_ENOENT;
+    while(!ntfs_attr_lookup(AT_FILE_NAME,NULL,0,0,0,NULL,0,ctx)){
+        FILE_NAME_ATTR *fn=(FILE_NAME_ATTR*)((u8*)ctx->attr+le16_to_cpu(ctx->attr->value_offset));
+        if(!fn->file_name_length) continue;                       /* 跳过 "."（ntfs-3g 偶见）*/
+        if(fn->file_name_length==2
+           && fn->file_name[0]==const_cpu_to_le16('.')
+           && fn->file_name[1]==const_cpu_to_le16('.')) continue;
+        uint64_t p=MREF_LE(fn->parent_directory);
+        if(p){ if(out) *out=p; rc=IMG_OK; break; }
+    }
+    ntfs_attr_put_search_ctx(ctx);
+    return rc;
+}
+
+/* 把子目录 ".." 的父引用改成 newpar。改三处（Windows 就是这么写的）：
+ *     ① 索引项头部的 indexed_file（该条目指向的 inode）        —— ".." 到底指向哪个 inode（最关键的一处）
+ *     ② 索引项的排序键 file_name 里的 parent_directory（= 新父的父）
+ *     ③ 索引项数据副本里的同一字段
+ * 没有 ".." 索引项的目录（ntfs-3g 自己建的）→ *out_had_entry=false，返回 IMG_OK：
+ * 那种目录的父引用本来就在自己的 $FILE_NAME 里，而 link+delete 已经把它更新了。
+ *
+ * ★ 为什么必须我们自己补：上游【没有】"改父引用"的能力 ——
+ *   libntfs-3g/dir.c 里 ntfs_link 的注释原文写着
+ *   "FIXME: Create internal __ntfs_link ... Write ntfs_rename that uses __ntfs_link"，
+ *   FUSE 层（src/ntfs-3g.c 的 ntfs_fuse_rename）对目录也只是 link+unlink。
+ *   也就是说 ntfs-3g 自己挂载时 mv 一个目录，".." 同样会留在旧父上。
+ *   这是上游能力缺口，不是我们写得笨 —— 找不到能直接调的现成函数。*/
+static int dir_set_dotdot_parent(ntfs_inode *sub, ntfs_inode *newpar, bool *out_had_entry){
+    if(out_had_entry) *out_had_entry=false;
+    ntfs_index_context *ictx=NULL;
+    int rc = dotdot_lookup(sub,&ictx);
+    if(rc==IMG_ENOENT) return IMG_OK;          /* 这个目录本来就没有 ".." 索引项 */
+    if(rc!=IMG_OK) return rc;
+
+    MFT_REF nref = MK_LE_MREF(newpar->mft_no, le16_to_cpu(newpar->mrec->sequence_number));
+    /* 新父的父（".." 项里 FILE_NAME 的 parent_directory 应该是爷爷）*/
+    uint64_t gp=0;
+    (void)dir_parent_ino(newpar,&gp);
+    MFT_REF gref = gp ? MK_LE_MREF(gp,0) : nref;
+
+    if(ictx->entry){
+        ictx->entry->indexed_file = nref;                                   /* ① */
+        FILE_NAME_ATTR *k=&ictx->entry->key.file_name;
+        if(k) k->parent_directory = (le64)gref;                        /* ② */
+    }
+    FILE_NAME_ATTR *fnx=(FILE_NAME_ATTR*)ictx->data;
+    if(fnx) fnx->parent_directory = (le64)gref;                        /* ③ */
+    ntfs_index_entry_mark_dirty(ictx);
+    ntfs_index_ctx_put(ictx);
+    ntfs_inode_mark_dirty(sub);
+    if(out_had_entry) *out_had_entry=true;
+    if(ntfs_inode_sync(sub)!=0) return IMG_EIO;
+    return IMG_OK;
+}
+
+/* 目标父目录是不是在"被搬目录"的子树里（含搬进自己）。
+ * 从 dpar 沿 ".." 一级级往上走，撞见 anc_ino 就是环。走 64 层封顶防病态索引。*/
+static int dir_is_self_or_ancestor(ntfs_volume *vol, uint64_t anc_ino, ntfs_inode *dpar){
+    ntfs_inode *cur=dpar;
+    bool owned=false;
+    int hit=0;
+    for(int i=0;i<64 && cur;i++){
+        if(cur->mft_no==anc_ino){ hit=1; break; }
+        uint64_t p=0;
+        if(dir_parent_ino(cur,&p)!=IMG_OK) break;
+        if(p==cur->mft_no || p==0) break;              /* 到根了 */
+        if(owned) ntfs_inode_close(cur);
+        cur=ntfs_inode_open(vol,p);
+        owned=true;
+    }
+    if(owned && cur) ntfs_inode_close(cur);
+    return hit;
+}
+
+/* ---------- 目录父引用自洽检查（只读，给 ntfs.parent 与测试用） ----------
+ * 三个问题一次问清：
+ *   ① 这个目录的 ".." 指向哪个 inode（parent_ino）
+ *   ② 按路径去找它的父，是不是同一个（same_parent）—— 不是就说明 ".." 是陈的
+ *   ③ 父目录的索引里，这个名字是否确实指回本目录（backlink_ok）
+ * 目录移动（ntfs.move 搬目录、ntfs.rename 的 move_into）之后必须三项全真。*/
+int img_ntfs_dir_parent_check(img_ntfs_fs *fs, const char *abs_path,
+                              uint64_t *out_ino, uint64_t *out_parent_ino,
+                              uint64_t *out_parent_by_path, bool *out_backlink_ok,
+                              bool *out_dotdot_present){
+    if(!fs||!fs->mounted||!abs_path||abs_path[0]!='/') return IMG_EINVAL;
+    char pdir[512], pname[256];
+    bool is_root = (!strcmp(abs_path,"/") || !strcmp(abs_path,"\\"));
+    if(!is_root && split_abs(abs_path,pdir,sizeof pdir,pname,sizeof pname)!=0) return IMG_EINVAL;
+    if(is_root){ snprintf(pdir,sizeof pdir,"/"); pname[0]=0; }
+    ntfs_inode *ni=lookup(fs->vol,abs_path,NULL);
+    if(!ni) return IMG_ENOENT;
+    if(!(ni->mrec->flags & MFT_RECORD_IS_DIRECTORY)){ ntfs_inode_close(ni); return IMG_ENOTSUP; }
+    if(ni->mft_no==FILE_root){          /* 根目录没有父：自指，直接给结论 */
+        if(out_ino) *out_ino=ni->mft_no;
+        if(out_parent_ino) *out_parent_ino=ni->mft_no;
+        if(out_parent_by_path) *out_parent_by_path=ni->mft_no;
+        if(out_backlink_ok) *out_backlink_ok=true;
+        if(out_dotdot_present) *out_dotdot_present=false;
+        ntfs_inode_close(ni);
+        return IMG_OK;
+    }
+    uint64_t pino=0;
+    { ntfs_index_context *dd=NULL;
+      bool present = (dotdot_lookup(ni,&dd)==IMG_OK);
+      if(present && dd) ntfs_index_ctx_put(dd);
+      if(out_dotdot_present) *out_dotdot_present=present; }
+    int rc=dir_parent_ino(ni,&pino);
+    if(out_ino) *out_ino=ni->mft_no;
+    if(out_parent_ino) *out_parent_ino=pino;
+    if(out_backlink_ok) *out_backlink_ok=false;
+    if(out_parent_by_path) *out_parent_by_path=0;
+    ntfs_inode *par=lookup(fs->vol,pdir[0]?pdir:"/",NULL);
+    if(!par){ ntfs_inode_close(ni); return IMG_ENOENT; }
+    if(out_parent_by_path) *out_parent_by_path=par->mft_no;
+    ntfschar *u=NULL; size_t ul=0;
+    if(to_ntfs(pname,&u,&ul)){
+        errno=0;
+        MFT_REF ref=ntfs_inode_lookup_by_name(par,u,ul);
+        if(mftref_ok(ref) && out_backlink_ok) *out_backlink_ok = (MREF_LE(ref)==ni->mft_no);
+        free(u);
+    }
+    ntfs_inode_close(par);
+    ntfs_inode_close(ni);
+    return rc;
+}
+
+
+
 int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,bool overwrite){
     if(!fs||!fs->mounted||!src_abs||!dst_abs) return IMG_EINVAL;
     if(src_abs[0]!='/'||dst_abs[0]!='/'||!src_abs[1]||!dst_abs[1]) return IMG_EINVAL;
@@ -803,18 +1044,15 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,b
         return IMG_EIO;
     }
     bool isdir=(ni->mrec->flags & MFT_RECORD_IS_DIRECTORY)!=0;
-    /* ★ 目录一律拒绝（当前不放行的原因，写清楚免得后人当 bug 顺手删）：
-     *   NTFS 把"我爹是谁"记在【子目录自己的 $I30 里的 ".." 索引项】，
-     *   而 ntfs_link+ntfs_delete 只改父目录的索引 —— 搬完 ".." 仍指向旧父，
-     *   Windows 上 cd .. 会跳到错误位置。要放开必须先有"同步 .."的实现
-     *   + Windows 侧真机验收。文件不受影响（文件没有父引用这回事）。
-     *   注：img_ntfs_move_into 目前确实会搬目录（恢复分区那条流程在用），
-     *   它的 ".." 正确性同样欠一次 Windows 侧验收 —— 已记入待办，不虚报。*/
-    if(isdir){
+    /* 目录现在放开：搬完会同步子目录 ".." 的父引用（见 dir_set_dotdot_parent）。
+     * 文件不受影响（文件没有父引用这回事）。
+     * 两条硬规矩：① 不许把目录搬进它自己的子树（会造出环，Windows 直接懵）；
+     *             ② 目标已存在且是目录 → 依旧拒绝（IMG_ESTATE）。*/
+    if(isdir && !same_dir && dir_is_self_or_ancestor(fs->vol, ni->mft_no, dpar)){
         ntfs_inode_close(ni);
         if(dpar_extra) ntfs_inode_close(dpar);
         ntfs_inode_close(spar); free(su);
-        return IMG_ENOTSUP;
+        return IMG_EINVAL;
     }
     if(!to_ntfs(dname,&du,&dul)){
         ntfs_inode_close(ni);
@@ -907,6 +1145,29 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,b
         if(dpar_extra) ntfs_inode_close(dpar);
         ntfs_inode_close(spar); free(su); free(du);
         return IMG_EIO;
+    }
+    /* ②′ 目录换了父 → 同步子目录 ".." 的父引用；失败就把刚加的链接撤掉，回到原样 */
+    if(isdir && !same_dir){
+        bool had_dd=false;
+        int prc=dir_set_dotdot_parent(ni, dpar, &had_dd);
+        if(prc!=IMG_OK){
+            img_ev ev;
+            if(img_ev_init(&ev,IMG_LV_ERROR,"ntfs","move_dotdot_fail",prc,"同步 .. 失败，撤销新链接")){
+                img_ev_str(&ev,"src",src_abs); img_ev_str(&ev,"dst",dst_abs); img_ev_emit(&ev);
+            }
+            /* ★ 顺序很重要：先把 ni 关掉，再另开一份去撤销新链接。
+             *   ntfs_inode_open 对同一 inode 会给【独立副本】，两份同时在世
+             *   就可能把旧的 link_count 写回去（本轮刚在"同目录改名"上栽过一次）。*/
+            ntfs_inode_close(ni); ni=NULL;
+            if(dpar_extra) ntfs_inode_close(dpar);
+            { ntfs_inode *bk=ntfs_inode_open(fs->vol, sref);
+              ntfs_inode *nd=lookup(fs->vol,ddir,NULL);
+              if(bk && nd) (void)ntfs_delete(fs->vol,dst_abs,bk,nd,du,(u8)dul);
+              else { if(bk) ntfs_inode_close(bk); if(nd) ntfs_inode_close(nd); } }
+            free(su); free(du);
+            ntfs_inode_close(spar);
+            return prc;
+        }
     }
     if(dpar_extra) ntfs_inode_close(dpar);
     { img_ev ev;

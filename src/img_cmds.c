@@ -273,19 +273,30 @@ static const img_arg A_FATLS[] = {
     {"img",  IMG_A_STR, true,  NULL, "镜像路径（qcow2）",  NULL},
     {"lba",  IMG_A_U64, true,  NULL, "分区起始 LBA",        chk_lba},
     {"path", IMG_A_STR, false, "/",  "分区内目录（/ 开头）", NULL},
+    /* 分页：与 ntfs.list 同一套参数与语义（App 只需要学一次）。
+     * 以前是 64 KB 缓冲写满就悄悄截断（约 900 项封顶）—— ESP 一般够用，
+     * 但"够用"不是"不炸"的理由。 */
+    {"offset", IMG_A_U64, false, "0",   "从第几项开始（分页；默认 0）", NULL},
+    {"limit",  IMG_A_U64, false, "500", "本页最多多少项（1~2000；默认 500）", NULL},
 };
-typedef struct { char *p, *end; int n; } lsbuf;
+#define FAT_LIST_MAX 2000
+#define FAT_LIST_DEFAULT 500
+typedef struct { char *p, *end;
+                 uint64_t total, offset, limit;
+                 int n; bool truncated; } lsbuf;
 static void ls_cb(void *ud, const char *name, bool isdir, uint64_t size){
     lsbuf *b=(lsbuf*)ud;
-    if(b->p>=b->end) return;
-    if(b->n) *b->p++=',';
-    b->n++;
+    uint64_t idx=b->total++;                              /* 先计数，再决定要不要写进本页 */
+    if(idx < b->offset) return;
+    if((uint64_t)b->n >= b->limit) return;
     char item[512];
-    int n=snprintf(item,sizeof item,"{\"name\":\"%s\",\"dir\":%s,\"size\":%llu}",
-                   name?name:"", isdir?"true":"false",(unsigned long long)size);
-    if(n>0 && b->p+n<b->end){ memcpy(b->p,item,(size_t)n); b->p+=n; }
+    int n=snprintf(item,sizeof item,"%s{\"name\":\"%s\",\"dir\":%s,\"size\":%llu}",
+                   b->n?",":"", name?name:"", isdir?"true":"false",(unsigned long long)size);
+    if(n<=0) return;
+    size_t need=(size_t)n+3;                              /* 还要留得下 "]\0" */
+    if(b->p+need>=b->end){ b->truncated=true; return; }
+    memcpy(b->p,item,(size_t)n); b->p+=n; b->n++;
 }
-static char g_ls_json[65536];
 static int cmd_fat_ls(img_ctx *ctx, const img_args *in, img_result *out){
     uint64_t lba=img_args_u64(in,"lba",0);
     const char *path=img_args_get(in,"path"); if(!path||!*path) path="/";
@@ -297,8 +308,15 @@ static int cmd_fat_ls(img_ctx *ctx, const img_args *in, img_result *out){
                         "目标 LBA 上不是合法 FAT32","核对 --lba，或先用 imgmkfs 格式化");
         return IMG_EFORMAT;
     }
+    uint64_t offset=img_args_u64(in,"offset",0);
+    uint64_t limit =img_args_u64(in,"limit",FAT_LIST_DEFAULT);
+    if(limit==0) limit=FAT_LIST_DEFAULT;
+    if(limit>FAT_LIST_MAX) limit=FAT_LIST_MAX;
+    /* ★ TLS：fat.ls 带 ctx，但不同 ctx 可以并行；进程级缓冲会互相覆盖
+     *   （与 iso.ls / ntfs.list 同一类缺陷，这次一并补上）*/
+    IMG_THREAD_LOCAL static char g_ls_json[65536];
     g_ls_json[0]='[';
-    lsbuf b={g_ls_json+1, g_ls_json+sizeof g_ls_json-4, 0};
+    lsbuf b={g_ls_json+1, g_ls_json+sizeof g_ls_json-4, 0, offset, limit, 0, false};
     int rc=img_fat32_list_dir(fs,path,ls_cb,&b);
     b.p[0]=']'; b.p[1]=0;
     img_fat32_unmount(fs);
@@ -307,7 +325,12 @@ static int cmd_fat_ls(img_ctx *ctx, const img_args *in, img_result *out){
         return IMG_ENOENT;
     }
     if(rc!=IMG_OK){ img_result_fail(out,rc,"FAT-LS-FAIL",path,img_strerror(rc),"镜像可能损坏"); return rc; }
+    img_result_u64(out,"total",b.total);
+    img_result_u64(out,"offset",offset);
+    img_result_u64(out,"limit",limit);
     img_result_u64(out,"count",(uint64_t)b.n);
+    img_result_bool(out,"has_more", offset+(uint64_t)b.n < b.total);
+    img_result_bool(out,"truncated",b.truncated);
     img_result_raw(out,"entries",g_ls_json);
     return IMG_OK;
 }
@@ -561,6 +584,7 @@ static const img_arg A_NTFSLIST[] = {
      *   于是 App 只拿到 RESULT-TOO-BIG、看不见任何名字。分页把「看不见」变成「翻页」。*/
     {"offset", IMG_A_U64, false, "0",   "从第几项开始（分页；默认 0）", NULL},
     {"limit",  IMG_A_U64, false, "500", "本页最多多少项（1~2000；默认 500）", NULL},
+    {"sizes",  IMG_A_BOOL, false, "false","顺带取真实文件大小（逐条开 inode，大目录明显变慢；默认关）", NULL},
 };
 #if IMG_WITH_NTFS3G
 /* 单页硬上限：条目 JSON 约 70~90 字节，2000 项 ≈ 180KB，仍在 256KB 缓冲内。
@@ -618,7 +642,9 @@ static int cmd_ntfs_list(img_ctx *ctx, const img_args *in, img_result *out){
      *   jbuf 原是进程级 static → 两盘并发列目录会互相覆盖（与 iso.ls 同一类缺陷）。*/
     IMG_THREAD_LOCAL static char jbuf[256*1024];
     list_buf_t acc={jbuf,sizeof jbuf,0,0,offset,limit,0,false};
-    rc=img_ntfs_list_dir(fs,path,list_json_cb,&acc);
+    bool want_sizes = img_args_bool(in,"sizes",false);
+    rc = want_sizes ? img_ntfs_list_dir_sizes(fs,path,list_json_cb,&acc)
+                    : img_ntfs_list_dir(fs,path,list_json_cb,&acc);
     img_ntfs_umount(fs);
     if(rc!=IMG_OK){ img_result_fail(out,rc,"FAT-LS-FAIL",path,"目录无法读取（路径不对或卷损坏）",NULL); return rc; }
     img_result_u64(out,"total",acc.total);                /* 目录里总共多少项（翻页依据）*/
@@ -627,6 +653,7 @@ static int cmd_ntfs_list(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_u64(out,"count",(uint64_t)acc.n);
     img_result_bool(out,"has_more", offset+(uint64_t)acc.n < acc.total);
     img_result_bool(out,"truncated",acc.truncated);
+    img_result_bool(out,"sizes",want_sizes);
     if(!acc.len){ memcpy(jbuf,"[]",2); acc.len=2; }
     else{                                             /* ★ 补方括号（裸项拼接不是合法 JSON —— 实测踩过）*/
         if(acc.len+2 >= (int)sizeof jbuf) acc.len=(int)sizeof jbuf-3;
@@ -2084,6 +2111,55 @@ static int cmd_fat_move(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_str(out,"dst",dst);
     return IMG_OK;
 }
+/* ---------- ntfs.parent（只读：目录的 ".." 父引用自洽检查）----------
+ * 为什么需要：NTFS 的"我爹是谁"记在子目录自己的 $I30 ".." 项里，搬目录时忘了同步
+ *   就会出现"路径能打开、但 cd .. 跳回旧父"的错乱 —— 光看 ntfs.list 是看不出来的。
+ *   上游 libntfs-3g 也没有这个能力（dir.c 里 ntfs_link 的 FIXME 就是这件事），
+ *   所以我们自己补了同步，就必须自己补一个能证明它生效的检查。
+ * 三项：parent_ino（.. 指向谁）、parent_by_path（按路径算的父是谁）、
+ *   backlink_ok（父索引里这个名字是否指回本目录）；consistent = 前两者相等且 backlink_ok。*/
+static const img_arg A_NTFSRPARENT[] = {
+    {"img",  IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
+    {"lba",  IMG_A_U64, true, NULL, "NTFS 分区起始 LBA", chk_lba},
+    {"path", IMG_A_STR, true, NULL, "要检查的目录（/ 开头）", NULL},
+};
+static int cmd_ntfs_parent(img_ctx *ctx, const img_args *in, img_result *out){
+    if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（目录父引用检查）","重新编译时开启该功能并安装对应系统库");
+#if IMG_WITH_NTFS3G
+    uint64_t lba=img_args_u64(in,"lba",0);
+    const char *path=img_args_get(in,"path");
+    if(!path||path[0]!='/'){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","必须是 / 开头的盘内绝对路径",NULL); return IMG_EINVAL; }
+    img_qcow2 *q=img_ctx_qcow2(ctx);
+    if(!q) return qc_open_fail(out,ctx);
+    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){
+            pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
+    img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
+    if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",path,"不是合法 NTFS（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
+    uint64_t ino=0,pino=0,pby=0; bool back=false,haddd=false;
+    int pr=img_ntfs_dir_parent_check(fs,path,&ino,&pino,&pby,&back,&haddd);
+    img_ntfs_umount(fs);
+    if(pr==IMG_ENOENT){ img_result_fail(out,pr,"NTFS-PATH-NOTFOUND",path,"路径不存在",NULL); return pr; }
+    if(pr==IMG_ENOTSUP){ img_result_fail(out,pr,"NTFS-NOT-A-DIR",path,"这是个文件，不是目录（文件没有父引用这回事）",NULL); return pr; }
+    if(pr!=IMG_OK){ img_result_fail(out,pr,"NTFS-PARENT-FAIL",path,"读不到 .. 项（索引可能已损坏）",NULL); return pr; }
+    bool consistent = (pino==pby) && back;
+    img_result_str(out,"path",path);
+    img_result_u64(out,"ino",ino);
+    img_result_u64(out,"parent_ino",pino);
+    img_result_u64(out,"parent_by_path",pby);
+    img_result_bool(out,"backlink_ok",back);
+    img_result_bool(out,"dotdot_present",haddd);
+    img_result_bool(out,"consistent",consistent);
+    return IMG_OK;
+#else
+    (void)ctx;(void)in;(void)out; return IMG_ENOTSUP;
+#endif
+}
+
 /* ================= 恢复分区 / WinRE 四件套（2026-10-20，A2）=================
  * 政策仍是"默认不建"：这些命令只在 App 明确勾选后调用（DESIGN-OUTPUT §十一）。*/
 
@@ -3226,6 +3302,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_WINFINISH,(int)(sizeof A_WINFINISH/sizeof A_WINFINISH[0]), cmd_win_finish},
     {"ntfs.rm",    "1.0", "删除盘内【一个文件】（目录一律拒绝，更不会递归删）",
         A_NTFSSRM,(int)(sizeof A_NTFSSRM/sizeof A_NTFSSRM[0]), cmd_ntfs_rm},
+    {"ntfs.parent","1.0", "只读检查目录的 \"..\" 父引用是否自洽（搬过目录之后必查）",
+        A_NTFSRPARENT,(int)(sizeof A_NTFSRPARENT/sizeof A_NTFSRPARENT[0]), cmd_ntfs_parent},
     {"wim.identify","1.0", "从内容识别 WIM/ESD/ISO 里的 Windows 版本（不信文件名）",
         A_WIMID,(int)(sizeof A_WIMID/sizeof A_WIMID[0]), cmd_wim_identify},
     {"wim.ls",     "1.0", "浏览 WIM/ESD 内部目录树（只读；--wim 可直接给 ISO，工具自己找出 install.wim/.esd）",

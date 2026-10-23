@@ -322,6 +322,28 @@ def main():
         f = echo()
         check(f.find("/D0/D1/moved.txt") is not None, "深路径文件也能跨目录移动")
 
+        print("\n════ 5b. fat.ls 分页（与 ntfs.list 同一套参数）════")
+        pg = lambda **kw: cmd("fat.ls", "--img=" + img, "--lba=%d" % ESP_LBA,
+                              "--path=/Many", *["--%s=%s" % (k, v) for k, v in kw.items()])
+        d1 = pg(limit=10)["data"]
+        check("第 1 页 total=60 / count=10 / has_more",
+              d1["total"] == 60 and d1["count"] == 10 and d1["has_more"] is True,
+              json.dumps(d1)[:160])
+        d2 = pg(offset=55, limit=10)["data"]
+        check("末页 count=5 / has_more=false",
+              d2["count"] == 5 and d2["has_more"] is False, json.dumps(d2)[:160])
+        d3 = pg(offset=999)["data"]
+        check("offset 越界：count=0 但 total 仍是 60",
+              d3["count"] == 0 and d3["total"] == 60, json.dumps(d3)[:160])
+        d4 = pg(limit=0)["data"]
+        check("limit=0 归一成 500", d4["limit"] == 500 and d4["count"] == 60,
+              json.dumps(d4)[:160])
+        d5 = pg(limit=99999)["data"]
+        check("limit 超上限夹到 2000", d5["limit"] == 2000, json.dumps(d5)[:120])
+        names1 = [e["name"] for e in d1["entries"]]
+        check("分页不丢序（前 10 项按目录顺序）",
+              len(names1) == 10 and len(set(names1)) == 10, str(names1))
+
         print("\n════ 6. 第三方交叉验证（mtools）════")
         have = shutil.which("qemu-img") and shutil.which("mdir")
         if not have:

@@ -101,11 +101,42 @@ check('相对路径 → CMD-ARG-BAD', code(d) == 'CMD-ARG-BAD', code(d))
 d = run('ntfs.move', img=IMG, lba=LBA, src='/x.txt', dst='/x.txt')
 check('自己移到自己 → noop 成功', d.get('ok') and (d.get('data') or {}).get('noop'))
 check('ntfs.put /dirA/x.txt（造出目录）', put('/dirA/x.txt', b'IN-DIR').get('ok'))
+# —— 目录移动：2026-10-23 起放开（会同步 ".." 的父引用），并用 ntfs.parent 自证 ——
+def parent(path):
+    d = run('ntfs.parent', img=IMG, lba=LBA, path=path)
+    return d.get('data') or {}
+pd0 = parent('/dirA')
+check('ntfs.parent 基线：/dirA 自洽（parent_ino==parent_by_path 且 backlink_ok）',
+      pd0.get('consistent') is True, json.dumps(pd0)[:200])
+root_ino = parent('/').get('ino')
+check('ntfs.parent 认得根（ino==parent_ino）', pd0.get('parent_ino') == root_ino,
+      json.dumps(pd0)[:160])
 d = run('ntfs.move', img=IMG, lba=LBA, src='/dirA', dst='/dirB')
-check('目录移动目前明确不放行 → NTFS-SRC-IS-DIR', code(d) == 'NTFS-SRC-IS-DIR', code(d))
-check('  被拒后目录还在（不是半途失败）', ex('/dirA/x.txt'))
-d = run('ntfs.move', img=IMG, lba=LBA, src='/dirA/x.txt', dst='/dirA', overwrite='true')
-check('目标是目录 → 不许用文件顶掉 NTFS-DEST-IS-DIR', code(d) == 'NTFS-DEST-IS-DIR', code(d))
+check('目录移动 /dirA → /dirB（已放开）', d.get('ok'), code(d) or json.dumps(d)[:200])
+check('  里面的文件跟着搬走了', ex('/dirB/x.txt') and not ex('/dirA/x.txt'))
+pd1 = parent('/dirB')
+check('  搬完 ntfs.parent 仍自洽（.. 已同步到新父）',
+      pd1.get('consistent') is True and pd1.get('parent_ino') == root_ino,
+      json.dumps(pd1)[:200])
+check('  inode 号没变（是改名不是重建）',
+      pd1.get('ino') == pd0.get('ino'), "%s→%s" % (pd0.get('ino'), pd1.get('ino')))
+d = run('ntfs.move', img=IMG, lba=LBA, src='/dirB', dst='/dirB/inner')
+check('把目录搬进它自己的子树 → 拒绝（CMD-ARG-BAD）',
+      (not d.get('ok')) and code(d) == 'CMD-ARG-BAD', code(d))
+check('  被拒后目录还在、内容还在', ex('/dirB/x.txt'))
+d = run('ntfs.move', img=IMG, lba=LBA, src='/dirB', dst='/sub/deep/dirB')
+check('目录搬到别的父目录下（/dirB → /sub/deep/dirB）', d.get('ok'), code(d))
+pd2 = parent('/sub/deep/dirB')
+deep_ino = parent('/sub/deep').get('ino')
+check('  .. 指向新父 /sub/deep 且自洽',
+      pd2.get('consistent') is True and pd2.get('parent_ino') == deep_ino,
+      json.dumps(pd2)[:200])
+check('  内容仍可读', exported('/sub/deep/dirB/x.txt') == b'IN-DIR')
+check('造 /pf.txt（给 ntfs.parent 的反例用）', put('/pf.txt', b'F').get('ok'))
+d = run('ntfs.parent', img=IMG, lba=LBA, path='/pf.txt')
+check('ntfs.parent 对文件明确拒绝（NTFS-NOT-A-DIR）', code(d) == 'NTFS-NOT-A-DIR', code(d))
+d = run('ntfs.move', img=IMG, lba=LBA, src='/mvdir-f.txt', dst='/dirB', overwrite='true')
+check('源不存在时先报源不存在（不误报成目标问题）', code(d) == 'NTFS-PATH-NOTFOUND', code(d))
 
 # —— 子目录内的改名（2026-10-23 真机抓到的真 bug）——
 # 同一目录里 spar/dpar 被 ntfs_inode_open 开了【两份独立副本】，link 写 A 份、
@@ -134,10 +165,10 @@ check('  内容一致', exported('/fromdir.txt') == b'AAA-IN-DIR')
 check('  原目录里已没有它', not ex('/mvdir/B.TXT'))
 
 # —— 删除 ——
-d = run('ntfs.rm', img=IMG, lba=LBA, path='/dirA/x.txt')
-check('删文件 /dirA/x.txt', d.get('ok'), json.dumps(d)[:200])
-check('  删完确实不在', not ex('/dirA/x.txt'))
-d = run('ntfs.rm', img=IMG, lba=LBA, path='/dirA')
+d = run('ntfs.rm', img=IMG, lba=LBA, path='/sub/deep/dirB/x.txt')
+check('删文件 /sub/deep/dirB/x.txt', d.get('ok'), json.dumps(d)[:200])
+check('  删完确实不在', not ex('/sub/deep/dirB/x.txt'))
+d = run('ntfs.rm', img=IMG, lba=LBA, path='/sub/deep/dirB')
 check('删目录 → NTFS-IS-DIR（绝不递归删）', code(d) == 'NTFS-IS-DIR', code(d))
 d = run('ntfs.rm', img=IMG, lba=LBA, path='/ghost')
 check('删不存在 → NTFS-PATH-NOTFOUND', code(d) == 'NTFS-PATH-NOTFOUND', code(d))
@@ -148,8 +179,8 @@ check('删根 → CMD-ARG-BAD', code(d) == 'CMD-ARG-BAD', code(d))
 d = run('qc.verify', img=IMG)
 check('qc.verify 卷完好', d.get('ok'), json.dumps(d)[:200])
 d = run('ntfs.list', img=IMG, lba=LBA, path='/sub/deep')
-names = [e['name'] for e in (d.get('data') or {}).get('names', [])]   # ★ 字段是 names[]
-check('列目录只剩搬来的 c.txt', names == ['c.txt'], str(names))
+names = sorted(e['name'] for e in (d.get('data') or {}).get('names', []))   # ★ 字段是 names[]
+check('列目录 = 搬来的 c.txt + 搬进来的 dirB', names == ['c.txt', 'dirB'], str(names))
 
 # —— ntfs.list 分页（System32 有 4479 项，整页序列化会超输出缓冲 → 以前只回 RESULT-TOO-BIG）——
 print('\n──── ntfs.list 分页 ────')
@@ -179,6 +210,16 @@ check('offset 超出范围：count=0 但 total 仍是 25（翻页要知道边界
 p5 = run('ntfs.list', img=IMG, lba=LBA, path='/pg', limit='0')
 d5 = p5.get('data') or {}
 check('limit=0 归一成默认值 500（不是"要 0 项"）', d5.get('count') == 25, json.dumps(d5)[:200])
+sz = run('ntfs.list', img=IMG, lba=LBA, path='/pg', limit='5', sizes='true')
+dsz = sz.get('data') or {}
+check('--sizes=true 才给真实大小（f00.txt 内容是 2 字节）',
+      dsz.get('sizes') is True and dsz.get('names')
+      and any(e['name'] == 'f00.txt' and e['size'] == 2 for e in dsz['names']),
+      json.dumps(dsz)[:220])
+nosz = run('ntfs.list', img=IMG, lba=LBA, path='/pg', limit='5')
+check('默认不带 sizes（契约不变：size 恒 0，省几千次 inode 打开）',
+      all(e['size'] == 0 for e in (nosz.get('data') or {}).get('names', [])),
+      json.dumps(nosz)[:200])
 p6 = run('ntfs.list', img=IMG, lba=LBA, path='/pg', limit='99999')
 d6 = p6.get('data') or {}
 check('limit 超上限被夹到 2000', d6.get('limit') == 2000, json.dumps(d6)[:200])

@@ -70,6 +70,10 @@ typedef void (*img_ntfs_list_cb)(void *ud, const char *name, bool is_dir, uint64
  * 契约与 img_fat32_list_dir 一致；不含 "."/".."；名字为 UTF-8 */
 int img_ntfs_list_dir(img_ntfs_fs *fs, const char *abs_path,
                       img_ntfs_list_cb cb, void *ud);
+/* 带真实大小的列目录：逐条开 inode 取 data_size（慢，只在用户明确要大小时用）。
+ * 契约：目录项的 size 记 0；拿不到大小的条目也记 0。*/
+int img_ntfs_list_dir_sizes(img_ntfs_fs *fs, const char *abs_path,
+                            img_ntfs_list_cb cb, void *ud);
 /* 空闲/已用字节（数 $Bitmap 位 × 簇大小；不含簇以下的零碎尾部） */
 int img_ntfs_free_bytes(img_ntfs_fs *fs, uint64_t *out_free, uint64_t *out_used);
 /* 卷标（无卷标 → 空串；失败返回 <0） */
@@ -90,6 +94,13 @@ int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
  *      / IMG_ENOTSUP(overwrite 时目标是目录) / IMG_EFULL / IMG_EIO。
  * ★ 目录：见 img_ntfs_fs.c 里 move_path 的注释与 tests/ntfs-move-test.sh 的实测结论。*/
 int img_ntfs_move_path(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs, bool overwrite);
+/* 目录父引用自洽检查（只读）：.. 指向谁、按路径算的父是谁、父索引是否指回本目录。
+ * 搬过目录之后（ntfs.move / move_into）必须三项全真，否则 ".." 是陈的。
+ * 出参都可以传 NULL。返回 IMG_OK / IMG_ENOENT / IMG_ENOTSUP（路径不是目录）。*/
+int img_ntfs_dir_parent_check(img_ntfs_fs *fs, const char *abs_path,
+                              uint64_t *out_ino, uint64_t *out_parent_ino,
+                              uint64_t *out_parent_by_path, bool *out_backlink_ok,
+                              bool *out_dotdot_present);
 /* 卷是否被标脏（掉电/进程被杀 → NTFS $Volume flags bit0）。
  * ★ 单独做的理由：脏卷 ntfs-3g 只给【只读挂载】→ wimlib 直写秒失败，
  *   调用方只看到 WIM-APPLY-FAIL，猜不到"加 --format=on 就行"。*/

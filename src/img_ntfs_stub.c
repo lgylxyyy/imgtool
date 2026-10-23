@@ -49,6 +49,10 @@ int img_ntfs_file_size(img_ntfs_fs *fs, const char *abs_path, uint64_t *out_size
 int img_ntfs_list_dir(img_ntfs_fs *fs, const char *abs_path, img_ntfs_list_cb cb, void *ud){
     (void)fs; (void)abs_path; (void)cb; (void)ud; return NA;
 }
+int img_ntfs_list_dir_sizes(img_ntfs_fs *fs, const char *abs_path,
+                            img_ntfs_list_cb cb, void *ud){
+    (void)fs; (void)abs_path; (void)cb; (void)ud; return NA;
+}
 int img_ntfs_free_bytes(img_ntfs_fs *fs, uint64_t *out_free, uint64_t *out_used){
     (void)fs; (void)out_free; (void)out_used; return NA;
 }
@@ -62,6 +66,13 @@ int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir, const char **names,
 }
 int img_ntfs_move_path(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs, bool overwrite){
     (void)fs; (void)src_abs; (void)dst_abs; (void)overwrite; return NA;
+}
+int img_ntfs_dir_parent_check(img_ntfs_fs *fs, const char *abs_path,
+                              uint64_t *out_ino, uint64_t *out_parent_ino,
+                              uint64_t *out_parent_by_path, bool *out_backlink_ok,
+                              bool *out_dotdot_present){
+    (void)fs; (void)abs_path; (void)out_ino; (void)out_parent_ino;
+    (void)out_parent_by_path; (void)out_backlink_ok; (void)out_dotdot_present; return NA;
 }
 int img_ntfs_dirty_check(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes, bool *out_dirty){
     (void)q; (void)part_lba; (void)part_bytes; (void)out_dirty; return NA;
