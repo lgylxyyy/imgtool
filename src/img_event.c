@@ -20,6 +20,10 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+#include <stdlib.h>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -27,18 +31,46 @@
 #include <sys/utsname.h>
 #endif
 
+/* ★ Android 不设 TZ 环境变量，localtime_r() 会退化成 UTC ⇒ 错误报告/日志里的时间差 8 小时。
+ *   只影响"显示出来的时间"，不动任何写盘逻辑。读系统属性拿真实时区（读不到就按 Asia/Shanghai）。*/
+static void tz_init_once(void){
+    static int done = 0;
+    if (done) return;
+    done = 1;
+#ifdef __ANDROID__
+    char tz[128];
+    if (__system_property_get("persist.sys.timezone", tz) > 0 && tz[0]) setenv("TZ", tz, 1);
+    else setenv("TZ", "Asia/Shanghai", 0);
+    tzset();
+#endif
+}
+
 const char *img_platform(void){
-#ifdef _WIN32
-    return "windows";
+#if defined(__ANDROID__)
+    return "Android";          /* 手机上必须显示 Android，不能是宿主编译平台的 Linux */
+#elif defined(__linux__)
+    return "Linux";
+#elif defined(_WIN32)
+    return "Windows";
 #else
-    static char b[128];
-    if(!b[0]){ struct utsname u; if(uname(&u)==0) snprintf(b,sizeof b,"%s",u.sysname); else snprintf(b,sizeof b,"posix"); }
-    return b;
+    return "unknown";
 #endif
 }
 const char *img_abi(void){
     static char b[32];
-    if(!b[0]) snprintf(b,sizeof b,"%zu-bit",sizeof(void*)*8);
+    if(!b[0]){
+#if defined(__aarch64__)
+        snprintf(b,sizeof b,"arm64-v8a");       /* Android 用户看得懂的是 ABI 名，不是"64-bit" */
+#elif defined(__arm__)
+        snprintf(b,sizeof b,"armeabi-v7a");
+#elif defined(__x86_64__)
+        snprintf(b,sizeof b,"x86_64");
+#elif defined(__i386__)
+        snprintf(b,sizeof b,"x86");
+#else
+        snprintf(b,sizeof b,"%zu-bit",sizeof(void*)*8);
+#endif
+    }
     return b;
 }
 
@@ -394,6 +426,7 @@ static const char *lv_name(img_lv_t l){
  * ★ 值里含空格 → logfmt 规范强制加引号（整行唯一"必须"带引号的字段）。*/
 static void fmt_time(char buf[32]){
     struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts);
+    tz_init_once();
     struct tm tmv; localtime_r(&ts.tv_sec,&tmv);
     char tmp[64];
     int n=snprintf(tmp,sizeof tmp,"%04d-%02d-%02d %02d:%02d:%02d.%03d",

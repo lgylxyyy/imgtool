@@ -19,7 +19,7 @@
 #ifndef IMG_EVENT_H
 #define IMG_EVENT_H
 
-#define IMGTOOL_VERSION "imgtool 2026.10.15"
+#define IMGTOOL_VERSION "imgtool 2026.10.23"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
