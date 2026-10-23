@@ -188,6 +188,44 @@ static void ent_83_name(const uint8_t *e, char out[12]){
     out[j]=0;
 }
 
+/* ---------- LFN 累加器（dir_find 与 list_dir 共用） ----------
+ * 为什么单独抽出来（2026-10-23 在真 Windows 的 ESP 上实测出的 bug）：
+ *   LFN 在盘上是【倒序】存放的（ord=N…1），名字超过 13 字符就要占多个槽。
+ *   旧写法每写一个字符顺手在下一个字节补结束符，于是最后处理的 ord=1
+ *   把结束符补在了 buf[13] —— 正好【截断】已经填好的后半截。
+ *   症状：fat.ls 里 "Renamed-Long.stl" 显示成 "Renamed-Long."；
+ *        fat.exists / fat.export 找不到 >13 字符的文件；
+ *        而 mtools 能正常读同一个目录 —— 说明盘是对的，是我们读错了。
+ *   现在：见到带 0x40 的那片就重置；结束符统一由 lfn_value() 补。*/
+typedef struct { char buf[260]; size_t len; bool active; bool bad; } lfn_acc;
+static void lfn_reset(lfn_acc *a){ a->buf[0]=0; a->len=0; a->active=false; a->bad=false; }
+/* 喂一条目录项。返回 1=这是 LFN 项（已消费），0=不是。*/
+static int lfn_feed(lfn_acc *a, const uint8_t *e){
+    if((e[11] & 0x0F) != 0x0F) return 0;                 /* 不是 LFN 项 */
+    int ord = e[0] & 0x1F;
+    if(ord < 1 || ord > 20){ lfn_reset(a); return 1; }   /* 乱序/超限：重新开始 */
+    if(e[0] & 0x40) lfn_reset(a);                        /* 磁盘上最先读到的那片 */
+    size_t off = (size_t)(ord - 1) * 13;
+    if(off >= sizeof a->buf - 1){ a->bad = true; return 1; }
+    static const int st[13] = {1,3,5,7,9,14,16,18,20,22,24,28,30};
+    for(int k = 0; k < 13; k++){
+        unsigned ch = (unsigned)e[st[k]] | ((unsigned)e[st[k]+1] << 8);
+        size_t i = off + (size_t)k;
+        if(i >= sizeof a->buf - 1){ a->bad = true; break; }
+        if(ch == 0){ if(i > a->len) a->len = i; a->active = true; break; }   /* 名字结束 */
+        if(ch == 0xFFFF) break;                                              /* 填充位 */
+        a->buf[i] = (ch < 128) ? (char)ch : '?';
+        if(i + 1 > a->len) a->len = i + 1;
+        a->active = true;
+    }
+    return 1;
+}
+static const char *lfn_value(lfn_acc *a){
+    if(!a->active || a->bad || a->len == 0){ a->buf[0]=0; return a->buf; }
+    a->buf[a->len] = 0;
+    return a->buf;
+}
+
 /* 目录里是否已经存在某个 11 字节 8.3 名（跳过 LFN 项、卷标项与已删除项）
  * 返回 1=已存在 · 0=不存在 · -1=镜像损坏（簇链成环/读失败） */
 static int dir_has_83(img_fat32_fs *fs, uint32_t dirclus, const uint8_t n83[11]){
@@ -270,8 +308,7 @@ static int dir_find(img_fat32_fs *fs, uint32_t dirclus, const char *want, dir_en
     }
     char wantu[260]; snprintf(wantu,sizeof wantu,"%s",want);
     for(char *p=wantu;*p;p++) if(*p>='a'&&*p<='z') *p-=32;
-    char lfn[260]; lfn[0]=0;
-    bool have_lfn=false;
+    lfn_acc la; lfn_reset(&la);
     dir_ent fb83; memset(&fb83,0,sizeof fb83);
     bool have_fb83=false;
     uint32_t c = dirclus;
@@ -283,25 +320,11 @@ static int dir_find(img_fat32_fs *fs, uint32_t dirclus, const char *want, dir_en
         for(size_t i=0;i+ENTRY_SIZE<=csz;i+=ENTRY_SIZE){
             uint8_t *e = buf+i;
             if(e[0]==0x00) goto done;                          /* 目录结束 */
-            if(e[0]==0xE5){ lfn[0]=0; have_lfn=false; continue; }
-            if((e[11] & 0x0F)==0x0F){                          /* LFN 项 */
-                int ord = e[0] & 0x1F;
-                if(ord<1 || ord>20){ lfn[0]=0; continue; }
-                size_t off = (size_t)(ord-1)*13;
-                static const int st[13]={1,3,5,7,9,14,16,18,20,22,24,28,30};
-                for(int k=0;k<13;k++){
-                    unsigned lo=e[st[k]], hi=e[st[k]+1];
-                    unsigned ch = lo | (hi<<8);
-                    if(off+(size_t)k >= sizeof lfn-1) break;
-                    if(ch==0){ lfn[off+k]=0; have_lfn=true; break; }
-                    lfn[off+k] = (ch<128) ? (char)ch : '?';
-                    lfn[off+(size_t)k+1]=0;
-                    have_lfn=true;
-                }
-                continue;
-            }
-            if(e[11] & ATTR_VOLUME){ lfn[0]=0; have_lfn=false; continue; }
-            bool had_lfn = have_lfn && lfn[0];
+            if(e[0]==0xE5){ lfn_reset(&la); continue; }
+            if(lfn_feed(&la, e)) continue;                     /* LFN 项交给累加器 */
+            if(e[11] & ATTR_VOLUME){ lfn_reset(&la); continue; }
+            const char *lfn = lfn_value(&la);
+            bool had_lfn = la.active && lfn[0];
             if(had_lfn){
                 char a[260]; snprintf(a,sizeof a,"%s",lfn);
                 for(char *p=a;*p;p++) if(*p>='a'&&*p<='z') *p-=32;
@@ -317,7 +340,7 @@ static int dir_find(img_fat32_fs *fs, uint32_t dirclus, const char *want, dir_en
                     have_fb83=true;
                 }
             }
-            lfn[0]=0; have_lfn=false;
+            lfn_reset(&la);
         }
         uint32_t nx=0; if(fat_get(fs,c,&nx)){ free(buf); return IMG_EIO; }
         c=nx;
@@ -860,7 +883,7 @@ int img_fat32_list_dir(img_fat32_fs *fs, const char *abs_path, img_fat32_list_cb
     size_t csz=(size_t)fs->L.sectors_per_cluster*512;
     uint8_t *buf=malloc(csz);
     if(!buf) return IMG_ENOMEM;
-    char lfn[260]; lfn[0]=0; bool have=false;
+    lfn_acc la; lfn_reset(&la);
     uint32_t c=dir; uint64_t guard=0;
     while(c>=2 && c<FAT32_EOC){
         if(FAT32_CHAIN_GUARD(fs,guard)){ free(buf); return IMG_ECORRUPT; }
@@ -869,35 +892,23 @@ int img_fat32_list_dir(img_fat32_fs *fs, const char *abs_path, img_fat32_list_cb
         for(size_t i=0;i+ENTRY_SIZE<=csz;i+=ENTRY_SIZE){
             uint8_t *e=buf+i;
             if(e[0]==0x00){ stop=true; break; }
-            if(e[0]==0xE5){ lfn[0]=0; have=false; continue; }
-            if((e[11]&0x0F)==0x0F){
-                int ord=e[0]&0x1F;
-                if(ord<1||ord>20){ lfn[0]=0; continue; }
-                size_t off=(size_t)(ord-1)*13;
-                static const int st[13]={1,3,5,7,9,14,16,18,20,22,24,28,30};
-                for(int k=0;k<13;k++){
-                    unsigned ch=e[st[k]]|((unsigned)e[st[k]+1]<<8);
-                    if(off+(size_t)k>=sizeof lfn-1) break;
-                    if(ch==0){ lfn[off+k]=0; have=true; break; }
-                    lfn[off+k]=(ch<128)?(char)ch:'?';
-                    lfn[off+(size_t)k+1]=0; have=true;
-                }
-                continue;
-            }
-            if(e[11] & (ATTR_VOLUME)){ lfn[0]=0; have=false; continue; }
+            if(e[0]==0xE5){ lfn_reset(&la); continue; }
+            if(lfn_feed(&la, e)) continue;
+            if(e[11] & (ATTR_VOLUME)){ lfn_reset(&la); continue; }
             char n[12]; int j=0;
             for(int k=0;k<8 && e[k]!=' ';k++) n[j++]=(char)e[k];
             if(e[8]!=' '){ n[j++]='.'; for(int k=8;k<11 && e[k]!=' ';k++) n[j++]=(char)e[k]; }
             n[j]=0;
             uint32_t clus=((uint32_t)e[20]<<16)|((uint32_t)e[21]<<24)|(uint32_t)e[26]|((uint32_t)e[27]<<8);
             uint32_t sz  =(uint32_t)e[28]|((uint32_t)e[29]<<8)|((uint32_t)e[30]<<16)|((uint32_t)e[31]<<24);
-            const char *nm_out=(have&&lfn[0])?lfn:n;
+            const char *lfnv = lfn_value(&la);
+            const char *nm_out=(la.active && lfnv[0])?lfnv:n;
             /* ★ 不把 "." / ".." 抛给上层：与 ntfs.list 保持一致，
              *   否则 App 要给两套目录渲染逻辑（实测 fat.ls 会多出这两行）。*/
             if(strcmp(nm_out,".") && strcmp(nm_out,".."))
                 cb(ud, nm_out, (e[11]&ATTR_DIR)!=0, sz);
             (void)clus;
-            lfn[0]=0; have=false;
+            lfn_reset(&la);
         }
         if(stop) break;
         uint32_t nx=0; if(fat_get(fs,c,&nx)) break;

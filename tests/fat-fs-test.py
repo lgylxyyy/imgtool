@@ -344,6 +344,67 @@ def main():
         check("分页不丢序（前 10 项按目录顺序）",
               len(names1) == 10 and len(set(names1)) == 10, str(names1))
 
+        print("\n════ 5c. 多槽 LFN（真 Windows ESP 上抓到的 bug 回归）════")
+        # 名字 >13 字符会占多个 LFN 槽（盘上倒序存放）。旧实现每写一个字符顺手补
+        # 结束符，最后处理的 ord=1 把结束符落在 buf[13] —— 后半截被截断：
+        # fat.ls 显示 "Renamed-Long."、fat.exists 找不到 >13 字符的文件，
+        # 而 mtools 能正常读 —— 盘是对的，是我们读错了。
+        longs = ["abcdefghij.txt",              # 14 字符 = 2 槽
+                 "abcdefghijklmnop.stu",        # 22 字符 = 2 槽
+                 "a" * 30 + ".long30",          # 38 字符 = 3 槽
+                 "This.Is.A.Very.Long.File.Name.With.Many.Dots.dat"]   # 4 槽 + 多个点
+        big = os.path.join(W, "big.bin")
+        open(big, "wb").write(b"LFP" * 500)
+        big_md5 = subprocess.run(["md5sum", big], capture_output=True, text=True).stdout.split()[0]
+        for nm in longs:
+            cmd("fat.put", "--img=" + img, "--lba=%d" % ESP_LBA,
+                "--src=" + big, "--dst=/" + nm)
+        got = [e["name"] for e in cmd("fat.ls", "--img=" + img, "--lba=%d" % ESP_LBA,
+                                      "--path=/")["data"]["entries"]]
+        miss = [n for n in longs if n not in got]
+        check(not miss, "ls 能完整读出 %d 个多槽长名（不截断到 13 字符）" % len(longs),
+              "缺: %s" % miss)
+        bad = [n for n in longs
+               if not cmd("fat.exists", "--img=" + img, "--lba=%d" % ESP_LBA,
+                          "--path=/" + n)["data"]["exists"]]
+        check(not bad, "exists 逐个命中", "找不到: %s" % bad)
+        o = os.path.join(W, "lfp.out")
+        for n in longs:
+            cmd("fat.export", "--img=" + img, "--lba=%d" % ESP_LBA,
+                "--path=/" + n, "--dst=" + o, "--progress=none")
+            if subprocess.run(["md5sum", o], capture_output=True, text=True).stdout.split()[0] != big_md5:
+                ng("导出内容一致", "不一致: " + n); break
+        else:
+            ok("导出内容逐个一致（长名不是只认名字不认数据）")
+        # 覆盖同名长文件：条目数不许变多（dir_find 认不出就会新建一条）
+        before = cmd("fat.ls", "--img=" + img, "--lba=%d" % ESP_LBA, "--path=/")["data"]["total"]
+        cmd("fat.put", "--img=" + img, "--lba=%d" % ESP_LBA, "--src=" + big,
+            "--dst=/abcdefghijklmnop.stu")
+        after = cmd("fat.ls", "--img=" + img, "--lba=%d" % ESP_LBA, "--path=/")["data"]["total"]
+        check(before == after, "覆盖多槽长名不会多出一条（dir_find 认得它）",
+              "%d → %d" % (before, after))
+        # 长名改名 / 删除
+        cmd("fat.move", "--img=" + img, "--lba=%d" % ESP_LBA,
+            "--src=/abcdefghijklmnop.stu", "--dst=/Moved-To-Another-Long-Name.txt")
+        f = echo()
+        check(f.find("/Moved-To-Another-Long-Name.txt") is not None
+              and f.find("/abcdefghijklmnop.stu") is None, "多槽长名可以改名/移动")
+        r = cmd("fat.rm", "--img=" + img, "--lba=%d" % ESP_LBA,
+                "--path=/Moved-To-Another-Long-Name.txt")
+        check(r.get("ok") and echo().find("/Moved-To-Another-Long-Name.txt") is None,
+              "多槽长名可以删除（LFN 槽一起标删）")
+        # 长名目录
+        cmd("fat.put", "--img=" + img, "--lba=%d" % ESP_LBA, "--src=" + big,
+            "--dst=/A-Very-Long-Directory-Name/inner.txt")
+        f = echo()
+        check(f.find("/A-Very-Long-Directory-Name/inner.txt") is not None,
+              "多槽长名目录可建可查")
+        cmd("fat.move", "--img=" + img, "--lba=%d" % ESP_LBA,
+            "--src=/A-Very-Long-Directory-Name", "--dst=/Renamed-Long-Directory")
+        f = echo()
+        check(f.find("/Renamed-Long-Directory/inner.txt") is not None,
+              "多槽长名目录可移动，里面的文件跟着走")
+
         print("\n════ 6. 第三方交叉验证（mtools）════")
         have = shutil.which("qemu-img") and shutil.which("mdir")
         if not have:
