@@ -156,16 +156,24 @@ $MFT $BITMAP: bit(99790)=1（该记录在用，属于 AppxBlockMap.xml）
 
 ---
 
-## 5. 修法（本轮已实现的部分）
+## 5. 修法（本轮**已实现并合入**，`imgtool` 603bba4）
 
-1. **`img_ntfs_mkdir_p()` 建完必须"从盘上重开验明正身"**：重新按路径解析，要求
-   ① 能解析到 ino；② 该记录 `MFT_RECORD_IS_DIRECTORY`；③ 该记录的 `$FILE_NAME` 里存在**同名且父=上一级**的一条。任一不满足 ⇒ 返回新错误码 **`NTFS-DIR-PHANTOM`**（绝不静默继续）。
-2. **`img_ntfs_move_path()` 在自动建父目录后**同样走这条校验（它调的就是 `mkdir_p`，因此自动受益）。
-3. **`tests/ntfs-inventory.py`**：独立（不链接 imgtool）三方对账器，可对**任何** NTFS 盘跑
-   `索引项 ↔ MFT 记录 ↔ $MFT $BITMAP`，输出违背清单。这是"工具说成功"与"Windows 说坏了"之间唯一的仲裁者；已纳入 `tests/run_all.sh` 之后的手动体检流程。
-4. 已把 `ntfs.move` 的**跨父目录搬移**收回状态**改为"能力保留但强制写后自证"**（下一轮提交），并在文档/手册里把上轮"判负"结论作废。
-
-（待办，未做）：显式更新源/目标目录的三个时间戳、DataFile 的 ARCHIVE 位；给 `$MFT $BITMAP` 位与记录的双向一致性加进 `boot.check`。
+1. **`img_ntfs_mkdir_p()` 建完/命中已存在，一律"从盘上重开验明正身"**
+   （`verify_dir_on_disk()`）：① 父索引里按名字查得到引用；② 该 ino 的记录能打开；
+   ③ 记录带 `MFT_RECORD_IS_DIRECTORY`；④ 记录里存在"同名 **且** 父引用指回这一级父"的
+   `$FILE_NAME`。任一不过 ⇒ `IMG_ECORRUPT` → 命令层 **`NTFS-DIR-PHANTOM`**。
+   中间某一级是文件也当场拒（以前只会报一个含义不明的 EIO）。
+2. **搬移之后 `verify_move_result()`**：新位置查得到、记录就是原来那条 inode、
+   目录仍是目录、**子记录的 `$FILE_NAME` 指回新父**（= chkdsk Stage 2 的判据）。
+3. 两个实现坑（都写在注释里，别再犯）：
+   * 自证必须放在 `ntfs_inode_close(父)` **之后** —— 循环里父索引还只在内存；
+   * **"旧位置查不到"只能 WARN**：NTFS 大小写不敏感 + libntfs-3g 的 NIDATA 会缓存
+     整份索引快照，拿它硬判会把好盘报成坏盘。
+4. **`tools/ntfs-inventory.py`**：不链接 imgtool/libntfs-3g 的**独立三方对账器**，
+   `索引项 ↔ MFT 记录 ↔ $MFT $BITMAP`；"工具说成功"与"Windows 说坏了"之间它是仲裁者。
+   `tests/ntfs-inventory-test.py`（22 条）把它钉进回归：正常流程 0 违背 → 手工注入
+   "目录项指向文件记录"精确复刻事故 → 裁判报警 **且** imgtool 拒写。
+5. 跨父目录搬移的锁**暂时保留**，但注释/手册已改判为"证据不足"，解禁条件见 §7。
 
 ---
 
@@ -176,3 +184,42 @@ $MFT $BITMAP: bit(99790)=1（该记录在用，属于 AppxBlockMap.xml）
 | 「NTFS 目录跨父搬移被真 Windows 判负，已收回」 | 2026-10-23 上轮 HANDOFF/手册 §21.11.1/测试计划 T1 | **作废**：判负证据实际是"幽灵目录"，不是搬移语义；受控跨父搬移三方对账 0 违背 |
 | 「Windows 卷的 `$I30` 里没有 `.`/`..` 索引项，所以搬目录不用管 `..`」（上轮已作废过一次） | 上轮作废理由=循环论证 | **重新成立，但换了合法依据**：[MS-FSA] §2.1.5.6.3.4 + `<65>` 明文规定 `.`/`..` 是**查询时合成**；libntfs-3g `dir.c:1154/1171` 同样合成。不再依赖"我自己造的盘" |
 | 「`dotdot_present=false` 所以 Windows 不靠 `..` 索引项」 | 上轮 | 依据换成规范条文，结论保留 |
+
+---
+
+## 7. ★ 灌入/写入工具在"文件本体以外"写了什么（真盘实测对照）
+
+同一张真 Windows 盘（`w10b`，卷号 2B00-726F）上取三类记录，逐属性对比：
+
+| 谁建的 | 样本 | `$FILE_NAME` 条数 / 命名空间 | 安全描述符 | `$SI` vs `$FN` 时间 | 本体以外的其它属性 |
+|---|---|---|---|---|---|
+| **Windows 运行时** | `/pagefile.sys`、`/$Recycle.Bin`、`/Windows/Temp`、`C:\System Volume Information` | 各 1 条 | **无内联 `$SD`** ⇒ 走 `$SI` 里的 SecurityID 引用 `$Secure:$SDS` | **多处不一致**（pagefile/Temp/SVI 的 `$SI` 修改时间 ≠ `$FN`） | 目录：`$INDEX_ROOT`（Temp 还带 `$INDEX_ALLOCATION`+`$BITMAP`）；`$Reparse`/`$ObjId` 另计 |
+| **wimlib（我们产线第一步）** | `cmd.exe`、`explorer.exe`、`config/SAM` | **2 条**（长名 + 8.3 短名，`link_count=2`），ns=0 | 无内联 `$SD`（同上引用 `$SDS`） | 全部**一致** | `SAM` 带 `$EA_INFORMATION(0xd0)`+`$EA(0xe0)`；`explorer.exe` 带第二条 `$DATA` + **`$LOGGED_UTILITY_STREAM(0xc0)`**（CompactOS/WIM 指针流） |
+| **imgtool 建的目录** | `/ProbeDir`、`/Rec1` | 1 条，ns=0，**没有 8.3 短名** | ★ **内联 `$SECURITY_DESCRIPTOR(0x50)`，内容是 everyone 全通 ACL** | 一致 | 只有 `$INDEX_ROOT`，没有 `.`/`..` 项（符合规范，见 §1.4） |
+
+**读出来的三条结论**：
+
+1. **时间戳不用逐条同步是合规的**：Windows 自己就让 `$SI` 与 `$FN` 不一致
+   （libntfs-3g `layout.h` 的 `$FILE_NAME` 注释也写着"除父引用外，这些字段只在改名时更新，
+   在此之前允许与现实不同步"）⇒ 我们没必要为"两份时间"焦虑。
+2. **8.3 短名是可选项**：`fsutil` 在系统卷上默认开启短名，但 [MS-FSA] 只在
+   "短名已启用且目标没有同短名冲突"时要求生成；我们建的对象没短名，Windows 会自己按需生成
+   ⇒ 不是 found.000 的原因。
+3. ★ **真正的差异在 ACL：我们建的目录带的是"内联 `$SD` + everyone 全通"**，
+   而 Windows/wimlib 建的都是"引用 `$Secure:$SDS`"。
+   ⇒ `win.recover` 造出来的 `Windows.old` 这类目录，**权限与系统原生不同**（人人可写）。
+   `chkdsk` Stage 3 不报怨（内联 `$SD` 合法），但这是**产品级问题**：已记入未解决清单（P1）。
+
+⇒ 也就是说：用户让我"去吃一下灌入的工具"，吃出来的东西**不是** found.000 的原因
+   （原因是 §3 的幽灵目录），但吃出了**另一个真问题**（ACL 模型不一致）。
+
+---
+
+## 8. 跨父目录搬移的解禁条件（下一步）
+
+1. 选一张**独立裁判 0 违背**的 Windows 盘（`tools/ntfs-inventory.py` 先跑一遍）；
+2. 用 imgtool 做一次跨父搬目录，**再跑一次裁判**（必须仍 0 违背）；
+3. 复制到 Vectras 目录，真 Windows 开机：`dir` 能进能列、`chkdsk C: /scan` 零报怨；
+4. 三条全过 ⇒ 去掉 `img_ntfs_move_path` 里的 `isdir && !same_dir` 拦截，
+   并同轮复核 `img_ntfs_move_into`（`win.recover`/`ntfs.rename` 在用，它搬的正是
+   `Windows`/`Program Files`/`Users` 进 `Windows.old` —— 现在这条路径**也有写后自证**了）。
