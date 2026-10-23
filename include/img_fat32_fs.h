@@ -16,6 +16,7 @@
 #include "img_qcow2.h"
 #include "img_fat32.h"
 #include "img_progress.h"
+#include "img_stream.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,6 +40,25 @@ int  img_fat32_file_size(img_fat32_fs *fs, const char *abs_path, uint64_t *out);
 
 /* 递归建目录；已存在则成功 */
 int img_fat32_mkdir_p(img_fat32_fs *fs, const char *abs_path);
+
+/* ---------- 流式读写（跨分区/跨镜像/宿主复制的地基，2026-10-24） ----------
+ * 与 NTFS 侧同一套契约：rd 按 off 随机读；write_stream 先写临时名再改名。
+ * FAT32 单文件上限 4 GiB-1，超出返回 IMG_ERANGE（绝不写坏）。*/
+typedef struct img_fat32_rd img_fat32_rd;
+int  img_fat32_rd_open(img_fat32_fs *fs, const char *abs_path, img_fat32_rd **out,
+                       img_src_meta *meta);
+int  img_fat32_rd_read(img_fat32_rd *rd, uint64_t off, void *buf, size_t want, size_t *got);
+void img_fat32_rd_close(img_fat32_rd *rd);
+
+/* 在 dir_abs 里找一个不冲突的名字（"名 (1).扩展名"）。返回 0 成功 / -1 失败。*/
+int img_fat32_unique_name(img_fat32_fs *fs, const char *dir_abs, const char *base,
+                          char *out, size_t cap);
+
+int img_fat32_write_stream(img_fat32_fs *fs, const char *dst_abs,
+                           const img_stream *src, const img_src_meta *meta,
+                           int conflict, bool preserve_times, img_prog *prog,
+                           char *out_path, size_t out_cap,
+                           uint64_t *out_size, bool *out_replaced);
 
 /* 写文件（自动建父目录，覆盖已存在）。prog 可为 NULL */
 int img_fat32_put_file(img_fat32_fs *fs, const char *local_path,

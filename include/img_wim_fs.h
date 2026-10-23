@@ -48,6 +48,13 @@ int img_wim_stat(const char *wim_path, int index, const char *inner_path,
 /* 抽【单个文件】到本地路径 dst（会覆盖）。流式 1 MiB，带进度与取消；
  * 取消时删除半成品（与 iso.extract 同契约）。目录一律 IMG_ENOTSUP。
  * 实现：wimlib_extract_paths 到临时目录（img_tmpdir()）→ 复制出来 → 递归删临时目录。*/
+/* 抽【整个子树】到调用方给的目录 out_dir（保留 WIM 内结构：out_dir + inner_path）。
+ * 给跨文件系统复制用（file.copy 的源是 WIM/ESD 时，先材料化一次再按本地树复制）。
+ * out_dir 必须已存在且为空（调用方用 mkdtemp 建）。*/
+int img_wim_extract_tree(const char *wim_path, int index, const char *inner_path,
+                         const char *out_dir, img_prog *prog,
+                         char *err, size_t errcap);
+
 int img_wim_extract_file(const char *wim_path, int index, const char *inner_path,
                          const char *dst_path, img_prog *prog, uint64_t *out_bytes,
                          char *err, size_t errcap);

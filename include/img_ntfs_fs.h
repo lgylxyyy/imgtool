@@ -15,6 +15,7 @@
 #define IMG_NTFS_FS_H
 #include "img_qcow2.h"
 #include "img_progress.h"
+#include "img_stream.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -161,6 +162,28 @@ typedef struct {
 
 int img_ntfs_copy(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs,
                   const img_copy_opts *opt, img_prog *prog, img_copy_result *out);
+
+/* ---------- 流式读写（跨分区/跨镜像/宿主复制的地基，2026-10-24） ----------
+ * rd_open 打开一条"只读文件句柄"：拿到大小/时间/属性，之后按 off 随机读。
+ * 失败：IMG_ENOENT 路径不存在 / IMG_ENOTSUP 是目录 / IMG_EIO 打不开属性。*/
+typedef struct img_ntfs_rd img_ntfs_rd;
+int  img_ntfs_rd_open(img_ntfs_fs *fs, const char *abs_path, img_ntfs_rd **out,
+                      img_src_meta *meta);
+int  img_ntfs_rd_read(img_ntfs_rd *rd, uint64_t off, void *buf, size_t want, size_t *got);
+void img_ntfs_rd_close(img_ntfs_rd *rd);
+
+/* 把任意 img_stream 写成盘内文件。语义与 img_ntfs_copy 完全一致：
+ * 同目录临时名 → 写完一次性原子改名；失败/取消清理临时文件；写后自证。
+ * meta 里的 times（且 preserve_times=true 时）/flags 会照抄。
+ * dst 是目录（或以 / 结尾）时目标名怎么定由调用方决定（这里按字面路径写）。*/
+/* 在 dir_abs 里找一个不冲突的名字（"名 (1).扩展名"）。返回 IMG_OK/IMG_EEXISTS。*/
+int img_ntfs_unique_name(img_ntfs_fs *fs, const char *dir_abs, const char *base,
+                         char *out, size_t cap);
+
+int img_ntfs_write_stream(img_ntfs_fs *fs, const char *dst_abs,
+                          const img_stream *src, const img_src_meta *meta,
+                          const img_copy_opts *opt, img_prog *prog,
+                          img_copy_result *out);
 
 int img_ntfs_verify_dir (img_ntfs_fs *fs, const char *abs_path);
 int img_ntfs_verify_path(img_ntfs_fs *fs, const char *abs_path,

@@ -94,3 +94,42 @@ int img_ntfs_precheck(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
                       bool *out_dirty, int *out_root_entries){
     (void)q; (void)part_lba; (void)part_bytes; (void)out_dirty; (void)out_root_entries; return NA;
 }
+/* 流式读写（跨分区/跨镜像复制）在裁剪构建里一律"不支持" */
+int img_ntfs_rd_open(img_ntfs_fs *fs, const char *abs_path, img_ntfs_rd **out,
+                     img_src_meta *meta){
+    (void)fs;(void)abs_path;(void)meta;
+    if(out) *out=NULL;
+    return NA;
+}
+int  img_ntfs_rd_read(img_ntfs_rd *rd, uint64_t off, void *buf, size_t want, size_t *got){
+    (void)rd;(void)off;(void)buf;(void)want;
+    if(got) *got=0;
+    return NA;
+}
+void img_ntfs_rd_close(img_ntfs_rd *rd){ (void)rd; }
+int img_ntfs_write_stream(img_ntfs_fs *fs, const char *dst_abs,
+                          const img_stream *src, const img_src_meta *meta,
+                          const img_copy_opts *opt, img_prog *prog,
+                          img_copy_result *out){
+    (void)fs;(void)dst_abs;(void)src;(void)meta;(void)opt;(void)prog;(void)out;
+    return NA;
+}
+
+/* 时间 / 唯一名（跨分区复制引擎会调；裁剪构建一律"不支持"） */
+int img_ntfs_file_times(img_ntfs_fs *fs, const char *abs_path, uint64_t out[4]){
+    (void)fs;(void)abs_path;(void)out; return NA;
+}
+int img_ntfs_set_times(img_ntfs_fs *fs, const char *abs_path, const uint64_t in[4]){
+    (void)fs;(void)abs_path;(void)in; return NA;
+}
+int img_ntfs_unique_name(img_ntfs_fs *fs, const char *dir_abs, const char *base,
+                         char *out, size_t cap){
+    (void)fs;(void)dir_abs;(void)base;(void)out;(void)cap; return NA;
+}
+int img_ntfs_dir_rev(img_ntfs_fs *fs, const char *dir_abs, uint64_t *out_rev){
+    (void)fs;(void)dir_abs;(void)out_rev; return NA;
+}
+int img_ntfs_dir_lookup_ino(img_ntfs_fs *fs, const char *dir_abs, const char *name,
+                            uint64_t *out_ino){
+    (void)fs;(void)dir_abs;(void)name;(void)out_ino; return NA;
+}

@@ -28,6 +28,9 @@
 #define ATTR_VOLUME   0x08
 #define ENTRY_SIZE    32
 
+static int fat_unique_name(img_fat32_fs *fs, const char *dir, const char *base,
+                           char *out, size_t cap);   /* 定义在后 */
+
 struct img_fat32_fs {
     img_qcow2 *q;
     uint64_t   base;              /* 分区字节起点 */
@@ -138,16 +141,79 @@ static uint8_t lfn_checksum(const uint8_t *name83){
         sum = (uint8_t)(((sum & 1) << 7) + (sum >> 1) + name83[i]);
     return sum;
 }
+/* ---------- UTF-8 ↔ UTF-16LE（不依赖 iconv；Android/Windows 都能编） ----------
+ * 为什么必须做：FAT 的长文件名在盘上是 UTF-16LE。旧实现把 UTF-8 的每个字节
+ * 当成一个 UTF-16 码元写进去、读回来再把 >=128 的码元换成 '?' ——
+ * 中文名在 ESP 上会变成 "?????? ??????"，而且写完自己都找不到（路径解析失败）。
+ * 2026-10-24 真机复现后补上。*/
+static int u8_to_u16(const char *s, uint16_t *out, int cap){
+    int n=0;
+    const unsigned char *p=(const unsigned char*)s;
+    while(*p){
+        uint32_t cp; int adv;
+        if(p[0]<0x80){ cp=p[0]; adv=1; }
+        else if((p[0]&0xE0)==0xC0 && p[1] && (p[1]&0xC0)==0x80){
+            cp=((uint32_t)(p[0]&0x1F)<<6)|(p[1]&0x3F); adv=2;
+        } else if((p[0]&0xF0)==0xE0 && p[1] && p[2] && (p[1]&0xC0)==0x80 && (p[2]&0xC0)==0x80){
+            cp=((uint32_t)(p[0]&0x0F)<<12)|((uint32_t)(p[1]&0x3F)<<6)|(p[2]&0x3F); adv=3;
+        } else if((p[0]&0xF8)==0xF0 && p[1] && p[2] && p[3] &&
+                  (p[1]&0xC0)==0x80 && (p[2]&0xC0)==0x80 && (p[3]&0xC0)==0x80){
+            cp=((uint32_t)(p[0]&0x07)<<18)|((uint32_t)(p[1]&0x3F)<<12)|
+               ((uint32_t)(p[2]&0x3F)<<6)|(p[3]&0x3F); adv=4;
+        } else { cp='?'; adv=1; }
+        if(cp>=0x10000){
+            if(n+2>cap) return -1;
+            cp-=0x10000;
+            out[n++]=(uint16_t)(0xD800+(cp>>10));
+            out[n++]=(uint16_t)(0xDC00+(cp&0x3FF));
+        } else {
+            if(n+1>cap) return -1;
+            out[n++]=(uint16_t)cp;
+        }
+        p+=adv;
+    }
+    return n;
+}
+static int u16_to_u8(const uint16_t *u, int n, char *out, size_t cap){
+    size_t o=0;
+    for(int i=0;i<n;i++){
+        uint32_t cp=u[i];
+        if(cp>=0xD800 && cp<=0xDBFF && i+1<n && u[i+1]>=0xDC00 && u[i+1]<=0xDFFF){
+            cp=0x10000+((cp-0xD800)<<10)+(u[i+1]-0xDC00); i++;
+        } else if(cp>=0xD800 && cp<=0xDFFF) cp='?';
+        if(cp<0x80){ if(o+1>=cap) break; out[o++]=(char)cp; }
+        else if(cp<0x800){ if(o+2>=cap) break;
+            out[o++]=(char)(0xC0|(cp>>6)); out[o++]=(char)(0x80|(cp&0x3F)); }
+        else if(cp<0x10000){ if(o+3>=cap) break;
+            out[o++]=(char)(0xE0|(cp>>12)); out[o++]=(char)(0x80|((cp>>6)&0x3F));
+            out[o++]=(char)(0x80|(cp&0x3F)); }
+        else { if(o+4>=cap) break;
+            out[o++]=(char)(0xF0|(cp>>18)); out[o++]=(char)(0x80|((cp>>12)&0x3F));
+            out[o++]=(char)(0x80|((cp>>6)&0x3F)); out[o++]=(char)(0x80|(cp&0x3F)); }
+    }
+    if(cap) out[o]=0;
+    return (int)o;
+}
+
 static void name_to_83(const char *nm, char out[12]){
     memset(out,' ',11); out[11]=0;
     const char *dot = strrchr(nm,'.');
     int base = dot ? (int)(dot-nm) : (int)strlen(nm);
     if(base>8) base=8;
-    for(int i=0;i<base;i++) out[i] = (char)((nm[i]>='a'&&nm[i]<='z')? nm[i]-32 : nm[i]);
+    /* 8.3 名只能是 ASCII：非 ASCII 字节一律 '_'（Windows 的短名也是这样糊出来的）*/
+    for(int i=0;i<base;i++){
+        unsigned char c=(unsigned char)nm[i];
+        out[i] = (c>=0x80 || c<0x20) ? '_'
+               : (char)((c>='a'&&c<='z')? c-32 : c);
+    }
     if(dot){
         int e=(int)strlen(dot+1);
         if(e>3) e=3;
-        for(int i=0;i<e;i++) out[8+i] = (char)((dot[1+i]>='a'&&dot[1+i]<='z')? dot[1+i]-32 : dot[1+i]);
+        for(int i=0;i<e;i++){
+            unsigned char c=(unsigned char)dot[1+i];
+            out[8+i] = (c>=0x80 || c<0x20) ? '_'
+                     : (char)((c>='a'&&c<='z')? c-32 : c);
+        }
     }
 }
 /* ★ 写盘用的是【补满 11 字节】的 8.3；比较时必须用【去尾空格】版，
@@ -203,7 +269,7 @@ static void ent_83_name(const uint8_t *e, char out[12]){
  *        fat.exists / fat.export 找不到 >13 字符的文件；
  *        而 mtools 能正常读同一个目录 —— 说明盘是对的，是我们读错了。
  *   现在：见到带 0x40 的那片就重置；结束符统一由 lfn_value() 补。*/
-typedef struct { char buf[260]; size_t len; bool active; bool bad; } lfn_acc;
+typedef struct { uint16_t u[261]; char buf[4*261+4]; size_t len; bool active; bool bad; } lfn_acc;
 static void lfn_reset(lfn_acc *a){ a->buf[0]=0; a->len=0; a->active=false; a->bad=false; }
 /* 喂一条目录项。返回 1=这是 LFN 项（已消费），0=不是。*/
 static int lfn_feed(lfn_acc *a, const uint8_t *e){
@@ -212,15 +278,15 @@ static int lfn_feed(lfn_acc *a, const uint8_t *e){
     if(ord < 1 || ord > 20){ lfn_reset(a); return 1; }   /* 乱序/超限：重新开始 */
     if(e[0] & 0x40) lfn_reset(a);                        /* 磁盘上最先读到的那片 */
     size_t off = (size_t)(ord - 1) * 13;
-    if(off >= sizeof a->buf - 1){ a->bad = true; return 1; }
+    if(off >= (sizeof a->u/sizeof a->u[0]) - 1){ a->bad = true; return 1; }
     static const int st[13] = {1,3,5,7,9,14,16,18,20,22,24,28,30};
     for(int k = 0; k < 13; k++){
         unsigned ch = (unsigned)e[st[k]] | ((unsigned)e[st[k]+1] << 8);
         size_t i = off + (size_t)k;
-        if(i >= sizeof a->buf - 1){ a->bad = true; break; }
+        if(i >= (sizeof a->u/sizeof a->u[0]) - 1){ a->bad = true; break; }
         if(ch == 0){ if(i > a->len) a->len = i; a->active = true; break; }   /* 名字结束 */
         if(ch == 0xFFFF) break;                                              /* 填充位 */
-        a->buf[i] = (ch < 128) ? (char)ch : '?';
+        a->u[i] = (uint16_t)ch;
         if(i + 1 > a->len) a->len = i + 1;
         a->active = true;
     }
@@ -228,7 +294,7 @@ static int lfn_feed(lfn_acc *a, const uint8_t *e){
 }
 static const char *lfn_value(lfn_acc *a){
     if(!a->active || a->bad || a->len == 0){ a->buf[0]=0; return a->buf; }
-    a->buf[a->len] = 0;
+    u16_to_u8(a->u, (int)a->len, a->buf, sizeof a->buf);
     return a->buf;
 }
 
@@ -501,16 +567,23 @@ static void dos_now(uint16_t *out_date, uint16_t *out_time){
 
 static int dir_add_entry(img_fat32_fs *fs, uint32_t dirclus, const char *name,
                          uint32_t clus, uint32_t size, bool is_dir, uint64_t *out_off){
-    int nchars = (int)strlen(name);
+    uint16_t uname[256];
+    int nu = u8_to_u16(name, uname, 255);
+    if(nu <= 0) return IMG_EINVAL;
+    if(nu > 255) return IMG_ENAMETOOLONG;
+    int nchars = nu;
     /* ★ 需不需要 LFN 要看【是否符合 8.3 形状】，不是看长度：
      *   base ≤ 8 且（无扩展名 或 扩展名 ≤ 3）才算 8.3 可容纳。
      *   例："Microsoft"(9字符) 虽 < 11 但仍塞不进 8 位名，必须 LFN。*/
-    bool fits83;
+    bool fits83, has_nonascii=false;
     {
         const char *dot = strrchr(name,'.');
-        int base = dot ? (int)(dot-name) : nchars;
+        int base = dot ? (int)(dot-name) : (int)strlen(name);
         int ext  = dot ? (int)strlen(dot+1) : 0;
         fits83 = (base>=1 && base<=8 && ext<=3);
+        for(const unsigned char *q=(const unsigned char*)name; *q; q++)
+            if(*q>=0x80){ has_nonascii=true; break; }
+        if(has_nonascii) fits83=false;      /* 8.3 只能 ASCII */
     }
     /* ★ 短名必须目录内唯一：重名时退化成 '~N'（Windows 规则）。
      *   否则两个长名共用同一个短名 → 后写的会把先写的当成"已存在"覆盖掉。*/
@@ -549,7 +622,7 @@ static int dir_add_entry(img_fat32_fs *fs, uint32_t dirclus, const char *name,
         for(int k=0;k<13;k++){
             size_t idx = (size_t)(ord-1)*13 + (size_t)k;
             unsigned ch = 0;
-            if(idx < (size_t)nchars) ch = (unsigned char)name[idx];
+            if(idx < (size_t)nchars) ch = uname[idx];
             else if(idx == (size_t)nchars) ch = 0;      /* 终止符 */
             else ch = 0xFFFF;
             put_u16(e + st[k], (uint16_t)ch);
@@ -743,6 +816,163 @@ int img_fat32_put_data(img_fat32_fs *fs, const void *data, size_t len, const cha
     return write_data(fs, data, len, dst_abs_path);
 }
 
+/* ---------- 宿主 fd → img_stream（put_file 与复制引擎共用） ---------- */
+typedef struct { int fd; } hostfd_src;
+static int hostfd_read(void *ud, uint64_t off, void *buf, size_t want, size_t *got){
+    hostfd_src *h = (hostfd_src*)ud;
+    if(got) *got = 0;
+    ssize_t r = pread(h->fd, buf, want, (off_t)off);
+    if(r < 0) return IMG_EIO;
+    *got = (size_t)r;
+    return IMG_OK;
+}
+
+/* ---------- 流式写（任意源 → FAT32 文件）----------
+ * 语义与 NTFS 侧 img_ntfs_write_stream 对齐：
+ *   · 先落到同目录临时名 .imgtmp-<pid>-<n>，全部写完再改名；
+ *   · 失败/取消 → 释放已分配簇链 + 删临时项，不留半成品；
+ *   · 覆盖时也先写新数据，成功后才释放旧链（取消不会毁掉旧文件）。
+ * FAT32 单文件上限 4 GiB-1（目录项 size 是 32 位），超出直接拒绝而不是写坏。*/
+int img_fat32_unique_name(img_fat32_fs *fs, const char *dir_abs, const char *base,
+                          char *out, size_t cap){
+    if(!fs||!dir_abs||!base||!out) return -1;
+    return fat_unique_name(fs, dir_abs, base, out, cap);
+}
+
+int img_fat32_write_stream(img_fat32_fs *fs, const char *dst_abs,
+                           const img_stream *src, const img_src_meta *meta,
+                           int conflict, bool preserve_times, img_prog *prog,
+                           char *out_path, size_t out_cap,
+                           uint64_t *out_size, bool *out_replaced){
+    if(!fs || !dst_abs || !src || !src->read || !meta) return IMG_EINVAL;
+    if(out_size) *out_size = 0;
+    if(out_replaced) *out_replaced = false;
+    uint64_t len64 = meta->size;
+    if(len64 > 0xFFFFFFFFULL) return IMG_ERANGE;         /* FAT32 单文件上限 */
+
+    char ddir[512], dname[256];
+    {   /* 先确保父目录存在（mkdir_p 已存在则成功） */
+        char par[512]; snprintf(par,sizeof par,"%s",dst_abs);
+        char *sl=strrchr(par,'/');
+        if(!sl) return IMG_ENOENT;
+        if(sl==par) par[1]='\0'; else *sl='\0';
+        if(!img_fat32_dir_exists(fs, par)){
+            int mrc=img_fat32_mkdir_p(fs, par);
+            if(mrc!=IMG_OK) return mrc;
+        }
+    }
+    /* 父目录绝对路径 + 名字 */
+    {
+        char tmp[512]; snprintf(tmp,sizeof tmp,"%s",dst_abs);
+        char *sl=strrchr(tmp,'/');
+        if(!sl) return IMG_EINVAL;
+        if(sl==tmp) snprintf(ddir,sizeof ddir,"/");
+        else { *sl=0; snprintf(ddir,sizeof ddir,"%s",tmp); }
+        snprintf(dname,sizeof dname,"%s",sl+1);
+        if(!dname[0]) return IMG_EINVAL;
+        if(strlen(dname) > 255) return IMG_ENAMETOOLONG;
+    }
+    uint32_t dirclus=0; char nm[256];
+    if(split_parent(fs, dst_abs, &dirclus, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
+
+    /* 冲突策略 */
+    char final_name[256]; snprintf(final_name,sizeof final_name,"%s",dname);
+    char full[1200];
+    snprintf(full,sizeof full,"%s%s%s",ddir,strcmp(ddir,"/")?"/":"",final_name);
+    bool replaced=false;
+    if(img_fat32_path_exists(fs, full)){
+        if(conflict==0) return IMG_EEXISTS;
+        if(img_fat32_dir_exists(fs, full)) return IMG_ESTATE;
+        if(conflict==2){
+            if(fat_unique_name(fs, ddir, dname, final_name, sizeof final_name)!=0) return IMG_EEXISTS;
+            snprintf(full,sizeof full,"%s%s%s",ddir,strcmp(ddir,"/")?"/":"",final_name);
+        } else replaced=true;
+    }
+
+    /* 临时名（探测到确实不存在） */
+    char tmp_name[64], tmp_full[1200];
+    bool have=false;
+    for(int i=0;i<64 && !have;i++){
+        snprintf(tmp_name,sizeof tmp_name,".imgtmp-%d-%d",(int)getpid(),i);
+        snprintf(tmp_full,sizeof tmp_full,"%s%s%s",ddir,strcmp(ddir,"/")?"/":"",tmp_name);
+        if(!img_fat32_path_exists(fs, tmp_full)) have=true;
+    }
+    if(!have) return IMG_EEXISTS;
+
+    uint32_t csz=(uint32_t)fs->L.sectors_per_cluster*512;
+    uint32_t need = len64? (uint32_t)((len64 + csz - 1)/csz) : 0;
+    uint32_t first=0;
+    int rc=IMG_OK;
+    if(need){ rc=put_alloc_chain(fs,need,&first); if(rc) return rc; }
+
+    enum { CHUNK = 1u<<20 };
+    uint8_t *buf=malloc(CHUNK);
+    if(!buf){ if(first) free_chain(fs,first); return IMG_ENOMEM; }
+    if(prog){ img_prog_phase(prog,IMG_PH_EXTRACT,"复制文件");
+              img_prog_op(prog,IMG_OP_WRITE); img_prog_bytes(prog,0,len64); }
+    uint32_t c=first; size_t coff=0; uint64_t done=0;
+    while(done<len64){
+        if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
+        size_t want=(size_t)((len64-done<CHUNK)?(len64-done):CHUNK);
+        size_t got=0;
+        rc=src->read(src->ud, done, buf, want, &got);
+        if(rc!=IMG_OK) break;
+        if(got==0){ rc=IMG_EIO; break; }
+        size_t p=0;
+        while(p<got){
+            size_t room=csz-coff, n=(got-p<room)?(got-p):room;
+            int w=wr(fs, clus_off(fs,c)+coff, buf+p, n);
+            if(w){ rc=w; break; }
+            p+=n; coff+=n; done+=n;
+            if(coff==csz){
+                coff=0; uint32_t nx=0;
+                if(fat_get(fs,c,&nx)){ rc=IMG_ECORRUPT; break; }
+                c=nx;
+            }
+        }
+        if(rc) break;
+        if(prog) img_prog_bytes(prog,done,len64);
+        if(done<len64 && (c<2 || c>=FAT32_EOC)){ rc=IMG_ECORRUPT; break; }
+    }
+    free(buf);
+    if(rc==IMG_OK && coff>0 && c>=2 && c<FAT32_EOC){       /* 尾簇补零 */
+        size_t rest=csz-coff;
+        uint8_t *z=calloc(1,rest);
+        if(z){ wr(fs, clus_off(fs,c)+coff, z, rest); free(z); }
+    }
+    if(rc){
+        if(first) free_chain(fs,first);
+        return rc;
+    }
+
+    /* 数据已就位 → 建目录项（名字是临时名，最后再改名） */
+    rc=dir_add_entry(fs, dirclus, tmp_name, first, (uint32_t)len64, false, NULL);
+    if(rc){ if(first) free_chain(fs,first); return rc; }
+
+    if(preserve_times && meta->has_times){
+        uint16_t t5[5]={0,0,0,0,0};
+        uint16_t tm=0, dt=0;
+        img_fat32_epoch_to_dos((int64_t)meta->times[0], &t5[0], &t5[1]);   /* 创建 */
+        img_fat32_epoch_to_dos((int64_t)meta->times[2], &tm, &t5[2]);     /* 访问(只存日期) */
+        img_fat32_epoch_to_dos((int64_t)meta->times[1], &tm, &dt);        /* 修改 */
+        t5[3]=tm; t5[4]=dt;
+        (void)img_fat32_file_set_times(fs,tmp_full,t5);
+    }
+
+    if(replaced){
+        int rr=img_fat32_rm(fs, full);
+        if(rr!=IMG_OK && rr!=IMG_ENOENT){ (void)img_fat32_rm(fs,tmp_full); return rr; }
+    }
+    rc=img_fat32_rename(fs, tmp_full, full);
+    if(rc!=IMG_OK){ (void)img_fat32_rm(fs,tmp_full); return rc; }
+    if(!img_fat32_path_exists(fs, full)) return IMG_ECORRUPT;   /* 写后自证 */
+    if(out_path) snprintf(out_path,out_cap,"%.*s",(int)(out_cap-1),full);
+    if(out_size) *out_size=len64;
+    if(out_replaced) *out_replaced=replaced;
+    if(prog) img_prog_done(prog,"复制完成");
+    return IMG_OK;
+}
+
 int img_fat32_put_file(img_fat32_fs *fs, const char *local_path,
                        const char *dst_abs_path, img_prog *prog){
     if(!fs||!local_path||!dst_abs_path) return IMG_EINVAL;
@@ -752,68 +982,102 @@ int img_fat32_put_file(img_fat32_fs *fs, const char *local_path,
     int fd = open(local_path, O_RDONLY);
     if(fd<0) return IMG_ENOENT;
     struct stat st; if(fstat(fd,&st)<0){ close(fd); return IMG_EIO; }
-    size_t len=(size_t)st.st_size;
-    img_span_kv_u64(&sp,"size_bytes",len);
+    img_src_meta meta; memset(&meta,0,sizeof meta);
+    meta.size=(uint64_t)st.st_size;
+    meta.has_times=true;
+    meta.times[0]=(uint64_t)st.st_ctime;
+    meta.times[1]=(uint64_t)st.st_mtime;
+    meta.times[2]=(uint64_t)st.st_atime;
+    meta.times[3]=(uint64_t)st.st_ctime;
+    img_span_kv_u64(&sp,"size_bytes",meta.size);
     img_span_begin(&sp);
-
-    uint32_t dir; char nm[256]; bool ex=false; dir_ent old;
-    int rc=put_prepare(fs,dst_abs_path,&dir,nm,sizeof nm,&ex,&old);
-    if(rc){ close(fd); img_span_end(&sp,rc); return rc; }
-    uint32_t csz=(uint32_t)fs->L.sectors_per_cluster*512;
-    uint32_t need = len? (uint32_t)((len + csz - 1)/csz) : 0;
-    uint32_t first=0;
-    if(need){ rc=put_alloc_chain(fs,need,&first); if(rc){ close(fd); img_span_end(&sp,rc); return rc; } }
-
-    /* ★ 流式写入：内存峰值 = 1MiB（原先整个文件进内存 —— 415MB 的 winre.wim
-     *   在 Android 上直接把 App 顶到 OOM）。顺带也让进度变成流式的。*/
-    enum { CHUNK = 1u<<20 };
-    uint8_t *buf=malloc(CHUNK);
-    if(!buf){ close(fd); if(first) free_chain(fs,first); img_span_end(&sp,IMG_ENOMEM); return IMG_ENOMEM; }
-    uint32_t c=first; size_t coff=0, done=0;
-    while(done<len){
-        /* ★ 取消检查点：每个 1MiB 查一次。取消时【不写目录项】并释放已分配簇链，
-         *   所以不会留下"半成品文件"（见 DESIGN-OUTPUT.md 第四节）*/
-                img_hb("fat32","extract","copy_out",done>>20);
-        if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
-        size_t want=len-done; if(want>CHUNK) want=CHUNK;
-        size_t got=0;
-        while(got<want){ ssize_t r=read(fd,buf+got,want-got); if(r<=0) break; got+=(size_t)r; }
-        if(!got){ rc=IMG_EIO; break; }                    /* 源文件被截短/读失败 */
-        size_t p=0;
-        while(p<got){
-            size_t room=csz-coff, n=(got-p<room)?(got-p):room;
-            int w=wr(fs, clus_off(fs,c)+coff, buf+p, n);
-            if(w){ rc=w; break; }
-            p+=n; coff+=n; done+=n;
-            if(coff==csz){ coff=0; uint32_t nx=0; if(fat_get(fs,c,&nx)){ rc=IMG_ECORRUPT; break; } c=nx; }
-        }
-        if(rc) break;
-        if(prog) img_prog_bytes(prog,done,len);
-        if(done<len && (c<2 || c>=FAT32_EOC)){ rc=IMG_ECORRUPT; break; }   /* 链比数据短 */
-    }
-    free(buf); close(fd);
-    if(rc==IMG_OK && coff>0 && c>=2 && c<FAT32_EOC){       /* 尾簇补零：不把上一位住户的字节留在缝隙里 */
-        size_t rest=csz-coff;
-        uint8_t *z=calloc(1,rest);
-        if(z){ wr(fs, clus_off(fs,c)+coff, z, rest); free(z); }
-    }
-    if(rc){
-        if(first) free_chain(fs,first);                    /* 失败/取消：回收，不留半成品 */
-        img_span_end(&sp,rc);
-        return rc;
-    }
-    rc=put_finalize(fs,dir,nm,first,(uint32_t)len,ex,&old);
-    img_span_kv_u64(&sp,"written_bytes",(uint64_t)len);
+    hostfd_src h; h.fd=fd;
+    img_stream s; s.ud=&h; s.read=hostfd_read; s.close=NULL;
+    /* put 的老语义：覆盖已存在（conflict=1）；时间由调用方的 preserve_times 决定，
+     * 这里保持"不继承宿主时间"（与旧行为一致，App 显式要才传） */
+    int rc=img_fat32_write_stream(fs,dst_abs_path,&s,&meta,1,false,prog,
+                                  NULL,0,NULL,NULL);
+    close(fd);
+    img_span_kv_u64(&sp,"written_bytes",meta.size);
     img_span_end(&sp,rc);
-    if(rc==IMG_OK && prog){
-        img_prog_phase(prog, IMG_PH_COPY, "写入 FAT32");
-        img_prog_op(prog, IMG_OP_WRITE_FILE);
-        img_prog_item(prog, dst_abs_path);
-        img_prog_bytes(prog, (uint64_t)len, (uint64_t)len);
-    }
     return rc;
 }
 
+/* ---------- 流式读句柄 ---------- */
+struct img_fat32_rd {
+    img_fat32_fs *fs;
+    uint32_t start;      /* 首簇 */
+    uint32_t cur;        /* 当前簇 */
+    uint64_t cur_idx;    /* 当前簇序号 */
+    uint64_t size;
+    uint32_t csz;
+};
+int img_fat32_rd_open(img_fat32_fs *fs, const char *abs_path, img_fat32_rd **out,
+                      img_src_meta *meta){
+    if(out) *out=NULL;
+    if(!fs||!abs_path||!out) return IMG_EINVAL;
+    uint32_t dir; char nm[256];
+    if(split_parent(fs, abs_path, &dir, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
+    dir_ent e; memset(&e,0,sizeof e);
+    if(dir_find(fs, dir, nm, &e)!=IMG_OK || !e.found) return IMG_ENOENT;
+    if(e.is_dir) return IMG_ENOTSUP;
+    img_fat32_rd *rd=(img_fat32_rd*)calloc(1,sizeof *rd);
+    if(!rd) return IMG_ENOMEM;
+    rd->fs=fs; rd->start=e.cluster; rd->cur=e.cluster; rd->cur_idx=0;
+    rd->size=e.size; rd->csz=(uint32_t)fs->L.sectors_per_cluster*512;
+    if(meta){
+        memset(meta,0,sizeof *meta);
+        meta->size=e.size;
+        meta->has_times=true;
+        meta->times[0]=(uint64_t)img_fat32_dos_to_epoch(e.crt_time,e.crt_date);
+        meta->times[1]=(uint64_t)img_fat32_dos_to_epoch(e.wrt_time,e.wrt_date);
+        meta->times[2]=(uint64_t)img_fat32_dos_to_epoch(0,e.acc_date);   /* 只有日期 */
+        meta->times[3]=meta->times[1];
+        meta->has_flags=false;
+    }
+    *out=rd;
+    return IMG_OK;
+}
+int img_fat32_rd_read(img_fat32_rd *h, uint64_t off, void *buf, size_t want, size_t *got){
+    if(got) *got=0;
+    if(!h||!buf||!got) return IMG_EINVAL;
+    if(off>=h->size) return IMG_OK;
+    uint64_t idx=off/h->csz;
+    if(idx<h->cur_idx){ h->cur=h->start; h->cur_idx=0; }
+    uint64_t guard=0;
+    while(h->cur_idx<idx){
+        uint32_t nx=0;
+        if(FAT32_CHAIN_GUARD(h->fs,guard)) return IMG_ECORRUPT;
+        if(fat_get(h->fs,h->cur,&nx)) return IMG_EIO;
+        if(nx<2||nx>=FAT32_EOC) return IMG_ECORRUPT;
+        h->cur=nx; h->cur_idx++;
+    }
+    size_t done=0;
+    uint64_t pos=off;
+    while(done<want && pos<h->size){
+        size_t coff=(size_t)(pos%h->csz);
+        size_t room=h->csz-coff;
+        size_t n=(size_t)(h->size-pos<room?(h->size-pos):room);
+        if(n>want-done) n=want-done;
+        if(rd(h->fs, clus_off(h->fs,h->cur)+coff, (uint8_t*)buf+done, n)) return IMG_EIO;
+        done+=n; pos+=n;
+        if(coff+n==h->csz && pos<h->size){
+            uint32_t nx=0;
+            if(FAT32_CHAIN_GUARD(h->fs,guard)) return IMG_ECORRUPT;
+            if(fat_get(h->fs,h->cur,&nx)) return IMG_EIO;
+            if(nx<2||nx>=FAT32_EOC) return IMG_ECORRUPT;
+            h->cur=nx; h->cur_idx++;
+        }
+    }
+    *got=done;
+    return IMG_OK;
+}
+void img_fat32_rd_close(img_fat32_rd *rd){ free(rd); }
+
+typedef struct { img_fat32_rd *rd; } fat_rd_wrap;
+static int fat_wrap_read(void *ud, uint64_t off, void *buf, size_t want, size_t *got){
+    return img_fat32_rd_read(((fat_rd_wrap*)ud)->rd, off, buf, want, got);
+}
 
 int img_fat32_read_file(img_fat32_fs *fs, const char *abs_path, void **out, size_t *out_len){
     if(!fs||!abs_path||!out||!out_len) return IMG_EINVAL;
@@ -1078,7 +1342,10 @@ int img_fat32_rm_tree(img_fat32_fs *fs,const char *abs_path,int *removed){
 
 /* ---------- FAT 目录项时间（本地时间，2 秒粒度，1980 起） ---------- */
 /* 读某个路径的 5 个原始字段：crt_time/crt_date/acc_date/wrt_time/wrt_date */
-/* FAT 的 (时间,日期) 两个 u16 → unix 秒（按 UTC 解释，和写入时一致） */
+/* FAT 的 (时间,日期) 两个 u16 → unix 秒（★ 本地时间，FAT 规范如此）。
+ * 旧实现按 UTC 解释 → UTC+8 设备上「文件夹显示的时间早 8 小时」。
+ * 注意：这依赖进程时区（Android 上由 App 启动时 tzset 决定）；
+ * 同一张卡拿到别的时区看，墙上时间不变 —— 这正是 FAT 的设计。*/
 int64_t img_fat32_dos_to_epoch(uint16_t tm, uint16_t dt){
     if (!dt) return 0;
     struct tm g; memset(&g, 0, sizeof g);
@@ -1088,8 +1355,10 @@ int64_t img_fat32_dos_to_epoch(uint16_t tm, uint16_t dt){
     g.tm_hour = (tm >> 11) & 0x1f;
     g.tm_min  = (tm >> 5) & 0x3f;
     g.tm_sec  = (tm & 0x1f) * 2;
+    g.tm_isdst = -1;
     if (g.tm_mon < 0 || g.tm_mday < 1) return 0;
-    return (int64_t)timegm(&g);
+    time_t t = mktime(&g);
+    return (t == (time_t)-1) ? 0 : (int64_t)t;
 }
 int img_fat32_file_times(img_fat32_fs *fs, const char *abs_path, uint16_t out[5]){
     if(!fs||!abs_path||!out) return IMG_EINVAL;
@@ -1114,10 +1383,10 @@ int img_fat32_file_set_times(img_fat32_fs *fs, const char *abs_path, const uint1
     put_u16(d+22,t[3]); put_u16(d+24,t[4]);
     return wr(fs, e.slot_off, d, ENTRY_SIZE) ? IMG_EIO : IMG_OK;
 }
-/* 宿主 epoch 秒 → FAT 的 (时间,日期) 两个 u16（按 UTC 解释，避免时区漂移） */
+/* 宿主 epoch 秒 → FAT 的 (时间,日期) 两个 u16（★ 本地时间，与 dos_to_epoch 对称） */
 void img_fat32_epoch_to_dos(int64_t t, uint16_t *tm, uint16_t *dt){
     struct tm g; time_t tt=(time_t)t;
-    if(!gmtime_r(&tt,&g)){ *tm=0; *dt=0; return; }
+    if(!localtime_r(&tt,&g)){ *tm=0; *dt=0; return; }
     int y=g.tm_year+1900; if(y<1980){ *tm=0; *dt=0; return; }
     *tm=(uint16_t)((g.tm_hour<<11)|(g.tm_min<<5)|(g.tm_sec/2));
     *dt=(uint16_t)(((y-1980)<<9)|((g.tm_mon+1)<<5)|g.tm_mday);
@@ -1126,72 +1395,26 @@ int img_fat32_copy(img_fat32_fs *fs, const char *src_abs, const char *dst_abs,
                    int conflict, img_prog *prog,
                    char *out_path, size_t out_cap, uint64_t *out_size, bool *out_replaced){
     if (!fs || !src_abs || !dst_abs) return IMG_EINVAL;
-    if (out_replaced) *out_replaced = false;
-    uint64_t ssz = 0;
-    int rc = img_fat32_file_size(fs, src_abs, &ssz);
-    if (rc != IMG_OK) return rc;
-    if (ssz > (64u << 20)) return IMG_EFULL;   /* 大文件请走 export+put（暂不做流式，见文档） */
+    img_fat32_rd *rd=NULL; img_src_meta meta; memset(&meta,0,sizeof meta);
+    int rc=img_fat32_rd_open(fs, src_abs, &rd, &meta);
+    if(rc!=IMG_OK) return rc;
 
-    void *buf = NULL; size_t blen = 0;
-    rc = img_fat32_read_file(fs, src_abs, &buf, &blen);
-    if (rc != IMG_OK) return rc;
-
-    /* 目标目录语义 */
-    char sdir[512], sname[256], ddir[512], dname[256];
+    /* 目标目录语义：dst 以 / 结尾或已是目录 ⇒ 目标名取源末段 */
+    char final[1200];
+    char sdir[512], sname[256];
     fat_split(src_abs, sdir, sizeof sdir, sname, sizeof sname);
-    size_t dl = strlen(dst_abs);
-    bool dst_is_dir = (dl && dst_abs[dl - 1] == '/') || img_fat32_dir_exists(fs, dst_abs);
-    if (dst_is_dir) { snprintf(ddir, sizeof ddir, "%s", dst_abs); snprintf(dname, sizeof dname, "%s", sname); }
-    else fat_split(dst_abs, ddir, sizeof ddir, dname, sizeof dname);
+    size_t dl=strlen(dst_abs);
+    bool dst_is_dir=(dl && dst_abs[dl-1]=='/') || img_fat32_dir_exists(fs,dst_abs);
+    if(dst_is_dir) snprintf(final,sizeof final,"%s%s%s",dst_abs,
+                            (dst_abs[0]&&dst_abs[strlen(dst_abs)-1]=='/')?"":"/",sname);
+    else snprintf(final,sizeof final,"%s",dst_abs);
 
-    if (strcmp(ddir, "/") != 0) {
-        if (!img_fat32_dir_exists(fs, ddir)) {
-            rc = img_fat32_mkdir_p(fs, ddir);
-            if (rc != IMG_OK) { free(buf); return rc; }
-        }
-    }
-
-    char final_name[256]; snprintf(final_name, sizeof final_name, "%s", dname);
-    char full[1200];
-    snprintf(full, sizeof full, "%s%s%s", ddir, strcmp(ddir, "/") ? "/" : "", final_name);
-    bool replaced = false;
-    if (img_fat32_path_exists(fs, full)) {
-        if (conflict == 0) { free(buf); return IMG_EEXISTS; }
-        if (conflict == 2) {
-            if (fat_unique_name(fs, ddir, dname, final_name, sizeof final_name) != 0) { free(buf); return IMG_EEXISTS; }
-            snprintf(full, sizeof full, "%s%s%s", ddir, strcmp(ddir, "/") ? "/" : "", final_name);
-        } else replaced = true;
-    }
-
-    /* 临时名 → 写完再改名（FAT 没有原子替换，所以覆盖时先删旧） */
-    char tmp_name[64], tmp_full[1200];
-    snprintf(tmp_name, sizeof tmp_name, ".imgtmp");
-    snprintf(tmp_full, sizeof tmp_full, "%s%s%s", ddir, strcmp(ddir, "/") ? "/" : "", tmp_name);
-    if (img_fat32_path_exists(fs, tmp_full)) (void)img_fat32_rm(fs, tmp_full);
-
-    if (prog) { img_prog_phase(prog, IMG_PH_EXTRACT, "盘内复制");
-                img_prog_op(prog, IMG_OP_WRITE); img_prog_bytes(prog, 0, ssz); }
-    uint16_t stm[5]; bool have_times = (img_fat32_file_times(fs, src_abs, stm) == IMG_OK);
-    rc = img_fat32_put_data(fs, buf, blen, tmp_full);
-    free(buf);
-    if (rc != IMG_OK) return rc;
-    /* ★ 保留创建/修改/访问时间：写完之后把源的 5 个原始字段抄到临时项上，
-     *   随后 rename 会连时间一起继承过去（rename 的实现就是照抄源项）。 */
-    if (have_times) (void)img_fat32_file_set_times(fs, tmp_full, stm);
-    if (prog) img_prog_bytes(prog, ssz, ssz);
-
-    if (replaced) {
-        int rr = img_fat32_rm(fs, full);
-        if (rr != IMG_OK && rr != IMG_ENOENT) { (void)img_fat32_rm(fs, tmp_full); return rr; }
-    }
-    rc = img_fat32_rename(fs, tmp_full, full);
-    if (rc != IMG_OK) { (void)img_fat32_rm(fs, tmp_full); return rc; }
-
-    if (!img_fat32_path_exists(fs, full)) return IMG_ECORRUPT;   /* 写后自证 */
-    if (out_path) snprintf(out_path, out_cap, "%.*s", (int)(out_cap - 1), full);
-    if (out_size) *out_size = ssz;
-    if (out_replaced) *out_replaced = replaced;
-    return IMG_OK;
+    fat_rd_wrap wr; wr.rd=rd;
+    img_stream st; st.ud=&wr; st.read=fat_wrap_read; st.close=NULL;
+    rc=img_fat32_write_stream(fs, final, &st, &meta, conflict, true, prog,
+                              out_path, out_cap, out_size, out_replaced);
+    img_fat32_rd_close(rd);
+    return rc;
 }
 
 int img_fat32_rename(img_fat32_fs *fs, const char *src_abs, const char *dst_abs){

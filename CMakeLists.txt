@@ -45,6 +45,7 @@ set(IMG_SOURCES
   src/img_fixboot.c
   src/img_ntfs_fs.c
   src/img_fat32_fs.c
+  src/img_xcopy.c      # 跨分区/跨镜像/宿主↔镜像/ISO/WIM → 镜像 的统一复制引擎
   src/img_wim_apply.c
   src/img_wim_fs.c        # WIM/ESD 内部只读浏览 + 抽单文件
   src/img_ntfs_fmt.c     # 常驻：模块缺席时返回 IMG_ENOTSUP，不让链接炸

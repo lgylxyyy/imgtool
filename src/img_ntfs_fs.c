@@ -40,6 +40,9 @@ img_ntfs_fs *img_ntfs_mount_rw(img_qcow2 *q, uint64_t part_lba, uint64_t part_by
 
     struct ntfs_device *dev = ntfs_device_alloc(dn, 0, img_ntfs_device_ops(), NULL);
     if(!dev){ img_ntfs_ctx_deactivate(); img_ntfs_ctx_free(ctx); return NULL; }
+    /* ★ 把上下文挂到设备上：同一进程里可以同时打开两个 NTFS 卷
+     *   （跨镜像/跨分区复制靠这个）。全局 activate 只留给 mkntfs 等老路径。*/
+    dev->d_private = ctx;
 
     ntfs_volume *vol = ntfs_device_mount(dev, 0);   /* 0 = 读写 */
     if(!vol){
@@ -53,6 +56,7 @@ img_ntfs_fs *img_ntfs_mount_rw(img_qcow2 *q, uint64_t part_lba, uint64_t part_by
         if(ctx){ img_ntfs_ctx_activate(q, part_lba, part_bytes); }
         dev = ntfs_device_alloc("imgtool-dev", 0, img_ntfs_device_ops(), NULL);
         if(dev && ctx){
+            dev->d_private = ctx;
             vol = ntfs_device_mount(dev, 0x04000000UL);   /* 内部MS_RECOVER(实证) */
         }
     }
@@ -116,8 +120,13 @@ static bool nth_component(const char *path, int idx, char *out, size_t cap){
 /* 把 UTF-8 路径组件转成 ntfschar */
 static bool to_ntfs(const char *s, ntfschar **out, size_t *outlen){
     *out=NULL; *outlen=0;
-    if(ntfs_mbstoucs(s, out) < 0 || !*out) return false;
-    *outlen = strlen(s);     /* ASCII 组件字符数 = 字节数 */
+    /* ★ 返回的是【Unicode 字符数】，不是 UTF-8 字节数。
+     *   旧实现写 strlen(s) —— ASCII 下凑巧相等，中文名（3 字节/字）会算出
+     *   3 倍长度：ntfs_create 按 (u8)ul 截断，中文文件名直接被写坏。
+     *   这是 2026-10-24 修的真 bug，不是洁癖。*/
+    int n = ntfs_mbstoucs(s, out);
+    if(n < 0 || !*out) return false;
+    *outlen = (size_t)n;
     return true;
 }
 
@@ -839,77 +848,114 @@ static int copy_unique_name(ntfs_inode *dir, const char *base, char *out, size_t
     return -1;
 }
 
-int img_ntfs_copy(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs,
-                  const img_copy_opts *opt, img_prog *prog, img_copy_result *out){
-    if (!fs || !fs->mounted || !src_abs || !dst_abs) return IMG_EINVAL;
+/* ---------- 流式读句柄 ---------- */
+struct img_ntfs_rd {
+    ntfs_inode *ni;
+    ntfs_attr  *na;
+    uint64_t    size;
+};
+
+int img_ntfs_rd_open(img_ntfs_fs *fs, const char *abs_path, img_ntfs_rd **out,
+                     img_src_meta *meta){
+    if(out) *out = NULL;
+    if(!fs || !fs->mounted || !abs_path || !out) return IMG_EINVAL;
+    ntfs_inode *ni = lookup(fs->vol, abs_path, NULL);
+    if(!ni) return IMG_ENOENT;
+    if(ni->mrec->flags & MFT_RECORD_IS_DIRECTORY){ ntfs_inode_close(ni); return IMG_ENOTSUP; }
+    ntfs_attr *na = ntfs_attr_open(ni, AT_DATA, AT_UNNAMED, 0);
+    if(!na){ ntfs_inode_close(ni); return IMG_EIO; }
+    img_ntfs_rd *rd = (img_ntfs_rd*)calloc(1, sizeof *rd);
+    if(!rd){ ntfs_attr_close(na); ntfs_inode_close(ni); return IMG_ENOMEM; }
+    rd->ni = ni; rd->na = na; rd->size = (uint64_t)ni->data_size;
+    if(meta){
+        memset(meta, 0, sizeof *meta);
+        meta->size = rd->size;
+        meta->times[0] = filetime_to_unix(ni->creation_time);
+        meta->times[1] = filetime_to_unix(ni->last_data_change_time);
+        meta->times[2] = filetime_to_unix(ni->last_access_time);
+        meta->times[3] = filetime_to_unix(ni->last_mft_change_time);
+        meta->has_times = true;
+        meta->flags = (uint32_t)ni->flags;
+        meta->has_flags = true;
+    }
+    *out = rd;
+    return IMG_OK;
+}
+
+int img_ntfs_rd_read(img_ntfs_rd *rd, uint64_t off, void *buf, size_t want, size_t *got){
+    if(got) *got = 0;
+    if(!rd || !buf || !got) return IMG_EINVAL;
+    if(off >= rd->size) return IMG_OK;                 /* EOF */
+    size_t n = (size_t)((rd->size - off < (uint64_t)want) ? (rd->size - off) : (uint64_t)want);
+    s64 r = ntfs_attr_pread(rd->na, (s64)off, (s64)n, buf);
+    if(r < 0) return IMG_EIO;
+    *got = (size_t)r;
+    if(r == 0 && off < rd->size) return IMG_EIO;       /* 属性比 $SI 短：数据不完整 */
+    return IMG_OK;
+}
+
+void img_ntfs_rd_close(img_ntfs_rd *rd){
+    if(!rd) return;
+    if(rd->na) ntfs_attr_close(rd->na);
+    if(rd->ni) ntfs_inode_close(rd->ni);
+    free(rd);
+}
+
+/* srcread：把 rd 包成 img_stream，给 write_stream 用 */
+typedef struct { img_ntfs_rd *rd; } ntfs_rd_wrap;
+static int ntfs_wrap_read(void *ud, uint64_t off, void *buf, size_t want, size_t *got){
+    return img_ntfs_rd_read(((ntfs_rd_wrap*)ud)->rd, off, buf, want, got);
+}
+
+/* ---------- 流式写：任意源 → 盘内文件 ---------- */
+int img_ntfs_unique_name(img_ntfs_fs *fs, const char *dir_abs, const char *base,
+                         char *out, size_t cap){
+    if(!fs||!dir_abs||!base||!out) return IMG_EINVAL;
+    ntfs_inode *d = (strcmp(dir_abs,"/")==0 || !dir_abs[0])
+                  ? ntfs_inode_open(fs->vol, FILE_root)
+                  : lookup(fs->vol, dir_abs, NULL);
+    if(!d) return IMG_ENOENT;
+    int rc = copy_unique_name(d, base, out, cap);
+    ntfs_inode_close(d);
+    return rc==0 ? IMG_OK : IMG_EEXISTS;
+}
+
+int img_ntfs_write_stream(img_ntfs_fs *fs, const char *dst_abs,
+                          const img_stream *src, const img_src_meta *meta,
+                          const img_copy_opts *opt, img_prog *prog,
+                          img_copy_result *out){
+    if (!fs || !fs->mounted || !dst_abs || !src || !src->read || !meta) return IMG_EINVAL;
     img_copy_opts o = { IMG_COPY_FAIL, false, true };
     if (opt) o = *opt;
     if (out) memset(out, 0, sizeof *out);
+    uint64_t ssize = meta->size;
 
-    /* ① 源：必须是文件（目录复制留到下一步做） */
-    char sdir[512], sname[256];
-    if (split_abs((char*)src_abs, sdir, sizeof sdir, sname, sizeof sname) != 0) return IMG_EINVAL;
-    ntfs_inode *spar = lookup(fs->vol, sdir, NULL);
-    if (!spar) return IMG_ENOENT;
-    ntfschar *su = NULL; size_t sul = 0;
-    if (!to_ntfs(sname, &su, &sul)) { ntfs_inode_close(spar); return IMG_EINVAL; }
-    errno = 0;
-    MFT_REF sref = ntfs_inode_lookup_by_name(spar, su, sul);
-    free(su);
-    ntfs_inode_close(spar);
-    if (!mftref_ok(sref)) return IMG_ENOENT;
-
-    ntfs_inode *sni = ntfs_inode_open(fs->vol, sref);
-    if (!sni) return IMG_EIO;
-    if (sni->mrec->flags & MFT_RECORD_IS_DIRECTORY) {      /* 目录复制下一步再做 */
-        ntfs_inode_close(sni);
-        return IMG_ENOTSUP;
-    }
-    uint64_t ssize = (uint64_t)sni->data_size;
-    /* 源时间/属性（$SI 视角） */
-    sle64 t_cr = sni->creation_time, t_md = sni->last_data_change_time,
-          t_mf = sni->last_mft_change_time, t_ac = sni->last_access_time;
-    FILE_ATTR_FLAGS sflags = sni->flags;
-
-    /* ② 目标：dst 是目录（含尾斜杠 / 已存在且是目录）⇒ 目标名沿用源名 */
+    /* 目标：拆目录/名字 */
     char dnorm[512];
     snprintf(dnorm, sizeof dnorm, "%s", dst_abs);
     size_t dl = strlen(dnorm);
-    bool had_slash = (dl > 1 && dnorm[dl-1] == '/');
-    while (dl > 1 && dnorm[dl-1] == '/') dnorm[--dl] = 0;      /* 去掉尾斜杠（根除外） */
-
+    while (dl > 1 && dnorm[dl-1] == '/') dnorm[--dl] = 0;
     char ddir[512], dname[256];
-    bool dst_is_dir = had_slash;
-    if (!dst_is_dir) {
-        u64 tino = 0; bool tdir = false;
-        if (path_ino(fs, dnorm, &tino, &tdir) == IMG_OK && tdir) dst_is_dir = true;
-    }
-    if (dst_is_dir) {
-        snprintf(ddir, sizeof ddir, "%s", dnorm);
-        snprintf(dname, sizeof dname, "%s", sname);
-    } else {
-        if (split_abs(dnorm, ddir, sizeof ddir, dname, sizeof dname) != 0) {
-            ntfs_inode_close(sni); return IMG_EINVAL;
-        }
-    }
-    if (!dname[0]) { ntfs_inode_close(sni); return IMG_EINVAL; }
+    if (split_abs(dnorm, ddir, sizeof ddir, dname, sizeof dname) != 0) return IMG_EINVAL;
+    if (!dname[0]) return IMG_EINVAL;
+    if (strlen(dname) > 255) return IMG_ENAMETOOLONG;   /* NTFS 名字上限 255 字符 */
 
-    /* ③ 目标目录：按需创建（建完由 mkdir_p 自己从盘上验明正身） */
+    /* 目标目录：按需创建（建完由 mkdir_p 自己从盘上验明正身） */
     if (strcmp(ddir, "/") != 0 && ddir[0]) {
         u64 dino = 0; bool dex = false;
         dex = (path_ino(fs, ddir, &dino, &dex) == IMG_OK) && dex;
         if (!dex) {
-            if (!o.create_parents) { ntfs_inode_close(sni); return IMG_ENOENT; }
+            if (!o.create_parents) return IMG_ENOENT;
             int mrc = img_ntfs_mkdir_p(fs, ddir);
-            if (mrc != IMG_OK) { ntfs_inode_close(sni); return mrc; }
+            if (mrc != IMG_OK) return mrc;
         }
     }
     ntfs_inode *dpar = (strcmp(ddir, "/") == 0 || ddir[0] == 0)
                      ? ntfs_inode_open(fs->vol, FILE_root)
                      : lookup(fs->vol, ddir, NULL);
-    if (!dpar) { ntfs_inode_close(sni); return IMG_ENOENT; }
+    if (!dpar) return IMG_ENOENT;
 
-    /* ④ 冲突策略（目标已存在时） */
+    /* 冲突策略 */
     char final_name[256];
     snprintf(final_name, sizeof final_name, "%s", dname);
     char final_abs[1024];
@@ -918,8 +964,7 @@ int img_ntfs_copy(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs,
              250, final_name);
 
     ntfschar *du = NULL; size_t dul = 0;
-    if (!to_ntfs(final_name, &du, &dul)) { if (dpar) ntfs_inode_close(dpar);
-        ntfs_inode_close(sni); return IMG_EINVAL; }
+    if (!to_ntfs(final_name, &du, &dul)) { ntfs_inode_close(dpar); return IMG_EINVAL; }
     errno = 0;
     MFT_REF dref = ntfs_inode_lookup_by_name(dpar, du, dul);
     free(du);
@@ -928,30 +973,21 @@ int img_ntfs_copy(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs,
     if (exists) {
         u64 eino = 0; bool edir = false;
         (void)path_ino(fs, final_abs, &eino, &edir);
-        if (edir) { if (dpar) ntfs_inode_close(dpar);
-        ntfs_inode_close(sni); return IMG_ESTATE; }
-        if (o.conflict == IMG_COPY_FAIL) {
-            if (dpar) ntfs_inode_close(dpar);
-        ntfs_inode_close(sni);
-            return IMG_EEXISTS;
-        }
+        if (edir) { ntfs_inode_close(dpar); return IMG_ESTATE; }
+        if (o.conflict == IMG_COPY_FAIL) { ntfs_inode_close(dpar); return IMG_EEXISTS; }
         if (o.conflict == IMG_COPY_RENAME) {
             if (copy_unique_name(dpar, dname, final_name, sizeof final_name) != 0) {
-                if (dpar) ntfs_inode_close(dpar);
-        ntfs_inode_close(sni); return IMG_EEXISTS;
+                ntfs_inode_close(dpar); return IMG_EEXISTS;
             }
             snprintf(final_abs, sizeof final_abs, "%.*s%s%.*s",
                      (int)(sizeof final_abs - 300), ddir,
                      strcmp(ddir, "/") ? "/" : "", 250, final_name);
         } else {
-            replaced = true;                   /* 稍后"先写临时、再删旧、再改名" */
+            replaced = true;
         }
     }
 
-    /* ⑤ 建临时文件（隐藏），写完再改名 —— 别人永远看不到半截文件 */
-    /* 临时名必须【确实不存在】：撞名时 ntfs_create 会拿到一条已有记录，
-     * close 阶段就 EIO；而失败又会留下残留，下次再撞 —— 一个自我毒化的循环。
-     * 所以这里循环探测，直到找到真正空闲的名字。*/
+    /* 临时文件（确实不存在的名字） */
     char tmp_name[64];
     ntfschar *tu = NULL; size_t tul = 0;
     bool have_tmp = false;
@@ -964,111 +1000,82 @@ int img_ntfs_copy(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs,
     }
     if (!have_tmp) {
         if (tu) free(tu);
-        if (dpar) ntfs_inode_close(dpar);
-        ntfs_inode_close(sni);
+        ntfs_inode_close(dpar);
         return IMG_EEXISTS;
     }
     ntfs_inode *tni = ntfs_create(dpar, inherit_securid(dpar), tu, (u8)tul, S_IFREG);
     free(tu);
     if (getenv("IMG_NTFS_FS_DEBUG"))
         fprintf(stderr, "  [cp] 临时文件 %s → %p errno=%d(%s)\n", tmp_name, (void*)tni, errno, strerror(errno));
-    /* ★ 与 put_file 一致：父目录 inode 建完就关。
-     *   一直开着它去 close 子文件，libntfs-3g 会在 close 阶段报 EIO（实测）。*/
-    if (dpar) { if (dpar) ntfs_inode_close(dpar); dpar = NULL; }
-    if (!tni) { ntfs_inode_close(sni); return IMG_EIO; }
-    uint64_t tino = tni->mft_no;   /* 注意：这里【不要】提前改 flags/mark_dirty ——
-                                    * 实测会让随后 close 报 EIO（索引/属性状态错位）。
-                                    * 时间与属性统一在写完数据之后一次性设。*/
+    ntfs_inode_close(dpar);
+    if (!tni) return IMG_EIO;
+    uint64_t tino = tni->mft_no;
 
-    /* ⑥ 流式复制：64 KiB 一块（省内存、好取消） */
-    ntfs_attr *sa = ntfs_attr_open(sni, AT_DATA, NULL, 0);
-    ntfs_attr *da = sa ? ntfs_attr_open(tni, AT_DATA, NULL, 0) : NULL;
-    if (getenv("IMG_NTFS_FS_DEBUG"))
-        fprintf(stderr, "  [cp] attr src=%p dst=%p size=%llu\n", (void*)sa, (void*)da,
-                (unsigned long long)ssize);
-    /* ★ 空文件的 $DATA 是【驻留】属性；直接 pwrite 大内容会让属性在"驻留↔非驻留"
-     *   之间转换，libntfs-3g 随后 close 会 EIO。put_file 的做法是先 truncate(0)，
-     *   这里必须照抄（差这一步就踩了一整轮）。*/
+    /* 流式复制：64 KiB 一块 */
+    ntfs_attr *da = ntfs_attr_open(tni, AT_DATA, AT_UNNAMED, 0);
     if (da && ntfs_attr_truncate(da, 0) < 0) {
         if (getenv("IMG_NTFS_FS_DEBUG")) fprintf(stderr,"  [cp] truncate 失败 errno=%d\n", errno);
     }
-    if (!sa || !da) {
-        if (sa) ntfs_attr_close(sa);
-        if (da) ntfs_attr_close(da);
-        ntfs_inode_close(tni); if (dpar) ntfs_inode_close(dpar);
-        ntfs_inode_close(sni);
-        return IMG_EIO;
-    }
+    if (!da) { ntfs_inode_close(tni); return IMG_EIO; }
     enum { CP_CHUNK = 64 * 1024 };
     u8 *buf = (u8*)malloc(CP_CHUNK);
     int rc = buf ? IMG_OK : IMG_ENOMEM;
-    if (prog) { img_prog_phase(prog, IMG_PH_EXTRACT, "盘内复制");
+    if (prog) { img_prog_phase(prog, IMG_PH_EXTRACT, "复制文件");
                 img_prog_op(prog, IMG_OP_WRITE); img_prog_bytes(prog, 0, ssize); }
     uint64_t off = 0;
     while (rc == IMG_OK && off < ssize) {
         if (img_cancelled()) { rc = IMG_ECANCELLED; break; }
-        s64 n = ntfs_attr_pread(sa, off, CP_CHUNK, buf);
-        if (n <= 0) { rc = IMG_EIO;
-            if (getenv("IMG_NTFS_FS_DEBUG")) fprintf(stderr,"  [cp] pread off=%llu rc=%lld errno=%d\n",(unsigned long long)off,(long long)n,errno);
-            break; }
-        s64 w = ntfs_attr_pwrite(da, off, n, buf);
-        if (w != n) { rc = (errno == ENOSPC) ? IMG_EFULL : IMG_EIO;
-            if (getenv("IMG_NTFS_FS_DEBUG")) fprintf(stderr,"  [cp] pwrite off=%llu n=%lld w=%lld errno=%d\n",(unsigned long long)off,(long long)n,(long long)w,errno);
-            break; }
-        off += (uint64_t)n;
+        size_t want = (size_t)((ssize - off < (uint64_t)CP_CHUNK) ? (ssize - off) : (uint64_t)CP_CHUNK);
+        size_t got = 0;
+        rc = src->read(src->ud, off, buf, want, &got);
+        if (rc != IMG_OK) break;
+        if (got == 0) { rc = IMG_EIO; break; }        /* 源比声明的短 */
+        s64 w = ntfs_attr_pwrite(da, (s64)off, (s64)got, buf);
+        if (w != (s64)got) { rc = (errno == ENOSPC) ? IMG_EFULL : IMG_EIO; break; }
+        off += (uint64_t)got;
         if (prog) img_prog_bytes(prog, off, ssize);
     }
     free(buf);
-    ntfs_attr_close(sa); ntfs_attr_close(da);
-    if (getenv("IMG_NTFS_FS_DEBUG"))
-        fprintf(stderr, "  [cp] 数据写完 off=%llu rc=%d errno=%d | "
-                        "src.size=%llu tmp.size=%llu link=%u\n",
-                (unsigned long long)off, rc, errno,
-                (unsigned long long)sni->data_size,
-                (unsigned long long)tni->data_size,
-                (unsigned)le16_to_cpu(tni->mrec->link_count));
+    ntfs_attr_close(da);
 
-    /* ⑦ 时间/属性（在改名之前设，改名时 ntfs_link 会把当前时间抄进新的 $FILE_NAME） */
+    if (rc == IMG_OK && off != ssize) rc = IMG_EIO;
+
+    /* 时间/属性（改名之前设） */
     if (rc == IMG_OK) {
-        if (o.preserve_times) {
-            tni->creation_time = t_cr;
-            tni->last_data_change_time = t_md;
-            tni->last_mft_change_time = t_mf;
-            tni->last_access_time = t_ac;
+        if (o.preserve_times && meta->has_times) {
+            tni->creation_time         = unix_to_filetime(meta->times[0]);
+            tni->last_data_change_time = unix_to_filetime(meta->times[1]);
+            tni->last_access_time      = unix_to_filetime(meta->times[2]);
+            tni->last_mft_change_time  = unix_to_filetime(meta->times[3]);
         }
         FILE_ATTR_FLAGS keep = (FILE_ATTR_HIDDEN | FILE_ATTR_SYSTEM | FILE_ATTR_ARCHIVE);
-        tni->flags = (sflags & keep) | FILE_ATTR_ARCHIVE;   /* 清掉隐藏/压缩等不该带过来的位 */
+        tni->flags = ((FILE_ATTR_FLAGS)(meta->has_flags ? meta->flags : 0) & keep) | FILE_ATTR_ARCHIVE;
         ntfs_inode_mark_dirty(tni);
-        /* ★ 不要在这里显式 ntfs_inode_sync()：实测它会对刚写完的 $DATA 返回 EIO。
-         *   put_file 的做法是"改字段 + mark_dirty，然后让 ntfs_inode_close() 落盘"，
-         *   这里照抄（close 的返回值会告诉我们成功与否）。*/
     }
-    if (ntfs_inode_close(tni) && rc == IMG_OK) { rc = IMG_EIO;
-        if (getenv("IMG_NTFS_FS_DEBUG")) fprintf(stderr,"  [cp] close 失败 errno=%d(%s)\n",errno,strerror(errno)); }
-    if (rc != IMG_OK) {           /* 失败：把临时文件删掉，绝不留下半成品 */
+    if (ntfs_inode_close(tni) && rc == IMG_OK) {
+        rc = IMG_EIO;
+        if (getenv("IMG_NTFS_FS_DEBUG")) fprintf(stderr,"  [cp] close 失败 errno=%d(%s)\n",errno,strerror(errno));
+    }
+    if (rc != IMG_OK) {           /* 失败：删掉临时文件，绝不留下半成品 */
         char tmp_abs[600];
         snprintf(tmp_abs, sizeof tmp_abs, "%s%s%s", ddir, strcmp(ddir, "/") ? "/" : "", tmp_name);
         { u64 ti=0; bool td=false;
           if (path_ino(fs, tmp_abs, &ti, &td) == IMG_OK && !td) (void)img_ntfs_rm(fs, tmp_abs); }
-        if (dpar) ntfs_inode_close(dpar);
-        ntfs_inode_close(sni);
         return rc;
     }
-    if (dpar) ntfs_inode_close(dpar);
 
-    /* ⑧ 收尾：先删旧（覆盖时），再把临时名改成目标名（一次索引操作，微秒级） */
+    /* 收尾：先删旧（覆盖时），再把临时名改成目标名 */
     char tmp_abs[600];
     snprintf(tmp_abs, sizeof tmp_abs, "%s%s%s", ddir, strcmp(ddir, "/") ? "/" : "", tmp_name);
     if (replaced) {
         int rr = img_ntfs_rm(fs, final_abs);
-        if (rr != IMG_OK && rr != IMG_ENOENT) { (void)img_ntfs_rm(fs, tmp_abs); ntfs_inode_close(sni); return rr; }
+        if (rr != IMG_OK && rr != IMG_ENOENT) { (void)img_ntfs_rm(fs, tmp_abs); return rr; }
     }
     int mrc = img_ntfs_move_path(fs, tmp_abs, final_abs, false, false);
     if (getenv("IMG_NTFS_FS_DEBUG")) fprintf(stderr,"  [cp] rename %s → %s rc=%d\n",tmp_abs,final_abs,mrc);
-    ntfs_inode_close(sni);
     if (mrc != IMG_OK) { (void)img_ntfs_rm(fs, tmp_abs); return mrc; }
 
-    /* ⑨ 写后自证：新位置查得到、大小对得上、记录就是刚才那条 */
+    /* 写后自证 */
     u64 fino = 0; bool fdir = false;
     if (path_ino(fs, final_abs, &fino, &fdir) != IMG_OK || fino != tino) return IMG_ECORRUPT;
     ntfs_inode *fni = ntfs_inode_open(fs->vol, fino);
@@ -1081,7 +1088,50 @@ int img_ntfs_copy(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs,
         snprintf(out->path, sizeof out->path, "%.*s", (int)(sizeof out->path - 1), final_abs);
         out->ino = fino; out->size = ssize; out->replaced = replaced;
     }
+    if (prog) img_prog_done(prog, "复制完成");
     return IMG_OK;
+}
+
+int img_ntfs_copy(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs,
+                  const img_copy_opts *opt, img_prog *prog, img_copy_result *out){
+    if (!fs || !fs->mounted || !src_abs || !dst_abs) return IMG_EINVAL;
+    img_copy_opts o = { IMG_COPY_FAIL, false, true };
+    if (opt) o = *opt;
+
+    /* 目标如果是"目录"（尾斜杠 / 已存在且是目录）⇒ 目标名沿用源名 */
+    char dnorm[512];
+    snprintf(dnorm, sizeof dnorm, "%s", dst_abs);
+    size_t dl = strlen(dnorm);
+    bool had_slash = (dl > 1 && dnorm[dl-1] == '/');
+    while (dl > 1 && dnorm[dl-1] == '/') dnorm[--dl] = 0;
+    char ddir[512], dname[256];
+
+    img_ntfs_rd *rd = NULL; img_src_meta meta; memset(&meta,0,sizeof meta);
+    int rc = img_ntfs_rd_open(fs, src_abs, &rd, &meta);
+    if (rc != IMG_OK) return rc;
+
+    char sdir[512], sname[256];
+    if (split_abs((char*)src_abs, sdir, sizeof sdir, sname, sizeof sname) != 0) {
+        img_ntfs_rd_close(rd); return IMG_EINVAL;
+    }
+    bool dst_is_dir = had_slash;
+    if (!dst_is_dir) {
+        u64 tino = 0; bool tdir = false;
+        if (path_ino(fs, dnorm, &tino, &tdir) == IMG_OK && tdir) dst_is_dir = true;
+    }
+    char final[1024];
+    if (dst_is_dir) {
+        snprintf(final, sizeof final, "%s%s%s", dnorm, strcmp(dnorm,"/") ? "/" : "", sname);
+    } else {
+        snprintf(final, sizeof final, "%s", dnorm);
+    }
+    (void)ddir; (void)dname;
+
+    ntfs_rd_wrap wr; wr.rd = rd;
+    img_stream st; st.ud=&wr; st.read=ntfs_wrap_read; st.close=NULL;
+    rc = img_ntfs_write_stream(fs, final, &st, &meta, &o, prog, out);
+    img_ntfs_rd_close(rd);
+    return rc;
 }
 
 int img_ntfs_write_reagent(img_ntfs_fs *fs, const char *winre_dir_abs,
@@ -1923,6 +1973,7 @@ int img_ntfs_dirty_check(img_qcow2 *q,uint64_t part_lba,uint64_t part_bytes,bool
     const char *dn=img_dev_placeholder(); if(!dn) dn="imgtool-dev";
     struct ntfs_device *dev=ntfs_device_alloc(dn,0,img_ntfs_device_ops(),NULL);
     if(!dev){ img_ntfs_ctx_deactivate(); img_ntfs_ctx_free(ctx); return IMG_EIO; }
+    dev->d_private = ctx;
     ntfs_volume *vol=ntfs_device_mount(dev, NTFS_MNT_RDONLY|NTFS_MNT_IGNORE_HIBERFILE);
     if(!vol){
         ntfs_device_free(dev); img_ntfs_ctx_deactivate(); img_ntfs_ctx_free(ctx);
@@ -1953,6 +2004,7 @@ int img_ntfs_precheck(img_qcow2 *q,uint64_t part_lba,uint64_t part_bytes,
     const char *dn=img_dev_placeholder(); if(!dn) dn="imgtool-dev";
     struct ntfs_device *dev=ntfs_device_alloc(dn,0,img_ntfs_device_ops(),NULL);
     if(!dev){ img_ntfs_ctx_deactivate(); img_ntfs_ctx_free(ctx); return IMG_EIO; }
+    dev->d_private = ctx;
     ntfs_volume *vol=ntfs_device_mount(dev, NTFS_MNT_RDONLY|NTFS_MNT_IGNORE_HIBERFILE);
     if(!vol){
         ntfs_device_free(dev); img_ntfs_ctx_deactivate(); img_ntfs_ctx_free(ctx);

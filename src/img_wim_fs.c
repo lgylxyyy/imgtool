@@ -151,6 +151,21 @@ int img_wim_stat(const char *wim_path,int index,const char *inner_path,img_wim_s
 }
 
 /* ---------- 抽【单个文件】到本地（只读操作）---------- */
+int img_wim_extract_tree(const char *wim_path,int index,const char *inner_path,
+                         const char *out_dir,img_prog *prog,char *err,size_t errcap){
+    if(!wim_path||!inner_path||!out_dir) return IMG_EINVAL;
+    if(inner_path[0]!='/') return IMG_EINVAL;
+    if(prog){ img_prog_phase(prog,IMG_PH_EXTRACT,"从 WIM/ESD 解出"); img_prog_op(prog,IMG_OP_READ); }
+    openwim o; int rc=open_checked(wim_path,index,&o,err,errcap);
+    if(rc!=IMG_OK) return rc;
+    const wimlib_tchar *paths[1]={ (const wimlib_tchar*)inner_path };
+    int wrc=wimlib_extract_paths(o.w,index,(const wimlib_tchar*)out_dir,paths,1,
+                                 WIMLIB_EXTRACT_FLAG_NO_ACLS);
+    wimlib_free(o.w);
+    if(wrc!=0){ if(err) snprintf(err,errcap,"解出失败：%s",wim_rc_str(wrc)); return IMG_EIO; }
+    return IMG_OK;
+}
+
 int img_wim_extract_file(const char *wim_path,int index,const char *inner_path,
                          const char *dst_path,img_prog *prog,uint64_t *out_bytes,
                          char *err,size_t errcap){
