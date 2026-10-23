@@ -1262,7 +1262,8 @@ int img_ntfs_dir_parent_check(img_ntfs_fs *fs, const char *abs_path,
 
 
 
-int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,bool overwrite){
+int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,
+                          bool overwrite,bool allow_dir_move){
     if(!fs||!fs->mounted||!src_abs||!dst_abs) return IMG_EINVAL;
     if(src_abs[0]!='/'||dst_abs[0]!='/'||!src_abs[1]||!dst_abs[1]) return IMG_EINVAL;
     static char sdir[512],sname[256],ddir[512],dname[256];
@@ -1277,79 +1278,48 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,b
      *   索引写空（2026-10-23 真机实测：/dir/a.txt → /dir/b.txt 失败且 /dir 变空，
      *   而根目录下的同样改名是好的 —— 根目录的索引项在磁盘块里，看不出问题）。
      *   所以：同目录只开一份，dpar 就是 spar；也绝不 close 两次。*/
+    /* ===== 前置：解析源 → 判政策 → 才允许动目标父目录 =====
+     * ★★ 顺序很重要（2026-10-23 真机现场学到的）：上一版是"先建目标父目录、再拒目录跨父"，
+     *   结果被拒绝的操作也在盘上留下了一个空目录（ntfs.move 返回 NTFS-SRC-IS-DIR，
+     *   /MovedByTool 却已经建好了）。拒绝必须 = 零副作用，App 才敢在失败后原样重试。*/
     bool same_dir = (strcmp(sdir,ddir)==0);
     ntfs_inode *spar=lookup(fs->vol,sdir,NULL);
     if(!spar) return IMG_ENOENT;                           /* 源父目录不存在 */
+    ntfschar *su=NULL; size_t sul=0;
+    ntfschar *du=NULL; size_t dul=0;
+    if(!to_ntfs(sname,&su,&sul)){ ntfs_inode_close(spar); return IMG_EINVAL; }
+    errno=0;
+    MFT_REF sref=ntfs_inode_lookup_by_name(spar,su,sul);
+    if(!mftref_ok(sref)){                                   /* 源不存在 */
+        ntfs_inode_close(spar); free(su);
+        return IMG_ENOENT;
+    }
+    ntfs_inode *ni=ntfs_inode_open(fs->vol,sref);
+    if(!ni){ ntfs_inode_close(spar); free(su); return IMG_EIO; }
+    bool isdir=(ni->mrec->flags & MFT_RECORD_IS_DIRECTORY)!=0;
+    /* 目录跨父搬移：默认仍拒（allow_dir_move=false）。依据见本函数下面那段取证注释 ——
+     * 那次 found.000 已被改判为"目标父是幽灵目录"，不是这个动作本身有害；
+     * 解禁要靠真 Windows 实测（SPEC-NTFS-MOVE.md §8），验证时显式传 --allow_dir_move=true。*/
+    if(isdir && !same_dir && !allow_dir_move){
+        ntfs_inode_close(ni); ntfs_inode_close(spar); free(su);
+        return IMG_ENOTSUP;
+    }
     ntfs_inode *dpar=spar;
     bool dpar_extra=false;                                 /* dpar 是另开的一份 → 要单独 close */
     if(!same_dir){
         dpar=lookup(fs->vol,ddir,NULL);
         if(!dpar){
-            /* 目标父目录：不存在就建（与 ntfs.put 的 --mkdir 行为一致）*/
-            if(img_ntfs_mkdir_p(fs,ddir)!=IMG_OK){ ntfs_inode_close(spar); return IMG_EIO; }
+            /* 目标父目录：不存在就建（建完由 mkdir_p 自己从盘上验明正身，防幽灵目录）*/
+            int mrc = img_ntfs_mkdir_p(fs,ddir);
+            if(mrc!=IMG_OK){ ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); return mrc; }
             dpar=lookup(fs->vol,ddir,NULL);
-            if(!dpar){ ntfs_inode_close(spar); return IMG_EIO; }
+            if(!dpar){ ntfs_inode_close(ni); ntfs_inode_close(spar); free(su); return IMG_EIO; }
         }
         dpar_extra=true;
     }
-    ntfschar *su=NULL; size_t sul=0;
-    ntfschar *du=NULL; size_t dul=0;
-    if(!to_ntfs(sname,&su,&sul)){ if(dpar_extra) ntfs_inode_close(dpar); ntfs_inode_close(spar); return IMG_EINVAL; }
-    errno=0;
-    MFT_REF sref=ntfs_inode_lookup_by_name(spar,su,sul);
-    if(!mftref_ok(sref)){                                   /* 源不存在 */
-        if(dpar_extra) ntfs_inode_close(dpar);
-        ntfs_inode_close(spar); free(su);
-        return IMG_ENOENT;
-    }
-    ntfs_inode *ni=ntfs_inode_open(fs->vol,sref);
-    if(!ni){
-        if(dpar_extra) ntfs_inode_close(dpar);
-        ntfs_inode_close(spar); free(su);
-        return IMG_EIO;
-    }
-    bool isdir=(ni->mrec->flags & MFT_RECORD_IS_DIRECTORY)!=0;
-    /* 目录现在放开：搬完会同步子目录 ".." 的父引用（见 dir_set_dotdot_parent）。
-     * 文件不受影响（文件没有父引用这回事）。
-     * 两条硬规矩：① 不许把目录搬进它自己的子树（会造出环，Windows 直接懵）；
-     *             ② 目标已存在且是目录 → 依旧拒绝（IMG_ESTATE）。*/
-    /* ★★ 跨父目录搬移：暂时仍锁（判负证据已作废，改判为"另有元凶"）★★
-     * 【更正】上轮在这里写的"真 Windows 实测判负"结论**站不住**：
-     *   独立解析器读原始字节查明，那次 found.000 的元凶不是"搬目录"这个动作，
-     *   而是【目标父目录 /MovedByTool 是幽灵】—— 根索引写着它 → ino 99790，
-     *   而 99790 号记录实际是别人的文件 AppxBlockMap.xml，$MFT 里根本没有
-     *   名为 MovedByTool 的 $FILE_NAME。索引项指向不存在的父 ⇒ 任何挂在它下面的
-     *   东西（不管是不是搬来的）都会被 chkdsk 当孤儿。详见
-     *   docs/NTFS移动改名-规范与实现对照.md（含 [MS-FSA] §2.1.5.15.12 逐条对照）。
-     *   干净盘上的受控复现（imgtool 建目录 + 跨父搬目录）三方对账 0 违背。
-     * ⇒ 锁仍留着，但留着的是"证据不足"而不是"已知有害"；解禁条件：
-     *   在一张【体检干净】的盘上做一次跨父搬移，真 Windows 能进能列、chkdsk 无怨。
-     * 用户在 Vectras 的 Win10 X-Lite（卷标 "Windows X-Lite"、卷号 2B00-726F）上跑：
-     *   cd C:\MovedByTool\LogFiles      → "The system cannot find the path specified."
-     *   chkdsk C: /scan                  → "1 unindexed files recovered to lost and found.
-     *        Found missing Index entry for file \"...\\LogFiles <0x1,0x114a>\"
-     *        from index \"\\??\\C:\\found.000\" of directory \"$I30\" … repaired online."
-     *        "Windows has found problems and they were all fixed online."
-     *   0x114a = 4426 —— 正是我们搬走的 LogFiles 的 inode（沙箱侧 ntfs.parent 记的 ino=4426）。
-     * ⇒ Windows 认为这个目录【没有任何索引项指向它】（孤儿），直接把它塞进 found.000。
-     * ⇒ 我们那套"ntfs_link 到新父 + 改 $FILE_NAME 父引用 + ntfs_delete 旧项"，
-     *   在【跨父目录】时 Windows 不认：它要的是父索引项与子目录里的 ".." 双向对得上，
-     *   而 ntfs-3g 的索引写入没有把这套关系补齐（上游本来也没有 rename 目录的能力，
-     *   dir.c 里那句 FIXME 就是这个坑）。
-     *
-     * 【同父改名】是好的（同一张盘上 C:\Windows\appcompat → AppCompat-Renamed：
-     *   cd 进得去、dir /ad 四个子项全在、chkdsk 对它零报怨），所以只放开这一种。
-     * 想搬目录请走"复制到新位置 + 删旧"或直接在 Windows 里做。*/
-    if(isdir && !same_dir){
-        ntfs_inode_close(ni);
-        if(dpar_extra) ntfs_inode_close(dpar);
-        ntfs_inode_close(spar); free(su);
-        return IMG_ENOTSUP;
-    }
     if(!to_ntfs(dname,&du,&dul)){
-        ntfs_inode_close(ni);
         if(dpar_extra) ntfs_inode_close(dpar);
-        ntfs_inode_close(spar); free(su);
+        ntfs_inode_close(ni); ntfs_inode_close(spar); free(su);
         return IMG_EINVAL;
     }
     errno=0;

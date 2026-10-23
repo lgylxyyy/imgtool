@@ -16,7 +16,15 @@ Windows 就把那条记录当孤儿塞进 found.000 —— 而工具一路报成
     python3 tools/ntfs-inventory.py --qcow2 盘.qcow2 --lba 1050624 [--limit N]
 退出码：0=三方一致；1=有违背；2=参数/读盘错误
 """
-import struct, sys, os, subprocess, tempfile
+import struct, sys, os, subprocess, tempfile, json
+BASE_OUT = None
+BASE_IN = None
+
+
+def _fmt(x):
+    if isinstance(x, (list, tuple)):
+        return ','.join(_fmt(i) for i in x)
+    return str(x)
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -46,7 +54,9 @@ class Ntfs:
     # ---------- 底层 ----------
     def read(self, off, n):
         self.f.seek(off); d = self.f.read(n)
-        if len(d) != n: raise SystemExit('short read @%d want %d got %d' % (off, n, len(d)))
+        # ★ 解析层的失败必须用普通异常：早先用 SystemExit，调用方 `except Exception`
+        #   抓不到，一条怪记录就能让整卷体检中途退出（SystemExit 不是 Exception 的子类）。
+        if len(d) != n: raise RuntimeError('short read @%d want %d got %d' % (off, n, len(d)))
         return d
 
     @staticmethod
@@ -90,7 +100,7 @@ class Ntfs:
                 self.mft_runs = a['runs']
                 self.mft_off, self.mft_vcl = self.runs_map(a['runs'], self.cl, self.base)
                 return
-        raise SystemExit('$MFT 没有无名 $DATA')
+        raise RuntimeError('$MFT 没有无名 $DATA')
 
     # ---------- MST ----------
     def mst_verify(self, buf):
@@ -122,7 +132,7 @@ class Ntfs:
     # ---------- 记录 / 属性 ----------
     def record_raw(self, ino):
         off = self.mft_off(ino // (self.cl // self.recsz))
-        if off is None: raise SystemExit('ino %d 超出 $MFT 范围' % ino)
+        if off is None: raise RuntimeError('ino %d 超出 $MFT 范围' % ino)
         slot = ino % (self.cl // self.recsz)
         return self.read(off + slot*self.recsz, self.recsz)
 
@@ -192,7 +202,7 @@ class Ntfs:
 
     def attrs(self, ino):
         r = self.record(ino)
-        if 'bad' in r: raise SystemExit('ino %d: %s' % (ino, r['bad']))
+        if 'bad' in r: raise RuntimeError('ino %d: %s' % (ino, r['bad']))
         out = []
         for a in self._attrs_of_buf(r['buf'], r['offs']):
             out.append(a)
@@ -300,6 +310,13 @@ class Ntfs:
                     rec_mst=r.get('mst'), attrs=[(a['type'], a['name'], a['inst']) for a in ats],
                     has_root=bool(ir), has_alloc=bool(ia), has_bitmap=bool(bm))
         root = None; blocks = {}
+        # 本目录 $I30 的 $BITMAP：只有位图说"这个 VCN 在用"的索引块，内容才算数
+        bmbits = None
+        if bm:
+            try:
+                bmbits = bm[0]['val'] if bm[0]['nonres'] == 0 else self.attr_data(bm[0])
+            except Exception:
+                bmbits = None
         if ir:
             v = ir[0]['val']
             bs = struct.unpack_from('<I', v, 8)[0]
@@ -318,13 +335,20 @@ class Ntfs:
                 blk = data[i*bs:(i+1)*bs]
                 mst = self.mst_verify(blk)
                 if blk[0:4] != b'INDX':
-                    blocks[i] = dict(bad=repr(blk[0:4]), mst=mst, entries=[]); continue
+                    # 全零 = $INDEX_ALLOCATION 里未分配的 VCN 空洞（NTFS 允许存在）
+                    zl = not any(blk)
+                    lv = True if bmbits is None else bool((bmbits[i >> 3] >> (i & 7)) & 1)
+                    blocks[i] = dict(bad=('全零空洞' if zl else repr(blk[0:4])),
+                                     live=(False if (zl or not lv) else True),
+                                     mst=([] if (zl or not lv) else mst), entries=[])
+                    continue
                 good = self.mst_apply(blk)
                 vcn = struct.unpack_from('<Q', good, 16)[0]
                 hdr = good[24:]
                 eo = struct.unpack_from('<I', hdr, 0)[0]
                 ilen = struct.unpack_from('<I', hdr, 4)[0]
-                blocks[vcn] = dict(mst=mst, eo=eo, ilen=ilen, alloc=struct.unpack_from('<I', hdr, 8)[0],
+                live = True if bmbits is None else (vcn < len(bmbits) * 8 and bool((bmbits[vcn >> 3] >> (vcn & 7)) & 1))
+                blocks[vcn] = dict(live=live, mst=mst if live else [], eo=eo, ilen=ilen, alloc=struct.unpack_from('<I', hdr, 8)[0],
                                    ihflags=hdr[12], nt=struct.unpack_from('<q', good, 8)[0],
                                    entries=self._ents(good, 24+eo, 24+ilen))
         return root, blocks, diag, ats
@@ -452,10 +476,14 @@ def show(n, ino, path, label=''):
 
 def audit(raw, part_lba, limit=None):
     n = Ntfs(raw, part_lba)
-    cap = None
     bm = n.attr(0, 0xB0, '')
     bdata = n.attr_data(bm)
-    cap = len(bdata) * 8
+    cap = len(bdata) * 8                      # $BITMAP 能表意的记录数
+    mcap = n.cl // n.recsz
+    # ★ $BITMAP 往往比 $MFT 当前大小能表意的范围大得多（预留位），扫之前必须夹住，
+    #   否则读出 "ino N 超出 $MFT 范围" 这种假异常（本盘 cap=163840，实际只有 ~24960*4）
+    cap_live = n.mft_vcl * mcap
+    cap = min(cap, cap_live)
     def bit(i): return (bdata[i >> 3] >> (i & 7)) & 1
     print('卷 %04X-%04X  簇=%d  记录=%d  MFT容量=%d 条' % (
         n.serial >> 16, n.serial & 0xFFFF, n.cl, n.recsz, cap))
@@ -463,7 +491,8 @@ def audit(raw, part_lba, limit=None):
 
     problems = []
     skipped = []
-    parsed = set()          # 我确实读透了的记录（读不懂的一律"未判定"，不算违背）
+    parsed = set()
+    _attrs_cached = {}          # ino -> 属性列表（判 $SI 是否存在）          # 我确实读透了的记录（读不懂的一律"未判定"，不算违背）
     dirs = []
     ref_users = {}      # ino -> [(dir_ino, name)]
     names_seen = {}     # ino -> [names]
@@ -473,8 +502,6 @@ def audit(raw, part_lba, limit=None):
         off = n.mft_off(ino // mcap)
         if off is None: break
         rawrec = n.record_raw(ino)
-        if rawrec[4:8] != b'ILE':   # magic "FILE"[2:4]=='IL'? 用头两字节判
-            pass
         rec = n.mst_apply(rawrec)
         if rec[0:4] != b'FILE': continue
         flags = struct.unpack_from('<H', rec, 22)[0]
@@ -488,12 +515,35 @@ def audit(raw, part_lba, limit=None):
         link = struct.unpack_from('<H', rec, 18)[0]
         if mst: problems.append(('MFT 记录 MST 校验失败', ino, mst))
         try:
-            fns, _ = n.fns(ino)
+            ats_all, rec0 = n.attrs(ino)
+            _attrs_cached[ino] = ats_all
+            fns = [dict(inst=a['inst'], name=a['val'][0x42:0x42 + a['val'][0x40] * 2].decode(
+                            'utf-16-le', 'replace'),
+                            pmft=struct.unpack_from('<Q', a['val'], 0)[0] & 0xFFFFFFFFFFFF,
+                            pseq=struct.unpack_from('<Q', a['val'], 0)[0] >> 48,
+                            ns=a['val'][0x41], ctime=struct.unpack_from('<Q', a['val'], 8)[0],
+                            mtime=struct.unpack_from('<Q', a['val'], 0x10)[0],
+                            ftm=struct.unpack_from('<Q', a['val'], 0x18)[0])
+                       for a in ats_all if a['type'] == 0x30]
         except Exception as e:
             skipped.append((ino, str(e))); continue      # 解析覆盖不到 ≠ 盘坏，单独计
+        # ★ MFT 的【扩展记录】不是完整记录：它没有 $SI、link_count 归基记录所有，
+        #   按基记录的规矩去判它会造出几万条假违背（基线 65381 条就是这么来的）。
+        #   认法：base_ref 指向别的记录 ⇒ 扩展记录；或压根没有 $SI。
+        br = struct.unpack_from('<Q', rec, 32)[0] & 0xFFFFFFFFFFFF   # 基记录引用
+        has_si = any(a['type'] == 0x10 for a in ats_all)
+        # ★ 三种情况都算【未判定】而不是【违背】：
+        #   a) 扩展记录（base_ref 指向别人、或没有 $SI）；
+        #   b) 带 $ATTRIBUTE_LIST 的记录 —— 它的 $FN 可能整体住在扩展记录里，
+        #      我这版没展开 AL，于是"看不到名字"≠"盘上不一致"（真 Windows 盘上万条都是这样）。
+        if br not in (0, ino) or not has_si or any(a['type'] == 0x20 for a in ats_all):
+            skipped.append((ino, '未判定：扩展记录/无$SI/含$ATTRIBUTE_LIST'))
+            continue
         names_seen[ino] = [f['name'] for f in fns]
         parsed.add(ino)
-        if len(fns) != link:
+        # 只有【本记录里确实读到了 $FN】时才比对 link_count —— 很多记录的 $FN 落在
+        # 扩展记录里（$ATTRIBUTE_LIST 展开我还没做全），那种 len(fns)==0 不是盘的问题。
+        if len(fns) > 0 and len(fns) != link:
             problems.append(('link_count(%d) != $FILE_NAME 属性个数(%d)' % (link, len(fns)), ino,
                              [f['name'] for f in fns]))
         for f in fns:
@@ -519,8 +569,12 @@ def audit(raw, part_lba, limit=None):
         if diag['has_alloc'] and not diag['has_bitmap']:
             problems.append(('有 $INDEX_ALLOCATION 但缺 $BITMAP', dino, ''))
         for vcn, b in blocks.items():
-            if 'bad' in b: problems.append(('索引块 magic 不对', dino, b['bad']))
-            elif b.get('mst'): problems.append(('索引块 MST 校验失败', dino, 'vcn=%s %s' % (vcn, b['mst'])))
+            if b.get('live') is not True:
+                continue                     # 空洞 / 位图说没在用 ⇒ 旧数据与旧 USA 不算违背
+            if b.get('bad'):
+                problems.append(('索引块 magic 不对', dino, 'vcn=%s %s' % (vcn, b['bad'])))
+            elif b.get('mst'):
+                problems.append(('索引块 MST 校验失败', dino, 'vcn=%s %s' % (vcn, b['mst'])))
         for e in es:
             fn = e.get('fn')
             if not fn or e['flags'] & 1: continue
@@ -554,6 +608,13 @@ def _cli():
     argv = sys.argv[1:]
     if not argv:
         print(__doc__); return 2
+    global BASE_OUT, BASE_IN
+    if '--base-out' in argv:
+        BASE_OUT = argv[argv.index('--base-out') + 1]
+        argv = [a for i, a in enumerate(argv) if i not in (argv.index('--base-out'), argv.index('--base-out') + 1)]
+    if '--base' in argv:
+        BASE_IN = argv[argv.index('--base') + 1]
+        argv = [a for i, a in enumerate(argv) if i not in (argv.index('--base'), argv.index('--base') + 1)]
     lim = None
     if '--limit' in argv:
         lim = int(argv[argv.index('--limit') + 1]); argv.remove('--limit'); argv.pop(argv.index(str(lim)))
@@ -566,15 +627,34 @@ def _cli():
     else:
         raw = argv[0]; plba = int(argv[1])
     try:
-        n, probs, skipped = audit(raw, plba, lim)
+        got = audit(raw, plba, lim)
+        n, probs, skipped = got[0], got[1], got[2]
+        newonly = got[3] if len(got) > 3 else None
     finally:
         if tmp: os.unlink(tmp)
+    keys = sorted('%s|%s|%s' % (p[0], p[1], _fmt(p[2])) for p in probs)
+    if BASE_OUT:
+        json.dump({'keys': keys}, open(BASE_OUT, 'w'), ensure_ascii=False)
+        print('基线已写出：%s（%d 条）' % (BASE_OUT, len(keys)))
+    if BASE_IN:
+        base = set(json.load(open(BASE_IN))['keys'])
+        new = [k for k in keys if k not in base]
+        gone = [k for k in base if k not in keys]
+        print('\n===== 与基线相比【新增】违背：%d 条（基线 %d 条，本次 %d 条）=====' %
+              (len(new), len(base), len(keys)))
+        for k in new[:10]:
+            print('   ★新增', k[:220])
+        for k in gone[:5]:
+            print('   (基线里有、现在没有：通常是删除/改名后正常消失)', k[:160])
+        return n, [x for x in probs], skipped, new
     print('\n===== 不变量违背：%d 条（另解析跳过 %d 条）=====' % (len(probs), len(skipped)))
     for x in skipped[:3]:
         print('   ·跳过 ino=%s %s' % (x[0], x[1]))
     kind = {}
     for p in probs:
         kind.setdefault(p[0], []).append(p)
+    if newonly is not None:
+        return 1 if newonly else 0
     for k, v in sorted(kind.items(), key=lambda x: -len(x[1])):
         print('\n【%s】%d 类' % (k, len(v)))
         for p in v[:6]:

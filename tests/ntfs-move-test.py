@@ -227,6 +227,31 @@ d6 = p6.get('data') or {}
 check('limit 超上限被夹到 2000', d6.get('limit') == 2000, json.dumps(d6)[:200])
 
 # cmd.list 的 JSON 是分块多行，直接解析不好办；用 --list（单行 JSON）取权威命令表
+# ── ★ 拒绝必须零副作用 + 显式开关（2026-10-23 真机现场修的两件事）──
+# 上一版 ntfs.move 是"先建目标父目录，再拒目录跨父"，于是被拒绝的操作也在盘上
+# 留下了一个空目录（现场：/MovedByTool 就这么冒出来的）。现在政策判定前移到任何写动作之前。
+check('put /SidE/a.bin', put('/SidE/a.bin', b'A' * 900).get('ok'))
+check('搬之前 /NoSide 不存在', not ex('/NoSide'))
+d = run('ntfs.move', img=IMG, lba=LBA, src='/SidE', dst='/NoSide/SidE')
+check('目录跨父搬（默认政策）被拒 = NTFS-SRC-IS-DIR', code(d) == 'NTFS-SRC-IS-DIR', json.dumps(d)[:160])
+check('★拒绝之后目标父目录【没被建出来】（拒绝=零副作用）', not ex('/NoSide'),
+      'App 因此可以放心原样重试')
+check('  源目录仍在原位', ex('/SidE/a.bin'))
+_pre = run('ntfs.parent', img=IMG, lba=LBA, path='/SidE')     # 搬前先记下 ino
+_ino = (_pre.get('data') or {}).get('ino')
+d = run('ntfs.move', img=IMG, lba=LBA, src='/SidE', dst='/NoSide/SidE', allow_dir_move='true')
+check('显式 --allow_dir_move=true 才放行跨父搬目录', d.get('ok'), json.dumps(d)[:200])
+check('  搬后新位置可读（内容一致）', exported('/NoSide/SidE/a.bin') == b'A' * 900)
+check('  旧位置已消失', not ex('/SidE/a.bin'))
+_pdd = (run('ntfs.parent', img=IMG, lba=LBA, path='/NoSide/SidE').get('data') or {})
+check('  搬完 ino 与搬前一致（同一份记录，不是"新建+删除"）',
+      _ino is not None and _pdd.get('ino') == _ino, '%s vs %s' % (_ino, _pdd.get('ino')))
+check('  搬完 parent_ino == parent_by_path（父引用指回新父）',
+      _pdd.get('backlink_ok') is True and _pdd.get('parent_ino') == _pdd.get('parent_by_path'),
+      json.dumps(_pdd))
+d = run('ntfs.move', img=IMG, lba=LBA, src='/NoSide/SidE/a.bin', dst='/back.bin')
+check('文件跨父移动照旧允许', d.get('ok'), json.dumps(d)[:160])
+
 pl = subprocess.run([IMGCMD, '--list'], capture_output=True, text=True)
 try:
     allc = [c['name'] for c in json.loads(pl.stdout)['cmds']]

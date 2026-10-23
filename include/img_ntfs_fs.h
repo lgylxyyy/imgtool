@@ -94,7 +94,10 @@ int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir,
  * 返回 IMG_OK / IMG_ENOENT(源或源父不存在) / IMG_EEXISTS(目标已存在且 overwrite=false)
  *      / IMG_ENOTSUP(overwrite 时目标是目录) / IMG_EFULL / IMG_EIO。
  * ★ 目录：见 img_ntfs_fs.c 里 move_path 的注释与 tests/ntfs-move-test.sh 的实测结论。*/
-int img_ntfs_move_path(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs, bool overwrite);
+/* allow_dir_move=false（默认，现政策）：目录只允许【同父改名】，跨父搬回 IMG_ENOTSUP。
+ * =true 是"真 Windows 验收/专家"用的显式开关（App 不要传），见 SPEC-NTFS-MOVE.md §8。 */
+int img_ntfs_move_path(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs,
+                       bool overwrite, bool allow_dir_move);
 /* 目录父引用自洽检查（只读）：父引用指向谁、按路径算的父是谁、父索引是否指回本目录。
  * 搬过目录之后（ntfs.move / move_into）必须全真。
  * ★ 实测：Windows 卷的 $I30 里【没有 "."/".." 索引项】（dotdot_present=false），

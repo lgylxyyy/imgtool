@@ -2879,6 +2879,8 @@ static const img_arg A_NTFSMOVE[] = {
     {"src",  IMG_A_STR, true,  NULL, "盘内现有路径（/ 开头）", NULL},
     {"dst",  IMG_A_STR, true,  NULL, "盘内新路径（/ 开头；末段不同=改名，父目录不同=移动）", NULL},
     {"overwrite", IMG_A_BOOL, false, "false", "目标已存在时是否覆盖（默认 false=直接报错）", NULL},
+    {"allow_dir_move", IMG_A_BOOL, false, "false",
+     "★默认 false：目录只允许同父改名。true=允许把目录搬到别的父目录（真机验收/专家用，App 别传）", NULL},
 };
 #if IMG_WITH_NTFS3G   /* 只在开启 NTFS 时用到；关掉时不该留下 unused 警告 */
 /* 把 img_ntfs_move_path 的返回码翻成【能分开病因】的错误码：
@@ -2924,7 +2926,7 @@ static int cmd_ntfs_move(img_ctx *ctx, const img_args *in, img_result *out){
     if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",dst,"不是合法 NTFS（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
     img_span sp; img_span_prep(&sp,"ntfs","move","盘内改名/移动");
     img_span_kv_str(&sp,"src",src); img_span_kv_str(&sp,"dst",dst); img_span_begin(&sp);
-    int mr=img_ntfs_move_path(fs,src,dst,over);
+    int mr=img_ntfs_move_path(fs,src,dst,over,img_args_bool(in,"allow_dir_move",false));
     img_span_end(&sp,mr);
     /* ★ 校验必须在 umount 之前问（卸载后就问不到了）
      * ★ 只改大小写（a.txt → A.TXT）时"源还在"这个判断没有意义：

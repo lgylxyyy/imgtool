@@ -64,9 +64,22 @@ int img_ntfs_move_into(img_ntfs_fs *fs, const char *dst_dir, const char **names,
                        int nnames, int *moved_out){
     (void)fs; (void)dst_dir; (void)names; (void)nnames; (void)moved_out; return NA;
 }
-int img_ntfs_move_path(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs, bool overwrite){
+int img_ntfs_move_path(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs,
+                          bool overwrite, bool allow_dir_move){
     (void)fs; (void)src_abs; (void)dst_abs; (void)overwrite; return NA;
 }
+/* 写后自证（NTFS 关闭时同样如实报"功能不可用"，绝不能返回 IMG_OK 骗人） */
+int img_ntfs_verify_dir(img_ntfs_fs *fs, const char *abs_path){
+    (void)fs;(void)abs_path; return IMG_ENOTSUP;
+}
+int img_ntfs_verify_path(img_ntfs_fs *fs, const char *abs_path,
+                         uint64_t *ino_out, bool *isdir_out){
+    (void)fs;(void)abs_path;
+    if(ino_out) *ino_out=0;
+    if(isdir_out) *isdir_out=false;
+    return IMG_ENOTSUP;
+}
+
 int img_ntfs_dir_parent_check(img_ntfs_fs *fs, const char *abs_path,
                               uint64_t *out_ino, uint64_t *out_parent_ino,
                               uint64_t *out_parent_by_path, bool *out_backlink_ok,
