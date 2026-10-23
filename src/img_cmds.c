@@ -2877,7 +2877,7 @@ static const char *ntfs_move_code(int rc){
     switch(rc){
         case IMG_ENOENT:   return "NTFS-PATH-NOTFOUND";
         case IMG_EEXISTS:  return "NTFS-DEST-EXISTS";
-        case IMG_ENOTSUP:  return "NTFS-SRC-IS-DIR";   /* 源是目录：政策不放行（见 move_path 注释）*/
+        case IMG_ENOTSUP:  return "NTFS-SRC-IS-DIR";   /* 目录跨父搬移：真 Windows 实测判负，已收回（见 move_path 里的 chkdsk 证据）*/
         case IMG_ESTATE:   return "NTFS-DEST-IS-DIR";  /* 目标是目录：不许拿文件顶掉它 */
         case IMG_EFULL:    return "FAT-ENOSPC";
         case IMG_EINVAL:   return "CMD-ARG-BAD";
@@ -2925,7 +2925,7 @@ static int cmd_ntfs_move(img_ctx *ctx, const img_args *in, img_result *out){
     if(mr!=IMG_OK){
         const char *hint = (mr==IMG_ENOENT)?"源路径不存在（先用 ntfs.list 核对大小写与整条路径）":
                            (mr==IMG_EEXISTS)?"目标已存在：换个名字，或明确传 overwrite=true":
-                           (mr==IMG_ENOTSUP)?"源是个目录：改名/移动目前只支持文件（NTFS 的 \"..\" 索引项不随 link+delete 更新，未经 Windows 侧验收不放行）":
+                           (mr==IMG_ENOTSUP)?"目录只能在【同一个父目录下改名】，不能搬到别的父目录：真 Windows 实测那样会被 chkdsk 判成孤儿、塞进 found.000（要挪目录请复制+删除，或在 Windows 里做）":
                            (mr==IMG_ESTATE)?"目标是个目录：工具不会用文件顶掉目录":
                            "改名/移动失败（空间不足或卷状态异常）";
         img_result_fail(out,mr,ntfs_move_code(mr),src,hint,dst); return mr;

@@ -906,7 +906,7 @@ static int dir_parent_ino(ntfs_inode *sub, uint64_t *out){
  *   FUSE 层（src/ntfs-3g.c 的 ntfs_fuse_rename）对目录也只是 link+unlink。
  *   也就是说 ntfs-3g 自己挂载时 mv 一个目录，".." 同样会留在旧父上。
  *   这是上游能力缺口，不是我们写得笨 —— 找不到能直接调的现成函数。*/
-static int dir_set_dotdot_parent(ntfs_inode *sub, ntfs_inode *newpar, bool *out_had_entry){
+__attribute__((unused)) static int dir_set_dotdot_parent(ntfs_inode *sub, ntfs_inode *newpar, bool *out_had_entry){
     if(out_had_entry) *out_had_entry=false;
     ntfs_index_context *ictx=NULL;
     int rc = dotdot_lookup(sub,&ictx);
@@ -936,7 +936,7 @@ static int dir_set_dotdot_parent(ntfs_inode *sub, ntfs_inode *newpar, bool *out_
 
 /* 目标父目录是不是在"被搬目录"的子树里（含搬进自己）。
  * 从 dpar 沿 ".." 一级级往上走，撞见 anc_ino 就是环。走 64 层封顶防病态索引。*/
-static int dir_is_self_or_ancestor(ntfs_volume *vol, uint64_t anc_ino, ntfs_inode *dpar){
+__attribute__((unused)) static int dir_is_self_or_ancestor(ntfs_volume *vol, uint64_t anc_ino, ntfs_inode *dpar){
     ntfs_inode *cur=dpar;
     bool owned=false;
     int hit=0;
@@ -1058,11 +1058,28 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,b
      * 文件不受影响（文件没有父引用这回事）。
      * 两条硬规矩：① 不许把目录搬进它自己的子树（会造出环，Windows 直接懵）；
      *             ② 目标已存在且是目录 → 依旧拒绝（IMG_ESTATE）。*/
-    if(isdir && !same_dir && dir_is_self_or_ancestor(fs->vol, ni->mft_no, dpar)){
+    /* ★★ 跨父目录搬移：收回（2026-10-23 真 Windows 实测判负）★★
+     * 用户在 Vectras 的 Win10 X-Lite（卷标 "Windows X-Lite"、卷号 2B00-726F）上跑：
+     *   cd C:\MovedByTool\LogFiles      → "The system cannot find the path specified."
+     *   chkdsk C: /scan                  → "1 unindexed files recovered to lost and found.
+     *        Found missing Index entry for file \"...\\LogFiles <0x1,0x114a>\"
+     *        from index \"\\??\\C:\\found.000\" of directory \"$I30\" … repaired online."
+     *        "Windows has found problems and they were all fixed online."
+     *   0x114a = 4426 —— 正是我们搬走的 LogFiles 的 inode（沙箱侧 ntfs.parent 记的 ino=4426）。
+     * ⇒ Windows 认为这个目录【没有任何索引项指向它】（孤儿），直接把它塞进 found.000。
+     * ⇒ 我们那套"ntfs_link 到新父 + 改 $FILE_NAME 父引用 + ntfs_delete 旧项"，
+     *   在【跨父目录】时 Windows 不认：它要的是父索引项与子目录里的 ".." 双向对得上，
+     *   而 ntfs-3g 的索引写入没有把这套关系补齐（上游本来也没有 rename 目录的能力，
+     *   dir.c 里那句 FIXME 就是这个坑）。
+     *
+     * 【同父改名】是好的（同一张盘上 C:\Windows\appcompat → AppCompat-Renamed：
+     *   cd 进得去、dir /ad 四个子项全在、chkdsk 对它零报怨），所以只放开这一种。
+     * 想搬目录请走"复制到新位置 + 删旧"或直接在 Windows 里做。*/
+    if(isdir && !same_dir){
         ntfs_inode_close(ni);
         if(dpar_extra) ntfs_inode_close(dpar);
         ntfs_inode_close(spar); free(su);
-        return IMG_EINVAL;
+        return IMG_ENOTSUP;
     }
     if(!to_ntfs(dname,&du,&dul)){
         ntfs_inode_close(ni);
@@ -1156,29 +1173,9 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,b
         ntfs_inode_close(spar); free(su); free(du);
         return IMG_EIO;
     }
-    /* ②′ 目录换了父 → 同步子目录 ".." 的父引用；失败就把刚加的链接撤掉，回到原样 */
-    if(isdir && !same_dir){
-        bool had_dd=false;
-        int prc=dir_set_dotdot_parent(ni, dpar, &had_dd);
-        if(prc!=IMG_OK){
-            img_ev ev;
-            if(img_ev_init(&ev,IMG_LV_ERROR,"ntfs","move_dotdot_fail",prc,"同步 .. 失败，撤销新链接")){
-                img_ev_str(&ev,"src",src_abs); img_ev_str(&ev,"dst",dst_abs); img_ev_emit(&ev);
-            }
-            /* ★ 顺序很重要：先把 ni 关掉，再另开一份去撤销新链接。
-             *   ntfs_inode_open 对同一 inode 会给【独立副本】，两份同时在世
-             *   就可能把旧的 link_count 写回去（本轮刚在"同目录改名"上栽过一次）。*/
-            ntfs_inode_close(ni); ni=NULL;
-            if(dpar_extra) ntfs_inode_close(dpar);
-            { ntfs_inode *bk=ntfs_inode_open(fs->vol, sref);
-              ntfs_inode *nd=lookup(fs->vol,ddir,NULL);
-              if(bk && nd) (void)ntfs_delete(fs->vol,dst_abs,bk,nd,du,(u8)dul);
-              else { if(bk) ntfs_inode_close(bk); if(nd) ntfs_inode_close(nd); } }
-            free(su); free(du);
-            ntfs_inode_close(spar);
-            return prc;
-        }
-    }
+    /* ②′ 目录只在【同父改名】时允许（见上面 isdir && !same_dir 的拒绝），
+     *   那种情形父没变，".." 与 $FILE_NAME 的父引用都不用动。
+     *   跨父搬移的 ".." 同步代码留在 dir_set_dotdot_parent() 里备用。*/
     if(dpar_extra) ntfs_inode_close(dpar);
     { img_ev ev;
       if(img_ev_init(&ev,IMG_LV_DEBUG,"ntfs","move_synced",IMG_OK,"新父已落盘，准备删旧")){

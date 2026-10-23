@@ -101,7 +101,12 @@ check('相对路径 → CMD-ARG-BAD', code(d) == 'CMD-ARG-BAD', code(d))
 d = run('ntfs.move', img=IMG, lba=LBA, src='/x.txt', dst='/x.txt')
 check('自己移到自己 → noop 成功', d.get('ok') and (d.get('data') or {}).get('noop'))
 check('ntfs.put /dirA/x.txt（造出目录）', put('/dirA/x.txt', b'IN-DIR').get('ok'))
-# —— 目录移动：2026-10-23 起放开（会同步 ".." 的父引用），并用 ntfs.parent 自证 ——
+# —— 目录：【同父改名】可以；【跨父搬移】收回 ——
+# 真 Windows 实测（Vectras / Win10 X-Lite，卷号 2B00-726F）：
+#   跨父搬走的 C:\MovedByTool\LogFiles → Windows "找不到路径"，
+#   chkdsk /scan 判它 "unindexed file"（0x114a=4426）并塞进 found.000；
+#   同父改名的 C:\Windows\appcompat → AppCompat-Renamed 完全正常。
+# 所以契约改成：只放开同父改名。证据与原因写在 img_ntfs_fs.c 的 move_path 注释里。
 def parent(path):
     d = run('ntfs.parent', img=IMG, lba=LBA, path=path)
     return d.get('data') or {}
@@ -111,31 +116,28 @@ check('ntfs.parent 基线：/dirA 自洽（parent_ino==parent_by_path 且 backli
 root_ino = parent('/').get('ino')
 check('ntfs.parent 认得根（ino==parent_ino）', pd0.get('parent_ino') == root_ino,
       json.dumps(pd0)[:160])
-d = run('ntfs.move', img=IMG, lba=LBA, src='/dirA', dst='/dirB')
-check('目录移动 /dirA → /dirB（已放开）', d.get('ok'), code(d) or json.dumps(d)[:200])
-check('  里面的文件跟着搬走了', ex('/dirB/x.txt') and not ex('/dirA/x.txt'))
-pd1 = parent('/dirB')
-check('  搬完 ntfs.parent 仍自洽（.. 已同步到新父）',
-      pd1.get('consistent') is True and pd1.get('parent_ino') == root_ino,
+d = run('ntfs.move', img=IMG, lba=LBA, src='/dirA', dst='/sub/dirA')
+check('目录【跨父搬移】被拒（NTFS-SRC-IS-DIR，真 Windows 判负后收回）',
+      (not d.get('ok')) and code(d) == 'NTFS-SRC-IS-DIR', code(d))
+check('  被拒后目录与内容完好（不是半途失败）',
+      ex('/dirA/x.txt') and not ex('/sub/dirA/x.txt'))
+d = run('ntfs.move', img=IMG, lba=LBA, src='/dirA', dst='/dirA2')
+check('目录【同父改名】允许（实测这一种在 Windows 下是好的）', d.get('ok'),
+      code(d) or json.dumps(d)[:200])
+check('  改名后里面的文件跟着走', ex('/dirA2/x.txt') and not ex('/dirA/x.txt'))
+pd1 = parent('/dirA2')
+check('  改名后 ntfs.parent 仍自洽、inode 号没变（是改名不是重建）',
+      pd1.get('consistent') is True and pd1.get('ino') == pd0.get('ino'),
       json.dumps(pd1)[:200])
-check('  inode 号没变（是改名不是重建）',
-      pd1.get('ino') == pd0.get('ino'), "%s→%s" % (pd0.get('ino'), pd1.get('ino')))
-d = run('ntfs.move', img=IMG, lba=LBA, src='/dirB', dst='/dirB/inner')
-check('把目录搬进它自己的子树 → 拒绝（CMD-ARG-BAD）',
-      (not d.get('ok')) and code(d) == 'CMD-ARG-BAD', code(d))
-check('  被拒后目录还在、内容还在', ex('/dirB/x.txt'))
-d = run('ntfs.move', img=IMG, lba=LBA, src='/dirB', dst='/sub/deep/dirB')
-check('目录搬到别的父目录下（/dirB → /sub/deep/dirB）', d.get('ok'), code(d))
-pd2 = parent('/sub/deep/dirB')
-deep_ino = parent('/sub/deep').get('ino')
-check('  .. 指向新父 /sub/deep 且自洽',
-      pd2.get('consistent') is True and pd2.get('parent_ino') == deep_ino,
-      json.dumps(pd2)[:200])
-check('  内容仍可读', exported('/sub/deep/dirB/x.txt') == b'IN-DIR')
+check('  内容逐字节没变', exported('/dirA2/x.txt') == b'IN-DIR')
+d = run('ntfs.move', img=IMG, lba=LBA, src='/dirA2', dst='/dirA2/inner')
+check('把目录搬进自己的子树也拒（那也是跨父搬移）',
+      (not d.get('ok')) and code(d) == 'NTFS-SRC-IS-DIR', code(d))
 check('造 /pf.txt（给 ntfs.parent 的反例用）', put('/pf.txt', b'F').get('ok'))
 d = run('ntfs.parent', img=IMG, lba=LBA, path='/pf.txt')
 check('ntfs.parent 对文件明确拒绝（NTFS-NOT-A-DIR）', code(d) == 'NTFS-NOT-A-DIR', code(d))
-d = run('ntfs.move', img=IMG, lba=LBA, src='/mvdir-f.txt', dst='/dirB', overwrite='true')
+
+d = run('ntfs.move', img=IMG, lba=LBA, src='/mvdir-f.txt', dst='/dirA2', overwrite='true')
 check('源不存在时先报源不存在（不误报成目标问题）', code(d) == 'NTFS-PATH-NOTFOUND', code(d))
 
 # —— 子目录内的改名（2026-10-23 真机抓到的真 bug）——
@@ -165,10 +167,10 @@ check('  内容一致', exported('/fromdir.txt') == b'AAA-IN-DIR')
 check('  原目录里已没有它', not ex('/mvdir/B.TXT'))
 
 # —— 删除 ——
-d = run('ntfs.rm', img=IMG, lba=LBA, path='/sub/deep/dirB/x.txt')
-check('删文件 /sub/deep/dirB/x.txt', d.get('ok'), json.dumps(d)[:200])
-check('  删完确实不在', not ex('/sub/deep/dirB/x.txt'))
-d = run('ntfs.rm', img=IMG, lba=LBA, path='/sub/deep/dirB')
+d = run('ntfs.rm', img=IMG, lba=LBA, path='/dirA2/x.txt')
+check('删文件 /dirA2/x.txt', d.get('ok'), json.dumps(d)[:200])
+check('  删完确实不在', not ex('/dirA2/x.txt'))
+d = run('ntfs.rm', img=IMG, lba=LBA, path='/dirA2')
 check('删目录 → NTFS-IS-DIR（绝不递归删）', code(d) == 'NTFS-IS-DIR', code(d))
 d = run('ntfs.rm', img=IMG, lba=LBA, path='/ghost')
 check('删不存在 → NTFS-PATH-NOTFOUND', code(d) == 'NTFS-PATH-NOTFOUND', code(d))
@@ -180,7 +182,7 @@ d = run('qc.verify', img=IMG)
 check('qc.verify 卷完好', d.get('ok'), json.dumps(d)[:200])
 d = run('ntfs.list', img=IMG, lba=LBA, path='/sub/deep')
 names = sorted(e['name'] for e in (d.get('data') or {}).get('names', []))   # ★ 字段是 names[]
-check('列目录 = 搬来的 c.txt + 搬进来的 dirB', names == ['c.txt', 'dirB'], str(names))
+check('列目录只剩搬来的 c.txt（目录没被搬进来过）', names == ['c.txt'], str(names))
 
 # —— ntfs.list 分页（System32 有 4479 项，整页序列化会超输出缓冲 → 以前只回 RESULT-TOO-BIG）——
 print('\n──── ntfs.list 分页 ────')

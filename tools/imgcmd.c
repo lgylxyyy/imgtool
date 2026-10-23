@@ -84,6 +84,8 @@ static const ETX E_TEXT[] = {                      /* 错误码 → 原因 / 建
      "跑 qc.verify；别在这张盘上继续写","Run qc.verify; stop writing to this image"},
     {"NTFS-MOVE-FAIL","盘内改名/移动失败","Rename/move inside the volume failed",
      "看日志里 move_link_fail / move_sync_fail / move_delete_fail 是哪一步","Check the log: which step failed (link / sync / delete)"},
+    {"NTFS-SRC-IS-DIR","目录只能同父改名，不能搬到别的父目录","Directories can be renamed in place, but not moved to another parent",
+     "真 Windows 实测：跨父搬目录会被 chkdsk 判为孤儿并塞进 found.000；要挪目录请复制+删除，或在 Windows 里做","To relocate a directory, copy it and delete the original, or do it inside Windows"},
     {"NTFS-PATH-NOTFOUND","盘内路径不存在（大小写不敏感，但整条路径要写全）","Path not found in the volume (case-insensitive, but the full path must match)",
      "先用 ntfs.list 核对父目录与名字","List the parent with ntfs.list first"},
     {"NTFS-VOLUME-DIRTY","卷被标脏（上次写入没干净收尾）","Volume is marked dirty (a previous write did not finish cleanly)",
