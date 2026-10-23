@@ -150,6 +150,17 @@ check('FAT 同名 + rename ⇒ .001', d.get('ok') and data(d).get('path') == '/f
 d = run('fat.copy', img=IMG, lba=ESP, src='/fa.bin', dst='/sub/deep/fc.bin')
 check('FAT 复制到不存在的多级目录 ⇒ 自动建父目录', d.get('ok'), json.dumps(d)[:200])
 
+# ─────────── FAT 递归删除 ───────────
+check('FAT 造一棵树 /FT/A/B/C/x.bin',
+      run('fat.put', img=IMG, lba=ESP, src=mk(b'zz', 'zz.bin'), dst='/FT/A/B/C/x.bin').get('ok'))
+d = run('fat.rm', img=IMG, lba=ESP, path='/FT')
+check('FAT 删非空目录（默认）⇒ FAT-DIR-NOT-EMPTY', code(d) == 'FAT-DIR-NOT-EMPTY', json.dumps(d)[:160])
+d = run('fat.rm', img=IMG, lba=ESP, path='/FT', recursive='true')
+check('FAT 递归删 ⇒ removed ≥ 4', d.get('ok') and data(d).get('removed', 0) >= 4,
+      json.dumps(d)[:200])
+check('  FAT 递归后整棵不在',
+      not data(run('fat.exists', img=IMG, lba=ESP, path='/FT/A/B/C/x.bin')).get('exists'))
+
 # ─────────── 收尾：差值对账（不能新增任何不一致） ───────────
 subprocess.run(['qemu-img', 'convert', '-O', 'raw', IMG, RAW], check=True)
 p = subprocess.run([sys.executable, INV, RAW, str(LBA), '--base', BASE],

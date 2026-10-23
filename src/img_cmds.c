@@ -2046,6 +2046,8 @@ static const img_arg A_FATRM[] = {
     {"img",  IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
     {"lba",  IMG_A_U64, true, NULL, "FAT32 分区起始 LBA", chk_lba},
     {"path", IMG_A_STR, true, NULL, "分区内要删除的绝对路径（/ 开头）", NULL},
+    {"recursive", IMG_A_BOOL, false, "false",
+     "★默认 false：目录只有【空】的时候才删得掉。true=连子项一起递归删（危险）", NULL},
 };
 static int cmd_fat_rm(img_ctx *ctx, const img_args *in, img_result *out){
     uint64_t lba=img_args_u64(in,"lba",0);
@@ -2055,14 +2057,18 @@ static int cmd_fat_rm(img_ctx *ctx, const img_args *in, img_result *out){
     if(!q){ return qc_open_fail(out,ctx); }
     img_fat32_fs *fs=img_fat32_mount(q,lba,true);
     if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL",path,"不是合法 FAT32（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
-    int rc=img_fat32_rm(fs,path);
+    bool rec=img_args_bool(in,"recursive",false);
+    int removed=0;
+    int rc = rec ? img_fat32_rm_tree(fs,path,&removed) : img_fat32_rm(fs,path);
+    if(rc==IMG_OK && !rec) removed=1;
     img_fat32_unmount(fs);
     if(rc==IMG_ENOENT){
         img_result_fail(out,rc,"FAT-ENTRY-NOTFOUND",path,"路径不存在（大小写不敏感，但路径必须完整）","先用 fat.ls 核对父目录");
         return rc;
     }
-    if(rc==IMG_ENOTSUP){
-        img_result_fail(out,rc,"FAT-DIR-NOT-EMPTY",path,"目录非空（本命令不递归删除）","先逐个删掉里面的项，或改在 App 侧做递归");
+    if(rc==IMG_ENOTSUP||rc==IMG_ESTATE){
+        img_result_fail(out,rc,"FAT-DIR-NOT-EMPTY",path,
+            "目录非空（默认不递归）","要连子项一起删请显式传 recursive=true");
         return rc;
     }
     if(rc!=IMG_OK){
@@ -2070,6 +2076,7 @@ static int cmd_fat_rm(img_ctx *ctx, const img_args *in, img_result *out){
         return rc;
     }
     img_result_str(out,"path",path);
+    img_result_u64(out,"removed",(uint64_t)removed);
     return IMG_OK;
 }
 
@@ -3445,7 +3452,7 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_FATEXPORT,(int)(sizeof A_FATEXPORT/sizeof A_FATEXPORT[0]), cmd_fat_export},
     {"fat.exists", "1.0", "查 FAT32 路径是否存在（断点续跑探测原语）",
         A_FATEXISTS,(int)(sizeof A_FATEXISTS/sizeof A_FATEXISTS[0]), cmd_fat_exists},
-    {"fat.rm",    "1.0", "删除 FAT32 分区里的文件或【空】目录（不递归）",
+    {"fat.rm",    "1.0", "删除 FAT32 里的文件；目录默认只删空的（recursive=true 才递归）",
         A_FATRM,  (int)(sizeof A_FATRM  /sizeof A_FATRM[0]),  cmd_fat_rm},
     {"fat.move",  "1.0", "FAT32 分区内改名/移动【单条路径】（目标已存在则拒绝）",
         A_FATMOVE,(int)(sizeof A_FATMOVE/sizeof A_FATMOVE[0]), cmd_fat_move},

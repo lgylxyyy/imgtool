@@ -1024,6 +1024,50 @@ static int fat_unique_name(img_fat32_fs *fs, const char *dir, const char *base,
     return -1;
 }
 
+/* ---------- FAT 递归删除 ---------- */
+typedef struct { char (*nm)[256]; bool *isdir; int n, cap, overflow; } fat_rm_bag;
+static void fat_rm_collect(void *ud, const char *name, bool is_dir, uint64_t size){
+    fat_rm_bag *b=(fat_rm_bag*)ud; (void)size;
+    if(b->n>=b->cap){ b->overflow=1; return; }
+    snprintf(b->nm[b->n],256,"%s",name); b->isdir[b->n]=is_dir; b->n++;
+}
+static int fat_rm_tree_rec(img_fat32_fs *fs,const char *abs,int depth,int *removed){
+    if(depth>32) return IMG_ESTATE;
+    if(!img_fat32_path_exists(fs,abs)) return IMG_ENOENT;
+    if(!img_fat32_dir_exists(fs,abs)){
+        int r=img_fat32_rm(fs,abs);
+        if(r==IMG_OK && removed) (*removed)++;
+        return r;
+    }
+    fat_rm_bag *b=(fat_rm_bag*)calloc(1,sizeof *b);
+    if(!b) return IMG_ENOMEM;
+    b->cap=512;
+    b->nm=(char (*)[256])calloc((size_t)b->cap,256);
+    b->isdir=(bool*)calloc((size_t)b->cap,sizeof(bool));
+    if(!b->nm||!b->isdir){ free(b->nm); free(b->isdir); free(b); return IMG_ENOMEM; }
+    int rc=img_fat32_list_dir(fs,abs,fat_rm_collect,b);
+    if(rc==IMG_OK && b->overflow) rc=IMG_EFULL;
+    if(rc==IMG_OK){
+        for(int i=0;i<b->n && rc==IMG_OK;i++){
+            char child[1200];
+            int n=snprintf(child,sizeof child,"%s%s%s",abs,
+                (abs[0] && abs[strlen(abs)-1]=='/')?"":"/", b->nm[i]);
+            if(n<0||(size_t)n>=sizeof child){ rc=IMG_EINVAL; break; }
+            rc=fat_rm_tree_rec(fs,child,depth+1,removed);
+        }
+    }
+    free(b->nm); free(b->isdir); free(b);
+    if(rc!=IMG_OK) return rc;
+    rc=img_fat32_rm(fs,abs);                 /* 此时已空 */
+    if(rc==IMG_OK && removed) (*removed)++;
+    return rc;
+}
+int img_fat32_rm_tree(img_fat32_fs *fs,const char *abs_path,int *removed){
+    if(removed) *removed=0;
+    if(!fs||!abs_path||!abs_path[0]||!strcmp(abs_path,"/")) return IMG_EINVAL;
+    return fat_rm_tree_rec(fs,abs_path,0,removed);
+}
+
 int img_fat32_copy(img_fat32_fs *fs, const char *src_abs, const char *dst_abs,
                    int conflict, img_prog *prog,
                    char *out_path, size_t out_cap, uint64_t *out_size, bool *out_replaced){
