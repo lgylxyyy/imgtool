@@ -245,3 +245,27 @@ $MFT $BITMAP: bit(99790)=1（该记录在用，属于 AppxBlockMap.xml）
 4. 三条全过 ⇒ 去掉 `img_ntfs_move_path` 里的 `isdir && !same_dir` 拦截，
    并同轮复核 `img_ntfs_move_into`（`win.recover`/`ntfs.rename` 在用，它搬的正是
    `Windows`/`Program Files`/`Users` 进 `Windows.old` —— 现在这条路径**也有写后自证**了）。
+
+
+### 8.1 T1b 盘已就绪（2026-10-23，等真 Windows 一票）
+
+已经做完的（全部有数字）：
+
+| 步骤 | 结果 |
+|---|---|
+| 母盘 | `images/Windows 10 Xlite.qcow2`（128 GiB 虚拟 / 8.9 GB 实占，MBR，卷号 **2236-A3D9**） |
+| 操作前独立体检 | **0 条违背**（30,863 个目录、106,990 条在用记录；5,032 条如实记为"未判定"） |
+| 跨父搬目录 ×2（目标父由工具新建） | `/Windows/System32/LogFiles` → `/MovedByTool/LogFiles`（ino **4368** 不变，8 个子项）；`/Windows/Temp` → `/MovedByTool/Temp`（ino **5767** 不变，3 个子项） |
+| 操作后差值对账 | **新增 0 条**（`--base` 模式，退出码 0） |
+| 内容校验 | `vdagent.log`(9,492 B) / `vdservice.log`(1,940 B) 与母盘原文件 **逐字节相同** |
+| 其它 | `boot.check` 必需 **9/9**；`qc.verify` clean；`ntfs.parent` 两处均 `backlink_ok=true`、`parent_ino==parent_by_path` |
+
+盘已放到手机 Vectras 的 BIOS 虚拟机目录（`p37757s36220748/Windows.qcow2`），
+配置原本就指向这个文件名 ⇒ **用户不需要改任何配置就能开机**。
+
+**Windows 侧要看的四件事**（判据写死，避免再"凭感觉判负"）：
+1. `vol C:` 卷号必须是 **2236-A3D9**（别跑在别的盘上）；
+2. `dir C:\MovedByTool` 能列出 `LogFiles` 与 `Temp` 两个目录；
+3. `cd C:\MovedByTool\LogFiles` 进得去、`dir /ad` 里 8 个子项一个不少；
+4. `chkdsk C: /scan` **不得出现** `unindexed files` / `found.000` / `Index entry`。
+   全过 ⇒ 去掉默认锁（把 `allow_dir_move` 默认值翻成 true）并复核 `ntfs.rename`（`win.recover` 那条）。
