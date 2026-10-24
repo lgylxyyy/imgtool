@@ -65,7 +65,7 @@
 |---|---|
 | `run_all` | **26 通过 / 0 失败 / 2 跳过** |
 | `DEGRADED=1` | **27 通过 / 0 失败 / 1 跳过** |
-| `fileops-test`（统一路径 + 四命令 + 名字规则） | **69 / 0 / 1 跳过** |
+| `fileops-test`（统一路径 + 四命令 + 名字规则） | **71 / 0 / 1 跳过** |
 | `cmd_test` | **87 / 0** |
 | `copy-test` | 60 / 0 |
 | `xcopy-test` | 58 / 0 |
@@ -161,7 +161,7 @@ if(sdir==ddir && !strcasecmp(sname,dname)) return IMG_EINVAL;   /* 自己改自�
 | 目录大小写改名误判 | ✅ 修掉 | 以前 `rename /Dir1 DIR1` 被拼成 `/Dir1/DIR1` 报 `COPY-INTO-SELF`；现在 ci 相等不走 `resolve_final` |
 | `actual_case_path` 老 bug | ✅ 修掉 | 回调结果被拼装覆盖，实际一直用用户输入的大小写；现在 NTFS/FAT 都换成盘上真实大小写 |
 | P0-2 非法文件名校验 | ✅ | 新增 `src/img_name.c`；`copy`/`move`/`rename` 写前校验；`NAME-INVALID` |
-| 测试 | ✅ | `fileops-test` **69/0/1**（原 44）、`xcopy-test` **58/0**；`run_all` **26/0/2**；`DEGRADED` **27/0/1** |
+| 测试 | ✅ | `fileops-test` **71/0/1**（原 44）、`xcopy-test` **58/0**；`run_all` **26/0/2**；`DEGRADED` **27/0/1** |
 | 真机 | ✅ 19 项 | Redmi / Android 17 / arm64-v8a：FAT 文件+目录大小写改名、内容不变、7 个非法名拒绝且条目数不变、host 非法名拒绝、中文名正常 |
 | 三 ABI | ✅ 零警告 | 836 导出符号，`LOAD 0x4000`，NEEDED 仍只有 `libc.so`/`libdl.so` |
 
