@@ -5,7 +5,7 @@
 >
 > 读者：接手 App/工具的实现者（人或 AI）。配套：
 > `docs/UI设计-2026-10-24.md`、`docs/工具总结-2026-10-23.md`、
-> `docs/接手必读-2026-10-23.md`、`app/docs/工具能力与App集成手册.md`。
+> `docs/接手必读-2026-10-23.md`、`Icdqcow2/docs/工具能力与App集成手册.md`。
 
 ---
 
@@ -79,7 +79,7 @@
 
 - 三 ABI 交叉编译：零警告，**836** 导出符号，`LOAD` 16 KiB 对齐，
   NEEDED 只有 `libc.so` / `libdl.so`。
-- APK `app/testbench`：**9,292,280 B**，sha1
+- APK `Icdqcow2/testbench`：**9,292,280 B**，sha1
   `487ca3af717f273a91417a5e6f2ca73c46934819`；APK 内 `libimgtool.so`
   sha1 `4b6ad78d7e642f3c6c68accea0e2d282e4613fee`。
 - 真机（Redmi / Android 17 / arm64-v8a）跑过 12 项：copy 同卷/跨镜像/ISO、
@@ -147,7 +147,7 @@ if(sdir==ddir && !strcasecmp(sname,dname)) return IMG_EINVAL;   /* 自己改自�
 - 适用对象：`copy` / `move` 的目标文件名、`rename` 的新名字、目录名。
 - 只对 **NTFS/FAT 目标**校验；宿主目标按宿主规则（ext4 可用 `:` 等）。
 - 失败码：新增稳定码 **`NAME-INVALID`**（或 `COPY-NAME-INVALID`），
-  文案中英写入 `app/i18n/strings.json`，并在 `check_i18n.py` 的 EXTRA 里登记。
+  文案中英写入 `Icdqcow2/i18n/strings.json`，并在 `check_i18n.py` 的 EXTRA 里登记。
 - **必须在任何写动作之前拒绝**（零副作用），测试要断言盘上没多出东西。
 - 验收：新增 `tests/name-test.py`（或并入 `fileops-test`）：
   `a:b.txt` / `CON` / `a.` / `a ` / `a?b` 复制/改名到 NTFS、FAT 都报 `NAME-INVALID`；
@@ -250,7 +250,7 @@ rm     "<path>" [--recursive=true] [--allow_host_delete=true]
 
 - **每镜像串行队列**（进度是进程级单例；建议先全局串行）。
 - **SAF 只能读**；写盘要真实路径 + `MANAGE_EXTERNAL_STORAGE`。
-- 错误文案按 `error_code` 查 `app/i18n/strings.json`（47/99/79）。
+- 错误文案按 `error_code` 查 `Icdqcow2/i18n/strings.json`（47/99/80）。
 - 冲突对话框：跳过 / 保留两者（`conflict=rename`）/ 替换（二次确认）。
 - 删除/跨卷移动/宿主删源都要二次确认。
 - 大目录复制用**不确定进度**（无总字节），显示已处理文件数 + 当前项。
@@ -292,17 +292,17 @@ APK：
 
 ```bash
 for abi in arm64-v8a armeabi-v7a x86_64; do
-  cmake -S /workspace/app/jni -B /workspace/build-android/jni-$abi \
+  cmake -S /workspace/Icdqcow2/jni -B /workspace/build-android/jni-$abi \
     -DCMAKE_TOOLCHAIN_FILE=/workspace/imgtool-android/cmake/android-arm64host.cmake \
     -DNDK_ROOT=/workspace/android-ndk/android-ndk-r28c -DIMG_ANDROID_ABI=$abi -DIMG_ANDROID_API=28 \
     -DIMG_ANDROID_STAGE=/workspace/build-android/stage/$abi \
     -DIMGTOOL_ROOT=/workspace/imgtool-android -DIMGTOOL_LIB=/workspace/build-android/$abi/libimgtool.so \
     -DIMGAPP_BUILD_TEST=OFF
   cmake --build /workspace/build-android/jni-$abi -j8
-  cp /workspace/build-android/$abi/libimgtool.so   /workspace/app/testbench/app/src/main/jniLibs/$abi/
-  cp /workspace/build-android/jni-$abi/libimgapp.so /workspace/app/testbench/app/src/main/jniLibs/$abi/
+  cp /workspace/build-android/$abi/libimgtool.so   /workspace/Icdqcow2/testbench/app/src/main/jniLibs/$abi/
+  cp /workspace/build-android/jni-$abi/libimgapp.so /workspace/Icdqcow2/testbench/app/src/main/jniLibs/$abi/
 done
-cd /workspace/app/testbench && /workspace/gradle/gradle-8.11.1/bin/gradle :app:assembleDebug --no-daemon
+cd /workspace/Icdqcow2/testbench && /workspace/gradle/gradle-8.11.1/bin/gradle :app:assembleDebug --no-daemon
 ```
 
 ### 7.3 adb（每次调用都会被回收）
@@ -326,8 +326,8 @@ adb shell true
 | `docs/工具总结-2026-10-23.md` | 能力地图/契约/限制/测试数字 |
 | `docs/接手必读-2026-10-23.md` | 历史决策、坑、真机证据 |
 | `docs/NTFS移动改名-规范与实现对照.md` | MS-FSA 对照 |
-| `app/docs/工具能力与App集成手册.md` | 逐命令/错误码/§21.11.13 新契约 |
-| `app/i18n/strings.json` | 47 命令/99 参数/80 错误码中英文案 |
+| `Icdqcow2/docs/工具能力与App集成手册.md` | 逐命令/错误码/§21.11.13 新契约 |
+| `Icdqcow2/i18n/strings.json` | 47 命令/99 参数/80 错误码中英文案 |
 
 ---
 
