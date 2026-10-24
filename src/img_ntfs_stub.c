@@ -151,3 +151,9 @@ int img_ntfs_copy_xattrs(img_ntfs_fs *src_fs, const char *src_abs,
                          img_ntfs_fs *dst_fs, const char *dst_abs, int *count){
     (void)src_fs;(void)src_abs;(void)dst_fs;(void)dst_abs;(void)count; return NA;
 }
+
+int img_ntfs_rm_tree(img_ntfs_fs *fs, const char *abs_path, int *removed){
+    (void)fs;(void)abs_path;
+    if(removed) *removed=0;
+    return NA;
+}
