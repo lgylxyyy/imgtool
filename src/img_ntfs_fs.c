@@ -2118,8 +2118,19 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,
     ni=NULL; spar=NULL;
     u64 moved_ino = (u64)(sref & MFT_REF_MASK_CPU);
     free(du);
+    if(getenv("IMG_NTFS_FS_DEBUG")) fprintf(stderr,"  [mvp] ntfs_delete dr=%d errno=%d\n",dr,errno);
     if(dr!=0){
         int e=errno;
+        /* ★ 大小写改名：libntfs-3g 的 ntfs_link 可能把同 inode 的旧 $FILE_NAME
+         *   直接改成新写法（等于原地改名），于是随后按旧名 ntfs_delete 得到
+         *   ENOENT。这不是失败 —— 只要新位置确实指向同一条记录，就是成功。*/
+        if(e==ENOENT){
+            u64 dino=0; bool dd=false;
+            if(path_ino(fs,dst_abs,&dino,&dd)==IMG_OK && dino==moved_ino){
+                free(su);
+                return verify_move_result(fs, src_abs, dst_abs, moved_ino, isdir);
+            }
+        }
         img_ev ev;
         if(img_ev_init(&ev,IMG_LV_ERROR,"ntfs","move_delete_fail",IMG_EIO,"删旧目录项失败")){
             img_ev_str(&ev,"src",src_abs); img_ev_str(&ev,"dst",dst_abs);
@@ -2131,7 +2142,9 @@ int img_ntfs_move_path(img_ntfs_fs *fs,const char *src_abs,const char *dst_abs,
     free(su);
     /* ④ ★ 写后自证：新位置查得到、记录就是原来那条、旧位置查不到。
      *    没这一步的话，"父目录是幽灵"会一路报成功（2026-10-23 真盘事故）。*/
-    return verify_move_result(fs, src_abs, dst_abs, moved_ino, isdir);
+    { int vr=verify_move_result(fs, src_abs, dst_abs, moved_ino, isdir);
+      if(getenv("IMG_NTFS_FS_DEBUG")) fprintf(stderr,"  [mvp] verify=%d\n",vr);
+      return vr; }
 }
 
 /* 卷是否被标脏。用【只读】挂载 —— 脏卷本身能只读挂上，我们要读的就是它的 flags。

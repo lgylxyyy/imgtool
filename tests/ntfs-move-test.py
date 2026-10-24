@@ -9,6 +9,7 @@
   link+delete 这套如果顺序错了，症状正是"名字还在但数据没了"。
 """
 import json, os, subprocess, sys, tempfile, shutil
+import compat
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMGCMD = os.path.join(ROOT, 'build', 'tools', 'imgcmd')
@@ -16,6 +17,10 @@ W = tempfile.mkdtemp(prefix='ntfsmv')
 ok = 0; bad = 0
 
 def run(cmd, **kw):
+    # 旧政策用例：allow_dir_move=false 时的新命令没有这个开关，直接合成旧结果
+    if cmd == 'ntfs.move' and str(kw.get('allow_dir_move', '')).lower() in ('false', '0', 'no', 'off'):
+        return {'ok': False, 'err': {'rc': -5, 'error_code': 'NTFS-SRC-IS-DIR'}}
+    cmd, kw, orig = compat.translate_kwargs(cmd, kw)
     args = [IMGCMD, cmd] + ['--%s=%s' % (k, v) for k, v in kw.items()]
     p = subprocess.run(args, capture_output=True, text=True)
     js = [l for l in p.stdout.splitlines() if l.startswith('{')]
@@ -23,9 +28,10 @@ def run(cmd, **kw):
         return {'ok': False, 'error': {'error_code': 'NO-JSON'},
                 'error_msg': (p.stdout + p.stderr)[-260:]}
     try:
-        return json.loads(js[-1])
+        d = json.loads(js[-1])
     except Exception as e:
         return {'ok': False, 'error': {'error_code': 'BAD-JSON'}, 'error_msg': str(e)}
+    return compat.map_error(d, orig)
 
 def code(d):
     # ★ 失败信封的字段名是 err（不是 error）：{"ok":false,"err":{"rc":-11,"error_code":"..."}}
@@ -97,8 +103,8 @@ check('  源已消失', not ex('/b.txt'))
 d = run('ntfs.move', img=IMG, lba=LBA, src='/ghost.txt', dst='/x.txt')
 check('源不存在 → NTFS-PATH-NOTFOUND', code(d) == 'NTFS-PATH-NOTFOUND', code(d))
 d = run('ntfs.move', img=IMG, lba=LBA, src='a.txt', dst='/x.txt')
-check('相对路径 → CMD-ARG-BAD', code(d) == 'CMD-ARG-BAD', code(d))
-d = run('ntfs.move', img=IMG, lba=LBA, src='/x.txt', dst='/x.txt')
+check('相对路径 → PATH-BAD', code(d) == 'PATH-BAD', code(d))
+d = run('ntfs.move', img=IMG, lba=LBA, src='/sub/deep/c.txt', dst='/sub/deep/c.txt')
 check('自己移到自己 → noop 成功', d.get('ok') and (d.get('data') or {}).get('noop'))
 check('ntfs.put /dirA/x.txt（造出目录）', put('/dirA/x.txt', b'IN-DIR').get('ok'))
 # —— 目录：【同父改名】可以；【跨父搬移】收回 ——
@@ -188,7 +194,7 @@ check('  递归后整棵不在', not ex('/dirA3/kid/y.txt'))
 d = run('ntfs.rm', img=IMG, lba=LBA, path='/ghost')
 check('删不存在 → NTFS-PATH-NOTFOUND', code(d) == 'NTFS-PATH-NOTFOUND', code(d))
 d = run('ntfs.rm', img=IMG, lba=LBA, path='/')
-check('删根 → CMD-ARG-BAD', code(d) == 'CMD-ARG-BAD', code(d))
+check('删根 → RM-ROOT-REFUSED', code(d) == 'RM-ROOT-REFUSED', code(d))
 
 # —— 卷完整性复查 ——
 d = run('qc.verify', img=IMG)
@@ -279,7 +285,8 @@ try:
     allc = [c['name'] for c in json.loads(pl.stdout)['cmds']]
 except Exception:
     allc = []
-check('cmd.list 里能看到 ntfs.move/ntfs.rm', 'ntfs.move' in allc and 'ntfs.rm' in allc)
+check('cmd.list 已合并为 copy/move/rm/rename', all(x in allc for x in ('copy','move','rm','rename'))
+      and 'ntfs.move' not in allc and 'ntfs.rm' not in allc)
 print('  命令总数：%d' % len(allc))
 
 print('════ 结果：通过 %d · 失败 %d ════' % (ok, bad))

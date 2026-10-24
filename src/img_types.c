@@ -21,6 +21,9 @@ const char *img_strerror(int e){
     case IMG_ECYCLE:     return "会造出目录环（搬进自己或自己的子树）";
     case IMG_ESAMEFILE:  return "源和目标是同一个文件";
     case IMG_ENAMETOOLONG:return "文件名超过长度上限";
+    case IMG_EPARTIAL:   return "复制成功但删除源失败（两份都在）";
+    case IMG_EREFUSED:   return "按安全策略拒绝";
+    case IMG_EREADONLY:  return "目标是只读容器";
     default:             return "未知错误";
     }
 }

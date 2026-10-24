@@ -49,6 +49,9 @@ typedef enum {
     IMG_ECYCLE        = -17,  /* 会造环：把目录搬进它自己/它的子树 */
     IMG_ESAMEFILE     = -18,  /* 源和目标是同一个文件（会边读边覆盖） */
     IMG_ENAMETOOLONG  = -19,  /* 文件名超过文件系统上限（NTFS/FAT 都是 255 字符） */
+    IMG_EPARTIAL      = -20,  /* 移动：复制成功但删源失败（两份都在） */
+    IMG_EREFUSED      = -21,  /* 政策拒绝（如未允许删宿主文件、拒绝删根目录） */
+    IMG_EREADONLY     = -22,  /* 目标是只读容器（ISO/WIM/ESD） */
 } img_err_t;
 
 const char *img_strerror(int err);

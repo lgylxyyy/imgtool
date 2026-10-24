@@ -30,6 +30,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import compat
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMGCMD = os.path.join(ROOT, 'build', 'tools', 'imgcmd')
@@ -43,10 +44,12 @@ _spec.loader.exec_module(invlib)
 
 
 def run(cmd, **kw):
+    cmd, kw, orig = compat.translate_kwargs(cmd, kw)
     args = [IMGCMD, cmd] + ['--%s=%s' % (k, v) for k, v in kw.items()]
     p = subprocess.run(args, capture_output=True, text=True)
     js = [l for l in p.stdout.splitlines() if l.startswith('{')]
-    return json.loads(js[-1]) if js else {'ok': False, 'error_msg': (p.stdout + p.stderr)[-200:]}
+    d = json.loads(js[-1]) if js else {'ok': False, 'error_msg': (p.stdout + p.stderr)[-200:]}
+    return compat.map_error(d, orig)
 
 
 def code(d):

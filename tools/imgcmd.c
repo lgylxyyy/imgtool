@@ -298,6 +298,8 @@ static void on_progress(void *ud, const img_progress_t *p){
 static void print_help(const img_cmd *c){
     if(!c){ printf("没有这个命令\n"); return; }
     printf("%s  (since %s)\n  %s\n", c->name, c->since?c->since:"", c->help?c->help:"");
+    if(c->usage && c->usage[0])
+        printf("  %s: imgcmd %s\n", lang_en()?"Usage":"用法", c->usage);
     if(c->nargs){
         printf("  %s：\n", lang_en()?"Arguments":"参数");
         for(int i=0;i<c->nargs;i++){
@@ -324,6 +326,7 @@ static void print_help(const img_cmd *c){
 int main(int argc, char **argv){
     const char *cmd=NULL,*log=NULL,*lvl=NULL,*helpcmd=NULL,*logmax=NULL,*progress=NULL,*iot=NULL;
     bool list=false, ro=false;
+    const char *posv[32]; int npos=0;      /* 位置参数：copy <src> <dst> */
     ui_t ui={false};
     img_args *args=img_args_new();
     if(!args) return 1;
@@ -332,8 +335,14 @@ int main(int argc, char **argv){
 
     for(int i=1;i<argc;i++){
         const char *a=argv[i];
-        if(a[0]!='-'){ if(!cmd){ cmd=a; continue; }
-            fprintf(stderr,"多余的位置参数：%s\n",a); img_args_free(args); return 2; }
+        if(a[0]!='-'){
+            if(!cmd){ cmd=a; continue; }
+            if(npos>=(int)(sizeof posv/sizeof posv[0])){
+                fprintf(stderr,"位置参数过多：%s\n",a); img_args_free(args); return 2;
+            }
+            posv[npos++]=a;
+            continue;
+        }
         const char *eq=strchr(a,'=');
         char key[64]; const char *val=eq?eq+1:"";
         if(eq){ size_t n=(size_t)(eq-a-2); if(n>=sizeof key) n=sizeof key-1; memcpy(key,a+2,n); key[n]=0; }
@@ -364,6 +373,29 @@ int main(int argc, char **argv){
         if(img_args_set(args,key,val)!=IMG_OK){
             fprintf(stderr,"参数 %s 过长（单个值上限 2047 字节）或名称非法\n",key);
             img_args_free(args); return 2;
+        }
+    }
+
+    /* 位置参数：按命令表顺序填，已被 --name=value 占用的跳过。
+     * 例：imgcmd copy "/a.qcow2!p3:/x" "/b.qcow2!p3:/y" --conflict=rename */
+    if(cmd && npos){
+        const img_cmd *cc=img_cmd_find(cmd);
+        if(!cc || cc->npos<=0){
+            fprintf(stderr,"命令 %s 不支持位置参数；请用 --参数=值（--help=%s 看用法）\n",cmd,cmd);
+            img_args_free(args); return 2;
+        }
+        int pi=0;
+        for(int k=0;k<npos;k++){
+            while(pi<cc->npos && img_args_get(args,cc->args[pi].name)) pi++;
+            if(pi>=cc->npos){
+                fprintf(stderr,"位置参数过多：%s（%s 最多 %d 个）\n",posv[k],cmd,cc->npos);
+                img_args_free(args); return 2;
+            }
+            if(img_args_set(args,cc->args[pi].name,posv[k])!=IMG_OK){
+                fprintf(stderr,"参数 %s 过长或非法\n",cc->args[pi].name);
+                img_args_free(args); return 2;
+            }
+            pi++;
         }
     }
 
@@ -411,6 +443,22 @@ int main(int argc, char **argv){
                                   : img_log_open(log,img_log_level(),mb,1);
         if(rc!=IMG_OK) fprintf(stderr,"警告：日志无法打开（%s），继续执行\n",log);
         else img_log_session("imgcmd", cmd, img_args_get(args,"img"), 0);   /* 会话头（工具/命令/镜像）*/
+    }
+
+    /* ★ 先判命令存在，再打开 --img：否则旧命令名 + 不存在的镜像会报
+     *   IMG-OPEN-FAIL，看起来像"镜像坏了"，而不是"命令没了"。
+     *   放在 ui/卡片上下文初始化之后，保证卡片也有建议文案。*/
+    if(!img_cmd_find(cmd)){
+        img_result r; img_result_begin(&r,cmd);
+        img_result_fail(&r,IMG_ENOENT,"CMD-NOTFOUND",cmd,"没有这个命令",
+                        "用 --list 查看可用命令；文件操作已合并为 copy/move/rename/rm");
+        char b[1024]; int n=img_result_json(&r,b,sizeof b);
+        if(n>0) fwrite(b,1,(size_t)n,stdout);
+        img_error_info_t ei; img_error_info(&ei);
+        /* 命令不存在是"用法级"致命错：卡片直接出到 stderr（非 tty 也出），
+         * 否则机器模式下只剩一行码，用户不知道旧命令已经合并。*/
+        if(ei.code[0]) render_card(&ei, true);
+        img_args_free(args); return 1;
     }
 
     const char *img=img_args_get(args,"img");

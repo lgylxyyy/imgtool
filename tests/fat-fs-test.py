@@ -11,6 +11,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import compat
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 T = os.path.join(ROOT, "build", "tools")
@@ -38,12 +39,15 @@ def check(cond, name, why=""):
 
 
 def run(args, want_ok=True):
+    args, orig = compat.translate_argv(args)
     p = subprocess.run([IMGCMD] + args, capture_output=True, text=True)
     out = p.stdout.strip().splitlines()
     try:
         j = json.loads(out[-1]) if out else {}
     except Exception:
         j = {"raw": p.stdout + p.stderr}
+    if orig:
+        j = compat.map_error(j, orig)
     if want_ok and not j.get("ok"):
         raise RuntimeError("命令失败: %s\n%s" % (" ".join(args), json.dumps(j, ensure_ascii=False)))
     return j
@@ -265,14 +269,15 @@ def main():
         check(f.find("/Top/Boot/b.txt") is not None, "移动后内部路径仍可解析")
 
         print("\n════ 3. 拒绝路径 ════")
+        # 新语义 = shell mv：目标是目录 ⇒ 放进去（不再把"目录已存在"当冲突）
         r = cmd("fat.move", "--img=" + img, "--lba=%d" % ESP_LBA,
-                "--src=/Top/Boot/b.txt", "--dst=/Top", want_ok=False)
-        check(r.get("err", {}).get("error_code") == "FAT-ENTRY-EXISTS",
-              "目标已存在 → FAT-ENTRY-EXISTS", json.dumps(r, ensure_ascii=False))
+                "--src=/Top/Boot/b.txt", "--dst=/Top")
+        check(r.get("ok") and (r.get("data") or {}).get("dst_path") == "/Top/b.txt",
+              "目标是目录 ⇒ 放进目录（/Top/b.txt）", json.dumps(r, ensure_ascii=False))
         r = cmd("fat.move", "--img=" + img, "--lba=%d" % ESP_LBA,
                 "--src=/Top", "--dst=/Top/Boot/inner", want_ok=False)
         check(r.get("err", {}).get("error_code") == "FAT-MOVE-BAD",
-              "移进自己的子树 → FAT-MOVE-BAD", json.dumps(r, ensure_ascii=False))
+              "移进自己的子树 → FAT-MOVE-BAD（compat 映射）", json.dumps(r, ensure_ascii=False))
         r = cmd("fat.move", "--img=" + img, "--lba=%d" % ESP_LBA,
                 "--src=/nope.txt", "--dst=/x.txt", want_ok=False)
         check(r.get("err", {}).get("error_code") == "FAT-ENTRY-NOTFOUND",
@@ -282,10 +287,10 @@ def main():
         r = cmd("fat.rm", "--img=" + img, "--lba=%d" % ESP_LBA, "--path=/Top", want_ok=False)
         check(r.get("err", {}).get("error_code") == "FAT-DIR-NOT-EMPTY",
               "删非空目录 → FAT-DIR-NOT-EMPTY（不递归）")
-        r = cmd("fat.rm", "--img=" + img, "--lba=%d" % ESP_LBA, "--path=/Top/Boot/b.txt")
+        r = cmd("fat.rm", "--img=" + img, "--lba=%d" % ESP_LBA, "--path=/Top/b.txt")
         check(r.get("ok"), "删文件成功")
         f = echo()
-        check(f.find("/Top/Boot/b.txt") is None, "盘上确实没有这个文件了")
+        check(f.find("/Top/b.txt") is None, "盘上确实没有这个文件了")
         r = cmd("fat.rm", "--img=" + img, "--lba=%d" % ESP_LBA, "--path=/Top/Boot")
         check(r.get("ok"), "删空目录成功")
         r = cmd("fat.rm", "--img=" + img, "--lba=%d" % ESP_LBA, "--path=/Top/Boot",

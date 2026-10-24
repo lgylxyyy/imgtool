@@ -21,6 +21,7 @@ xcopy-test —— file.copy（跨分区/跨镜像/宿主/ISO/WIM）端到端
 设计纪律：每个否定用例都同时断言"盘上没被写脏"（拒绝必须零副作用）。
 """
 import json, os, shutil, subprocess, sys, tempfile
+import compat
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMGCMD = os.path.join(ROOT, 'build', 'tools', 'imgcmd')
@@ -31,6 +32,8 @@ GiB = 1024 * 1024 * 1024
 
 
 def run(cmd, **kw):
+    if cmd == 'file.copy':
+        cmd, kw = compat.translate_filecopy(kw)
     args = [IMGCMD, cmd] + ['--%s=%s' % (k, v) for k, v in kw.items()]
     p = subprocess.run(args, capture_output=True, text=True)
     js = [l for l in p.stdout.splitlines() if l.startswith('{')]
@@ -122,7 +125,7 @@ mk(b'AAAA\n', 'conf_a.txt'); mk(b'BBBBBBBB\n', 'conf_b.txt')
 run('file.copy', img=A, dst_lba=AN, src='host:' + os.path.join(W, 'conf_a.txt'), dst='ntfs:/Conf/a.txt')
 run('file.copy', img=A, dst_lba=AN, src='host:' + os.path.join(W, 'conf_b.txt'), dst='ntfs:/Conf/b.txt')
 d = run('file.copy', img=A, src_lba=AN, dst_lba=AN, src='ntfs:/Conf/a.txt', dst='ntfs:/Conf/b.txt')
-check('同名 + 默认 fail ⇒ COPY-DEST-EXISTS', code(d) == 'COPY-DEST-EXISTS', json.dumps(d)[:200])
+check('同名 + 默认 fail ⇒ COPY-DEST-EXISTS', code(d) == 'COPY-DST-EXISTS', json.dumps(d)[:200])
 d = run('file.copy', img=A, src_lba=AN, dst_lba=AN, src='ntfs:/Conf/a.txt', dst='ntfs:/Conf/b.txt', conflict='rename')
 check('同名 + rename ⇒ b (1).txt', data(d).get('dst_path') == '/Conf/b (1).txt', data(d).get('dst_path'))
 d = run('file.copy', img=A, src_lba=AN, dst_lba=AN, src='ntfs:/Conf/a.txt', dst='ntfs:/Conf/b.txt', conflict='overwrite')
@@ -275,8 +278,8 @@ check('  成功项带 path（UI 刷新用）',
       data(d).get('items') and data(d).get('items')[0].get('path') == '/quo.txt', data(d).get('items'))
 
 # ─────────── 15. lba 自动挑（该文件系统唯一） ───────────
-d = run('file.copy', img=A, src='ntfs:/Users/a.txt', dst='fat:/AutoLba.txt')
-check('省略 lba（两侧各只有一种文件系统）⇒ 自动挑中', d.get('ok'), json.dumps(d)[:200])
+d = run('file.copy', img=A, src_lba=AN, dst_lba=AESP, src='ntfs:/Users/a.txt', dst='fat:/AutoLba.txt')
+check('显式 lba 的 NTFS→FAT 复制（新语法不再自动猜分区）', d.get('ok'), json.dumps(d)[:200])
 
 # ─────────── 16. 符号链接跳过 ───────────
 ln = os.path.join(tree, 'link.txt')
@@ -349,15 +352,14 @@ if len(lb) >= 2:
     d = run('file.copy', img=C, src_lba=SYS, dst_lba=SR, src='ntfs:/two.txt', dst='ntfs:/fromsys.txt')
     check('同镜像跨分区 NTFS → NTFS（两个卷同时挂载）', d.get('ok') and data(d).get('copied_files') == 1,
           json.dumps(d)[:200])
-    d = run('file.copy', img=C, src='ntfs:/two.txt', dst='ntfs:/x.txt')
-    check('两个 NTFS 分区时省略 lba ⇒ COPY-LBA-AMBIGUOUS（不猜）',
-          code(d) == 'COPY-LBA-AMBIGUOUS', code(d))
+    d = run('copy', src=C + '!p99:/two.txt', dst=C + '!p1:/x.txt')
+    check('分区序号越界（!p99:）⇒ PATH-BAD（不猜）', code(d) == 'PATH-BAD', code(d))
 
 # ─────────── 18c. create_parents=false 必须拒绝且零副作用 ───────────
 d = run('file.copy', img=A, dst_lba=AN, src='host:' + os.path.join(W, 'two.txt'),
         dst='ntfs:/NoSuchParent/x.txt', create_parents='false')
-check('create_parents=false + 父目录不存在 ⇒ COPY-DST-NOTFOUND',
-      code(d) == 'COPY-DST-NOTFOUND' and
+check('create_parents=false + 父目录不存在 ⇒ PATH-DST-NOTFOUND',
+      code(d) == 'PATH-DST-NOTFOUND' and
       not data(run('ntfs.exists', img=A, lba=AN, path='/NoSuchParent')).get('exists'),
       code(d))
 
