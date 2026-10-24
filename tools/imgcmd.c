@@ -324,6 +324,7 @@ static void print_help(const img_cmd *c){
 int main(int argc, char **argv){
     const char *cmd=NULL,*log=NULL,*lvl=NULL,*helpcmd=NULL,*logmax=NULL,*progress=NULL,*iot=NULL;
     bool list=false, ro=false;
+    const char *posv[32]; int npos=0;      /* 位置参数：copy <src> <dst> */
     ui_t ui={false};
     img_args *args=img_args_new();
     if(!args) return 1;
@@ -332,8 +333,14 @@ int main(int argc, char **argv){
 
     for(int i=1;i<argc;i++){
         const char *a=argv[i];
-        if(a[0]!='-'){ if(!cmd){ cmd=a; continue; }
-            fprintf(stderr,"多余的位置参数：%s\n",a); img_args_free(args); return 2; }
+        if(a[0]!='-'){
+            if(!cmd){ cmd=a; continue; }
+            if(npos>=(int)(sizeof posv/sizeof posv[0])){
+                fprintf(stderr,"位置参数过多：%s\n",a); img_args_free(args); return 2;
+            }
+            posv[npos++]=a;
+            continue;
+        }
         const char *eq=strchr(a,'=');
         char key[64]; const char *val=eq?eq+1:"";
         if(eq){ size_t n=(size_t)(eq-a-2); if(n>=sizeof key) n=sizeof key-1; memcpy(key,a+2,n); key[n]=0; }
@@ -364,6 +371,27 @@ int main(int argc, char **argv){
         if(img_args_set(args,key,val)!=IMG_OK){
             fprintf(stderr,"参数 %s 过长（单个值上限 2047 字节）或名称非法\n",key);
             img_args_free(args); return 2;
+        }
+    }
+
+    /* 位置参数：按命令表顺序填，已被 --name=value 占用的跳过。
+     * 例：imgcmd copy "/a.qcow2!p3:/x" "/b.qcow2!p3:/y" --conflict=rename */
+    if(cmd && npos){
+        const img_cmd *cc=img_cmd_find(cmd);
+        if(cc){
+            int pi=0;
+            for(int k=0;k<npos;k++){
+                while(pi<cc->nargs && img_args_get(args,cc->args[pi].name)) pi++;
+                if(pi>=cc->nargs){
+                    fprintf(stderr,"位置参数过多：%s（命令 %s 只有 %d 个参数）\n",posv[k],cmd,cc->nargs);
+                    img_args_free(args); return 2;
+                }
+                if(img_args_set(args,cc->args[pi].name,posv[k])!=IMG_OK){
+                    fprintf(stderr,"参数 %s 过长或非法\n",cc->args[pi].name);
+                    img_args_free(args); return 2;
+                }
+                pi++;
+            }
         }
     }
 

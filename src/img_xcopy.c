@@ -645,6 +645,54 @@ static int dst_write_file(xep *d, const char *final, const img_stream *src,
     return IMG_ENOTSUP;
 }
 
+/* 目标目录条目数（给 UI 的 parent_total；失败返回 0 不致命） */
+typedef struct { uint64_t n; } cnt_ud;
+static void cnt_cb(void *ud, const char *name, bool is_dir, uint64_t size){
+    (void)name;(void)is_dir;(void)size; ((cnt_ud*)ud)->n++;
+}
+static uint64_t dst_count(xep *d, const char *dir){
+    if(d->loc.kind==IMG_XK_HOST){
+        DIR *dp=opendir(dir);
+        if(!dp) return 0;
+        uint64_t n=0; struct dirent *de;
+        while((de=readdir(dp))) if(strcmp(de->d_name,".")&&strcmp(de->d_name,"..")) n++;
+        closedir(dp);
+        return n;
+    }
+    cnt_ud u={0};
+    if(d->loc.kind==IMG_XK_NTFS) (void)img_ntfs_list_dir(d->ntfs,dir,cnt_cb,&u);
+    else if(d->loc.kind==IMG_XK_FAT) (void)img_fat32_list_dir(d->fat,dir,cnt_cb,&u);
+    return u.n;
+}
+
+/* NTFS 大小写不敏感：把用户写的路径换成盘上真实大小写，
+ * 否则 libntfs-3g 的精确查找会 ENOENT（move_path 内部用的就是精确查找）。*/
+typedef struct { const char *want; char *out; size_t cap; int found; } case_ud;
+static void case_cb(void *ud, const char *name, bool is_dir, uint64_t size){
+    (void)is_dir;(void)size;
+    case_ud *c=(case_ud*)ud;
+    if(c->found || !name) return;
+    if(!strcasecmp(name,c->want)){ snprintf(c->out,c->cap,"%s",name); c->found=1; }
+}
+static int actual_case_path(xep *e, const char *path, char *out, size_t cap){
+    if(e->loc.kind!=IMG_XK_NTFS){ snprintf(out,cap,"%s",path); return IMG_OK; }
+    char dir[4096], name[1024];
+    parent_of(path,dir,sizeof dir);
+    snprintf(name,sizeof name,"%s",base_of(path));
+    if(!name[0] || !strcmp(name,".")){ xstrlcpy(out,path,cap); return IMG_OK; }
+    case_ud c={name,out,cap,0};
+    if(img_ntfs_list_dir(e->ntfs,dir,case_cb,&c)==IMG_OK && c.found){
+        size_t dl=strlen(dir), nl=strlen(name);
+        if(strcmp(dir,"/")==0){
+            if(nl+2<=cap){ out[0]='/'; memcpy(out+1,name,nl+1); return IMG_OK; }
+        } else if(dl+nl+2<=cap){
+            memcpy(out,dir,dl); out[dl]='/'; memcpy(out+dl+1,name,nl+1); return IMG_OK;
+        }
+    }
+    xstrlcpy(out,path,cap);
+    return IMG_OK;
+}
+
 /* ================= 递归复制 ================= */
 /* 两个端点是不是"同一个盘 + 同一个分区 + 同一种文件系统"（决定能否共享挂载/判环） */
 static bool same_volume(const xep *a, const xep *b){
@@ -787,7 +835,8 @@ static int copy_file(xctx *c, const char *spath, const char *dpath, bool top){
     rc=src_open_stream(c->s,spath,&st,&holder);
     if(rc!=IMG_OK){ c->st->side=1; return rc; }
     if(c->prog) img_prog_item(c->prog,spath);
-    rc=dst_write_file(c->d,target,&st,&meta,c->o,c->prog,existed,NULL,NULL);
+    bool replaced=false;
+    rc=dst_write_file(c->d,target,&st,&meta,c->o,c->prog,existed,NULL,&replaced);
     src_close_stream(c->s,holder);
     if(rc!=IMG_OK){ c->st->side=2; return rc; }
     /* NTFS → NTFS 保留命名数据流（ADS）；FAT/宿主没有这个概念，只能丢弃。*/
@@ -799,7 +848,15 @@ static int copy_file(xctx *c, const char *spath, const char *dpath, bool top){
     }
     c->st->files++;
     c->st->bytes+=meta.size;
-    if(top) xstrlcpy(c->st->final_path,target,sizeof c->st->final_path);
+    if(top){
+        xstrlcpy(c->st->final_path,target,sizeof c->st->final_path);
+        c->st->replaced=replaced;
+        c->st->top_size=meta.size;
+        if(c->d->loc.kind==IMG_XK_NTFS){
+            uint64_t ino=0; bool id=false;
+            if(img_ntfs_verify_path(c->d->ntfs,target,&ino,&id)==IMG_OK) c->st->top_ino=ino;
+        }
+    }
     return IMG_OK;
 }
 
@@ -970,6 +1027,11 @@ int img_xcopy_run(const img_xloc *src, const img_xloc *dst,
         xctx c; memset(&c,0,sizeof c);
         c.s=&se; c.d=&de; c.o=&o; c.prog=prog; c.st=st; c.max_depth=o.max_depth;
         rc=copy_node(&c,se.root,de.loc.path,0,true);
+        if(rc==IMG_OK && st->final_path[0]){
+            char par[2048]; xstrlcpy(par,st->final_path,sizeof par);
+            char *sl=strrchr(par,'/');
+            if(sl){ if(sl==par) par[1]=0; else *sl=0; st->parent_total=dst_count(&de,par); }
+        }
     }
     if(rc==IMG_OK && prog) img_prog_done(prog,"复制完成");
 
@@ -977,5 +1039,312 @@ out:
     ep_close(&se);
     ep_close(&de);
     if(shared) img_ctx_close(shared);
+    return rc;
+}
+
+/* ================= 统一移动 / 删除（2026-10-24） ================= */
+
+/* 删除前拒绝这些"一删就全没"的宿主路径（即使调用方开了 allow_host_delete） */
+static bool host_dangerous(const char *p){
+    if(!p || !*p) return true;
+    static const char *bad[] = {
+        "/", "/storage", "/storage/emulated", "/storage/emulated/0",
+        "/sdcard", "/data", "/system", NULL
+    };
+    for(int i=0; bad[i]; i++) if(!strcmp(p,bad[i])) return true;
+    return false;
+}
+
+static int host_remove_count(const char *path, bool recursive, uint64_t *removed){
+    struct stat st;
+    if(lstat(path,&st)!=0) return IMG_ENOENT;
+    if(S_ISDIR(st.st_mode)){
+        if(!recursive){
+            if(rmdir(path)!=0) return (errno==ENOTEMPTY)?IMG_ESTATE:IMG_EIO;
+            if(removed) (*removed)++;
+            return IMG_OK;
+        }
+        DIR *d=opendir(path);
+        if(d){
+            struct dirent *de;
+            while((de=readdir(d))){
+                if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue;
+                char c[4096]; snprintf(c,sizeof c,"%s/%s",path,de->d_name);
+                int rc=host_remove_count(c,true,removed);
+                if(rc!=IMG_OK){ closedir(d); return rc; }
+            }
+            closedir(d);
+        }
+        if(rmdir(path)!=0) return IMG_EIO;
+        if(removed) (*removed)++;
+        return IMG_OK;
+    }
+    if(unlink(path)!=0) return IMG_EIO;
+    if(removed) (*removed)++;
+    return IMG_OK;
+}
+
+static int ep_remove(xep *e, const char *path, bool recursive, uint64_t *removed){
+    if(e->loc.kind==IMG_XK_HOST)
+        return host_remove_count(path,recursive,removed);
+    img_src_meta m; bool isdir=false;
+    int rc=src_stat(e,path,&isdir,&m);
+    if(rc!=IMG_OK) return rc;
+    if(e->loc.kind==IMG_XK_NTFS){
+        if(isdir){
+            if(!recursive){
+                rc=img_ntfs_rm(e->ntfs,path);
+                if(rc==IMG_OK && removed) (*removed)++;
+                return rc;
+            }
+            int n=0; rc=img_ntfs_rm_tree(e->ntfs,path,&n);
+            if(rc==IMG_OK && removed) *removed += (uint64_t)n;
+            return rc;
+        }
+        rc=img_ntfs_rm(e->ntfs,path);
+        if(rc==IMG_OK && removed) (*removed)++;
+        return rc;
+    }
+    if(e->loc.kind==IMG_XK_FAT){
+        if(isdir){
+            if(!recursive){
+                rc=img_fat32_rm(e->fat,path);
+                if(rc==IMG_OK && removed) (*removed)++;
+                return rc;
+            }
+            int n=0; rc=img_fat32_rm_tree(e->fat,path,&n);
+            if(rc==IMG_OK && removed) *removed += (uint64_t)n;
+            return rc;
+        }
+        rc=img_fat32_rm(e->fat,path);
+        if(rc==IMG_OK && removed) (*removed)++;
+        return rc;
+    }
+    return IMG_EREADONLY;
+}
+
+/* 宿主：按"父目录所在文件系统"判断能不能直接 rename。
+ * 不能用 realpath(文件) 比较 —— 那是判断"同一个文件"，不是"同一个盘"。*/
+static bool host_parent_dev(const char *p, dev_t *out){
+    char dir[4096]; parent_of(p,dir,sizeof dir);
+    if(!dir[0]){ snprintf(dir,sizeof dir,"/"); }
+    struct stat st;
+    while(stat(dir,&st)!=0 || !S_ISDIR(st.st_mode)){
+        char up[4096]; parent_of(dir,up,sizeof up);
+        if(!up[0] || !strcmp(up,dir)) break;
+        snprintf(dir,sizeof dir,"%s",up);
+    }
+    if(stat(dir,&st)!=0) return false;
+    *out=st.st_dev;
+    return true;
+}
+static bool loc_same_volume(const img_xloc *a, const img_xloc *b){
+    if(a->kind!=b->kind) return false;
+    if(a->kind==IMG_XK_HOST){
+        dev_t da=0, db=0;
+        if(!host_parent_dev(a->path,&da) || !host_parent_dev(b->path,&db)) return false;
+        return da==db;
+    }
+    if(a->kind!=IMG_XK_NTFS && a->kind!=IMG_XK_FAT) return false;
+    if(a->lba!=b->lba) return false;
+    char ra[PATH_MAX], rb[PATH_MAX];
+    if(realpath(a->img,ra) && realpath(b->img,rb)) return strcmp(ra,rb)==0;
+    return strcmp(a->img,b->img)==0;
+}
+
+int img_xmove_run(const img_xloc *src, const img_xloc *dst,
+                  const img_xmove_opts *opt, img_prog *prog,
+                  img_xmove_stats *st){
+    img_xmove_stats sink; if(!st) st=&sink;
+    memset(st,0,sizeof *st);
+    if(!src||!dst) return IMG_EINVAL;
+    img_xmove_opts o={ IMG_COPY_FAIL, true, true, true, false, true, XC_MAX_DEPTH };
+    if(opt) o=*opt;
+    if(o.max_depth<=0 || o.max_depth>256) o.max_depth=XC_MAX_DEPTH;
+
+    if(src->kind==IMG_XK_ISO || src->kind==IMG_XK_WIM) return IMG_EREADONLY;
+    if(dst->kind==IMG_XK_ISO || dst->kind==IMG_XK_WIM) return IMG_EREADONLY;
+
+    if(loc_same_volume(src,dst)){
+        xep se,de; memset(&se,0,sizeof se); memset(&de,0,sizeof de);
+        img_ctx *shared=NULL;
+        bool same_img=false;
+        if(src->kind==IMG_XK_NTFS || src->kind==IMG_XK_FAT){
+            char ra[PATH_MAX], rb[PATH_MAX];
+            if(realpath(src->img,ra) && realpath(dst->img,rb)) same_img=(strcmp(ra,rb)==0);
+            else same_img=(strcmp(src->img,dst->img)==0);
+        }
+        int rc=0;
+        if(same_img){
+            char err[256]={0};
+            shared=img_ctx_open(dst->img,true,false,err,sizeof err);
+            if(!shared) return IMG_ENOENT;
+        }
+        rc=ep_open(&de,dst,shared,true,NULL);
+        if(rc!=IMG_OK){ if(shared) img_ctx_close(shared); return rc; }
+        rc=ep_open(&se,src,shared,true,&de);
+        if(rc!=IMG_OK){ ep_close(&de); if(shared) img_ctx_close(shared); return rc; }
+
+        img_xcopy_opts co={ o.conflict, o.recursive, o.preserve_times, o.create_parents, false, o.max_depth };
+        xctx c; memset(&c,0,sizeof c);
+        c.s=&se; c.d=&de; c.o=&co; c.prog=prog; c.max_depth=o.max_depth;
+        img_xcopy_stats tmp; memset(&tmp,0,sizeof tmp); c.st=&tmp;
+
+        img_src_meta meta; bool isdir=false;
+        rc=src_stat(&se,se.root,&isdir,&meta);
+        if(getenv("IMG_XCOPY_DEBUG")) fprintf(stderr,"[mv] src_stat rc=%d root=%s\n",rc,se.root);
+        if(rc==IMG_OK){
+            char final[4096]; bool existed=false, ed=false;
+            rc=resolve_final(&c,se.root,de.loc.path,true,final,sizeof final,&existed,&ed);
+            if(getenv("IMG_XCOPY_DEBUG")) fprintf(stderr,"[mv] resolve rc=%d final=%s existed=%d\n",rc,final,existed);
+            char target[4096];
+            bool case_only=false;
+            if(rc==IMG_OK && isdir && is_under(&se,&de,se.root,final)){
+                rc=IMG_ECYCLE;   /* 目录搬进自己/自己的子树：写之前拒绝 */
+            }
+            if(rc==IMG_OK){
+                /* mv a a：no-op 成功（与 shell 行为一致）；必须在冲突判定之前。*/
+                if((se.loc.kind==IMG_XK_HOST && !strcmp(se.root,final)) ||
+                   (se.loc.kind!=IMG_XK_HOST && !strcasecmp(se.root,final) && !strcmp(se.root,final))){
+                    snprintf(st->mode,sizeof st->mode,"rename");
+                    st->files=isdir?0:1; st->dirs=isdir?1:0;
+                    st->bytes=isdir?0:meta.size;
+                    st->noop=true;
+                    size_t fl=strlen(final);
+                    if(fl>=sizeof st->final_path) fl=sizeof st->final_path-1;
+                    memcpy(st->final_path,final,fl); st->final_path[fl]=0;
+                    rc=IMG_OK;
+                    goto mv_done;
+                }
+                /* 大小写改名：NTFS 大小写不敏感，按"已存在"拒绝会把正常操作判死。*/
+                case_only = (se.loc.kind==IMG_XK_NTFS) &&
+                            !strcasecmp(se.root,final) && strcmp(se.root,final);
+            }
+            if(getenv("IMG_XCOPY_DEBUG")) fprintf(stderr,"[mv] case_only=%d kind=%d final=%s root=%s\n",(int)case_only,(int)se.loc.kind,final,se.root);
+            if(rc==IMG_OK && case_only){
+                snprintf(target,sizeof target,"%s",final);
+                existed=false;
+            } else if(rc==IMG_OK){
+                rc=apply_conflict(&c,final,&existed,&ed,isdir,target,sizeof target);
+            }
+            if(rc==IMG_OK && case_only){
+                st->case_only=true;
+                char sactual[4096];
+                actual_case_path(&se,se.root,sactual,sizeof sactual);
+                if(se.loc.kind==IMG_XK_NTFS)
+                    rc=img_ntfs_move_path(se.ntfs,sactual,target,true,true);
+                else rc=IMG_EEXISTS;
+            }
+            if(rc==IMG_OK && !case_only){
+                /* create_parents=false 且目标父目录不存在：必须在写之前拒绝，
+                 * 并把责任归到目标侧（否则会误报"源不存在"）。*/
+                if(!o.create_parents){
+                    char tdir[4096]; parent_of(target,tdir,sizeof tdir);
+                    bool td=false;
+                    if(tdir[0] && !dst_exists(&de,tdir,&td)){
+                        rc=IMG_ENOENT; st->side=2; goto mv_done;
+                    }
+                }
+                if(se.loc.kind==IMG_XK_NTFS){
+                    char sactual[4096];
+                    actual_case_path(&se,se.root,sactual,sizeof sactual);
+                    rc=img_ntfs_move_path(se.ntfs,sactual,target,
+                                          o.conflict==IMG_COPY_OVERWRITE && existed,true);
+                } else if(se.loc.kind==IMG_XK_FAT){
+                    if(o.conflict==IMG_COPY_OVERWRITE && existed){
+                        int rr=img_fat32_rm(se.fat,target);
+                        if(rr!=IMG_OK && rr!=IMG_ENOENT) rc=rr;
+                    }
+                    if(rc==IMG_OK) rc=img_fat32_rename(se.fat,se.root,target);
+                } else if(se.loc.kind==IMG_XK_HOST){
+                    if(o.create_parents){
+                        char pdir[4096]; parent_of(target,pdir,sizeof pdir);
+                        if(pdir[0]) host_mkdir_p(pdir,0755);
+                    }
+                    if(rename(se.root,target)!=0) rc=(errno==ENOENT)?IMG_ENOENT:IMG_EIO;
+                } else {
+                    rc=IMG_ENOTSUP;
+                }
+            }
+            if(rc==IMG_OK){
+                bool pd=false;
+                if(dst_exists(&de,target,&pd)==0) rc=IMG_ECORRUPT;   /* 写后自证 */
+                char par_s[4096], par_t[4096];
+                parent_of(se.root,par_s,sizeof par_s);
+                parent_of(target,par_t,sizeof par_t);
+                snprintf(st->mode,sizeof st->mode,"%s",
+                         strcmp(par_s,par_t)?"move":"rename");
+                st->deleted = true;      /* 同卷：旧名字已消失（no-op 在上面提前返回）*/
+                st->files = isdir?0:1;
+                st->dirs  = isdir?1:0;
+                st->bytes = isdir?0:meta.size;
+                size_t tl=strlen(target);
+                if(tl>=sizeof st->final_path) tl=sizeof st->final_path-1;
+                memcpy(st->final_path,target,tl); st->final_path[tl]=0;
+            }
+        }
+mv_done:
+        if(getenv("IMG_XCOPY_DEBUG")) fprintf(stderr,"[mv] final rc=%d\n",rc);
+        ep_close(&se); ep_close(&de);
+        if(shared) img_ctx_close(shared);
+        return rc;
+    }
+
+    /* ---- 跨卷 / 跨镜像 / 宿主↔镜像：复制 → 校验 → 删源 ---- */
+    if(src->kind==IMG_XK_HOST && !o.allow_host_delete) return IMG_EREFUSED;
+
+    /* 先看源是文件还是目录，决定复制是否允许、以及删源用哪种方式 */
+    xep se; memset(&se,0,sizeof se);
+    int rc=ep_open(&se,src,NULL,true,NULL);
+    if(rc!=IMG_OK) return rc;
+    img_src_meta smeta; bool sdir=false;
+    rc=src_stat(&se,se.root,&sdir,&smeta);
+    ep_close(&se);
+    if(rc!=IMG_OK) return rc;
+    if(sdir && !o.recursive) return IMG_ENOTSUP;
+
+    img_xcopy_opts co={ o.conflict, o.recursive, o.preserve_times, o.create_parents, false, o.max_depth };
+    img_xcopy_stats cs; memset(&cs,0,sizeof cs);
+    rc=img_xcopy_run(src,dst,&co,prog,&cs);
+    if(rc!=IMG_OK) return rc;
+    if(img_cancelled()) return IMG_ECANCELLED;
+    if(o.verify && !sdir && cs.bytes!=smeta.size) return IMG_ECORRUPT;
+
+    /* 删源：重新打开（复制过程已关闭端点） */
+    xep de; memset(&de,0,sizeof de);
+    rc=ep_open(&de,src,NULL,true,NULL);
+    if(rc!=IMG_OK) return IMG_EPARTIAL;
+    uint64_t removed=0;
+    rc=ep_remove(&de,de.root,o.recursive,&removed);
+    ep_close(&de);
+    st->files=cs.files; st->dirs=cs.dirs; st->bytes=cs.bytes; st->ads=cs.ads;
+    snprintf(st->mode,sizeof st->mode,"cross_volume");
+    snprintf(st->final_path,sizeof st->final_path,"%s",cs.final_path);
+    if(rc!=IMG_OK){ st->deleted=false; return IMG_EPARTIAL; }
+    st->deleted=true;
+    return IMG_OK;
+}
+
+int img_xrm_run(const img_xloc *loc, bool recursive, bool allow_host_delete,
+                uint64_t *removed){
+    if(removed) *removed=0;
+    if(!loc) return IMG_EINVAL;
+    if(loc->kind==IMG_XK_ISO || loc->kind==IMG_XK_WIM) return IMG_EREADONLY;
+    if(loc->kind==IMG_XK_HOST){
+        if(!allow_host_delete) return IMG_EREFUSED;
+        /* 用 realpath 做"危险根"判定（能吃掉 .. 和符号链接），
+         * 但真正删除仍用原路径（避免把"删链接"变成"删链接指向的目录"）。*/
+        char canon[PATH_MAX];
+        if(realpath(loc->path,canon)){
+            if(host_dangerous(canon)) return IMG_EREFUSED;
+        } else if(host_dangerous(loc->path)) return IMG_EREFUSED;
+        if(host_dangerous(loc->path)) return IMG_EREFUSED;
+        return host_remove_count(loc->path,recursive,removed);
+    }
+    xep e; memset(&e,0,sizeof e);
+    int rc=ep_open(&e,loc,NULL,true,NULL);
+    if(rc!=IMG_OK) return rc;
+    rc=ep_remove(&e,e.root,recursive,removed);
+    ep_close(&e);
     return rc;
 }

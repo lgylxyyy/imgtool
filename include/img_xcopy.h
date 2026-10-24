@@ -44,7 +44,7 @@ typedef enum {
 
 typedef struct {
     img_xkind kind;
-    char      img[512];    /* qcow2 / iso / wim 路径；host 为空 */
+    char      img[2048];    /* qcow2 / iso / wim 路径；host 为空 */
     uint64_t  lba;         /* ntfs/fat 分区起始 LBA；0=自动 */
     int       index;       /* wim 映像索引（默认 1） */
     char      path[2048];  /* 文件系统内绝对路径 / 宿主绝对路径 */
@@ -66,6 +66,10 @@ typedef struct {
     uint64_t skipped;      /* 跳过的符号链接/不支持项 */
     uint64_t ads;          /* 复制的命名数据流条数（仅 NTFS→NTFS） */
     char     final_path[2048];   /* 顶层落点（改名后的真实路径；给 UI 刷新用） */
+    uint64_t parent_total;       /* 落点所在目录的条目数（UI 打补丁用） */
+    uint64_t top_size;           /* 顶层文件大小（目录为 0） */
+    uint64_t top_ino;            /* 顶层文件 ino（NTFS 才有；FAT/宿主为 0） */
+    bool     replaced;           /* 顶层文件是否覆盖了旧文件 */
     int      side;               /* 失败发生在哪一侧：0=复制中 / 1=源 / 2=目标 */
     char     first_error[256];
 } img_xcopy_stats;
@@ -78,6 +82,44 @@ int img_xcopy_parse(const char *spec, img_xloc *out, char *why, size_t whycap);
 int img_xcopy_run(const img_xloc *src, const img_xloc *dst,
                   const img_xcopy_opts *opt, img_prog *prog,
                   img_xcopy_stats *st);
+
+/* ---------------- 统一移动 / 删除（2026-10-24） ----------------
+ * move 的判定：
+ *   · 同容器 + 同分区 + 同文件系统 → 纯索引移动/改名（毫秒级）
+ *   · 其余 → 复制 → 校验 → 删源（跨盘/跨镜像/宿主↔镜像）
+ * 跨盘删源是不可逆动作：
+ *   · 镜像内的源：复制成功即删；
+ *   · 宿主源：必须 allow_host_delete=true（App 弹窗后再传）；
+ *   · ISO/WIM 源：直接拒绝（只读链）。
+ * 删除失败返回 IMG_EPARTIAL，stats.deleted=false，两个路径都在。*/
+typedef struct {
+    int  conflict;
+    bool recursive;
+    bool preserve_times;
+    bool create_parents;
+    bool allow_host_delete;   /* 宿主源删除许可 */
+    bool verify;              /* 单文件复制后校验大小 */
+    int  max_depth;
+} img_xmove_opts;
+
+typedef struct {
+    char     mode[24];        /* rename / move / cross_volume */
+    uint64_t files, dirs, bytes, ads;
+    bool     deleted;         /* 源是否已删 */
+    bool     noop;            /* mv a a：什么都没做 */
+    bool     case_only;       /* 只改大小写 */
+    char     final_path[2048];
+    int      side;
+} img_xmove_stats;
+
+int img_xmove_run(const img_xloc *src, const img_xloc *dst,
+                  const img_xmove_opts *opt, img_prog *prog,
+                  img_xmove_stats *st);
+
+/* 统一删除。loc 可以是 HOST / NTFS / FAT；ISO/WIM 拒绝（IMG_EREADONLY）。
+ * 宿主删除必须 allow_host_delete=true；根目录/系统顶层一律拒绝。*/
+int img_xrm_run(const img_xloc *loc, bool recursive, bool allow_host_delete,
+                uint64_t *removed);
 
 /* 给命令层：kind 的稳定名字 */
 const char *img_xkind_name(img_xkind k);

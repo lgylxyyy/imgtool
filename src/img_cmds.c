@@ -7,6 +7,7 @@
 #include <sys/stat.h>   /* img.create/ntfs.put 要 stat 判存在与大小 */
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>   /* qc_open_fail 复查文件要 open/read/close */
@@ -76,7 +77,8 @@ static int feat_unavail(img_result *out, const char *feat, const char *howto){
 #include "img_ntfs_fmt.h"
  #include "img_clone.h"
 #include "img_ntfs_fs.h"
-#include "img_xcopy.h"   /* part.scan / ntfs.list / ntfs.rename */
+#include "img_xcopy.h"
+#include "img_path.h"   /* part.scan / ntfs.list / ntfs.rename */
 typedef struct { img_io *io; } rd_io_t;
 static int rd_io(void *ud, uint64_t off, void *buf, size_t len){
     rd_io_t *r=(rd_io_t*)ud;
@@ -748,92 +750,6 @@ static int cmd_ntfs_list(img_ctx *ctx, const img_args *in, img_result *out){
  * ★ 层归属：机制不是政策。搬谁 = App 传名单（通常来自 ntfs.list / part.scan）；
  *   目标目录名必填、工具不设默认（默认名归 App，PARTITION-POLICY #4）。
  * 机制细节：目标名冲突自动编号 .001/.002…（与 Windows 的 Windows.old.001 行为一致）。*/
-static const img_arg A_NTFSREN[] = {
-    {"img",   IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
-    {"lba",   IMG_A_U64, true, NULL, "NTFS 分区起始 LBA", chk_lba},
-    {"dst",   IMG_A_STR, true, NULL, "目标目录名（如 Windows.old；冲突自动编号）", NULL},
-    {"names", IMG_A_STR, true, NULL, "要搬动的顶层名，逗号分隔（如 Windows,Program Files,Users）", NULL},
-};
-static int cmd_ntfs_rename(img_ctx *ctx, const img_args *in, img_result *out){
-    if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 搬移）","重新编译时开启该功能并安装对应系统库");
-#if IMG_WITH_NTFS3G
-
-    uint64_t lba=img_args_u64(in,"lba",0);
-    const char *dst=img_args_get(in,"dst"), *names=img_args_get(in,"names");
-    if(!dst||!dst[0]||dst[0]!='/'){ /* 允许给裸名，补成根路径 */
-        static char dstp[256];
-        if(!dst||!dst[0]||strchr(dst,'/')==NULL){
-            snprintf(dstp,sizeof dstp,"/%s",(dst&&dst[0])?dst:"");
-            dst=dstp;
-        } else { img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","dst","路径必须以 / 开头且不带尾斜杠",NULL); return IMG_EINVAL; }
-    }
-    if(!names||!names[0]){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","names","名单不能为空",NULL); return IMG_EINVAL; }
-    img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ return qc_open_fail(out,ctx); }
-    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
-    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
-    uint64_t pb=0;
-    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
-        if(t->parts[i].used && t->parts[i].first_lba==lba){
-            pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
-    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
-    img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
-    if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",dst,"不是合法 NTFS（未格式化或 LBA 不对）",NULL);
-             return IMG_ESTATE; }
-    /* 预检：名单里的顶层名必须存在 —— 否则给专属错误码（"名字不存在"≠"搬移失败"，
-     * 之前混在一起，排查时分不出"打错字"和"卷坏了"）*/
-    { static char nbuf0[64*208]; snprintf(nbuf0,sizeof nbuf0,"%s",names);
-      for(char *tok=strtok(nbuf0,","); tok; tok=strtok(NULL,",")){
-        while(*tok==' ') tok++;
-        if(!*tok) continue;
-        char full[256]; snprintf(full,sizeof full,"/%s",tok);
-        if(!img_ntfs_path_exists(fs,full)){
-            img_ntfs_umount(fs);
-            img_result_fail(out,IMG_ENOENT,"FAT-ENTRY-NOTFOUND",full,"这个顶层名不在根目录里（可能已被搬走或拼错）",NULL);
-            return IMG_ENOENT;
-        }
-      } }
-    /* 目标名冲突 → 自动编号 .001/.002…（机制，不是政策）*/
-    static char final[256]; snprintf(final,sizeof final,"%s",dst);
-    if(img_ntfs_path_exists(fs,final)){
-        bool found=false;
-        for(int i=1;i<=999;i++){
-            snprintf(final,sizeof final,"%.250s.%03d",dst,i);
-            if(!img_ntfs_path_exists(fs,final)){ found=true; break; }
-        }
-        if(!found){ img_ntfs_umount(fs);
-                    img_result_fail(out,IMG_EFULL,"CMD-ARG-BAD","dst","编号到 .999 仍冲突",NULL); return IMG_EFULL; }
-    }
-    /* 名单：逗号分隔 → 数组（上限 64 项，每项 ≤200 字节）*/
-    static char nbuf[64*208]; const char *list[64]; int nn=0;
-    snprintf(nbuf,sizeof nbuf,"%s",names);
-    for(char *tok=strtok(nbuf,","); tok && nn<64; tok=strtok(NULL,",")){
-        while(*tok==' ') tok++;
-        if(!*tok) continue;
-        list[nn++]=tok;
-    }
-    if(!nn){ img_ntfs_umount(fs);
-             img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","names","名单解析后为空",NULL); return IMG_EINVAL; }
-    int moved=0;
-    rc=img_ntfs_move_into(fs,final,list,nn,&moved);
-    img_ntfs_umount(fs);
-    if(rc!=IMG_OK){
-        const char *code = (rc==IMG_ECORRUPT)?"NTFS-DIR-PHANTOM"
-                         : (rc==IMG_ENOENT)?"NTFS-PATH-NOTFOUND"
-                         : (rc==IMG_ENOTSUP)?"NTFS-SRC-IS-DIR":"NTFS-MOVE-FAIL";
-        img_result_fail(out,rc,code,final,
-            rc==IMG_ECORRUPT?"搬完从盘上复查没过：目录或名字没真落盘（卷已不一致，停止继续写）":
-                             "搬移失败（名字不存在/只读/卷损坏）",
-            rc==IMG_ECORRUPT?"立刻停止写这张盘；换备份镜像；用 tools/ntfs-inventory.py 或 chkdsk /scan 定位":NULL);
-        return rc; }
-    img_result_u64(out,"moved",(uint64_t)moved);
-    img_result_u64(out,"requested",(uint64_t)nn);
-    img_result_str(out,"dir_used",final);
-    return IMG_OK;
-#else
-    (void)ctx; (void)in; (void)out; return IMG_ENOTSUP;   /* 不可达：上一行已返回 */
-#endif
-}
 
 /* ================= 命令 6e：img.clone（克隆保留分区到新盘 —— 换系统的主路径）====================
  * 文件名流程（PARTITION-POLICY #10 + 两条硬护栏）：
@@ -2132,101 +2048,10 @@ static int cmd_fat_export(img_ctx *ctx, const img_args *in, img_result *out){
 /* ---------- fat.rm（删文件 / 空目录；不递归 —— 递归删是政策，不是机制）----------
  * 与 ntfs.rm 对齐：目录非空一律拒绝（IMG_ENOTSUP），让 App 明确"先删子项"，
  * 而不是工具替它猜。底层 img_fat32_rm 已存在多年，这条命令只是把它暴露出来。*/
-static const img_arg A_FATRM[] = {
-    {"img",  IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
-    {"lba",  IMG_A_U64, true, NULL, "FAT32 分区起始 LBA", chk_lba},
-    {"path", IMG_A_STR, true, NULL, "分区内要删除的绝对路径（/ 开头）", NULL},
-    {"recursive", IMG_A_BOOL, false, "false",
-     "★默认 false：目录只有【空】的时候才删得掉。true=连子项一起递归删（危险）", NULL},
-};
-static int cmd_fat_rm(img_ctx *ctx, const img_args *in, img_result *out){
-    uint64_t lba=img_args_u64(in,"lba",0);
-    const char *path=img_args_get(in,"path");
-    if(!path||path[0]!='/'){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","需要 / 开头的绝对路径",NULL); return IMG_EINVAL; }
-    img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ return qc_open_fail(out,ctx); }
-    img_fat32_fs *fs=img_fat32_mount(q,lba,true);
-    if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL",path,"不是合法 FAT32（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
-    bool rec=img_args_bool(in,"recursive",false);
-    int removed=0;
-    int rc = rec ? img_fat32_rm_tree(fs,path,&removed) : img_fat32_rm(fs,path);
-    if(rc==IMG_OK && !rec) removed=1;
-    img_fat32_unmount(fs);
-    if(rc==IMG_ENOENT){
-        img_result_fail(out,rc,"FAT-ENTRY-NOTFOUND",path,"路径不存在（大小写不敏感，但路径必须完整）","先用 fat.ls 核对父目录");
-        return rc;
-    }
-    if(rc==IMG_ENOTSUP||rc==IMG_ESTATE){
-        img_result_fail(out,rc,"FAT-DIR-NOT-EMPTY",path,
-            "目录非空（默认不递归）","要连子项一起删请显式传 recursive=true");
-        return rc;
-    }
-    if(rc!=IMG_OK){
-        img_result_fail(out,rc,rc==IMG_ECORRUPT?"PART-FS-BAD":"FAT-RM-FAIL",path,"删除失败（卷损坏或簇链成环）","跑 qc.verify / 换备份镜像");
-        return rc;
-    }
-    img_result_str(out,"path",path);
-    img_result_u64(out,"removed",(uint64_t)removed);
-    return IMG_OK;
-}
 
 /* ---------- fat.move（盘内改名 / 移动，单条路径）----------
  * 目标已存在 → 明确报 FAT-ENTRY-EXISTS，不默认覆盖（覆盖=丢数据，必须 App 显式决定：
  * 先 fat.rm 再 fat.move，两步各自可见）。*/
-static const img_arg A_FATMOVE[] = {
-    {"img", IMG_A_STR, true, NULL, "镜像路径（qcow2）", NULL},
-    {"lba", IMG_A_U64, true, NULL, "FAT32 分区起始 LBA", chk_lba},
-    {"src", IMG_A_STR, true, NULL, "源绝对路径（/ 开头；可指向文件或目录）", NULL},
-    {"dst", IMG_A_STR, true, NULL, "目标绝对路径（父目录必须已存在）", NULL},
-};
-static int cmd_fat_move(img_ctx *ctx, const img_args *in, img_result *out){
-    uint64_t lba=img_args_u64(in,"lba",0);
-    const char *src=img_args_get(in,"src"), *dst=img_args_get(in,"dst");
-    if(!src||src[0]!='/'||!dst||dst[0]!='/'){
-        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","src/dst","两个都得是 / 开头的绝对路径",NULL); return IMG_EINVAL;
-    }
-    img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q){ return qc_open_fail(out,ctx); }
-    img_fat32_fs *fs=img_fat32_mount(q,lba,true);
-    if(!fs){ img_result_fail(out,IMG_ESTATE,"FAT-MOUNT-FAIL",src,"不是合法 FAT32（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
-    /* ★ 先分清楚"源不存在"和"目标父目录不存在"：底层统一返回 ENOENT，
-     *   混在一起报会让 App 提示错方向（实测就踩过：以为源丢了，其实是目标目录没建）。*/
-    if(!img_fat32_path_exists(fs,src)){
-        img_fat32_unmount(fs);
-        img_result_fail(out,IMG_ENOENT,"FAT-ENTRY-NOTFOUND",src,"源路径不存在","先用 fat.ls 核对大小写与整条路径");
-        return IMG_ENOENT;
-    }
-    {   char parent[512]; snprintf(parent,sizeof parent,"%s",dst);
-        char *slash=strrchr(parent,'/');
-        if(slash){ if(slash==parent) slash[1]=0; else *slash=0; }
-        if(!img_fat32_dir_exists(fs,parent)){
-            img_fat32_unmount(fs);
-            img_result_fail(out,IMG_ENOENT,"FAT-DEST-DIR-NOTFOUND",dst,"目标的父目录不存在（本命令不自动建目录）","先在该位置 fat.put 一个文件把目录建出来，或改目标路径");
-            return IMG_ENOENT;
-        }
-    }
-    int rc=img_fat32_rename(fs,src,dst);
-    img_fat32_unmount(fs);
-    if(rc==IMG_ENOENT){
-        img_result_fail(out,rc,"FAT-ENTRY-NOTFOUND",src,"源路径不存在，或目标的父目录不存在","先用 fat.ls 核对两边的父目录");
-        return rc;
-    }
-    if(rc==IMG_EEXISTS){
-        img_result_fail(out,rc,"FAT-ENTRY-EXISTS",dst,"目标已经存在（本命令不覆盖）","先 fat.rm 删掉目标，或换一个名字");
-        return rc;
-    }
-    if(rc==IMG_EINVAL){
-        img_result_fail(out,rc,"FAT-MOVE-BAD",dst,"源与目标相同，或把目录移进了它自己的子树",NULL);
-        return rc;
-    }
-    if(rc!=IMG_OK){
-        img_result_fail(out,rc,rc==IMG_ECORRUPT?"PART-FS-BAD":"FAT-MOVE-FAIL",dst,"移动失败（卷损坏或簇链成环）","跑 qc.verify / 换备份镜像");
-        return rc;
-    }
-    img_result_str(out,"src",src);
-    img_result_str(out,"dst",dst);
-    return IMG_OK;
-}
 /* ---------- ntfs.parent（只读：目录的 ".." 父引用自洽检查）----------
  * 为什么需要：NTFS 的"我爹是谁"记在子目录自己的 $I30 ".." 项里，搬目录时忘了同步
  *   就会出现"路径能打开、但 cd .. 跳回旧父"的错乱 —— 光看 ntfs.list 是看不出来的。
@@ -2978,133 +2803,17 @@ static int cmd_win_version(img_ctx *ctx, const img_args *in, img_result *out){
  * 一次覆盖三种诉求：a.txt→b.txt（同目录改名）、/a.txt→/Temp/a.txt（移动）、
  * /Temp/a.txt→/Temp/b.txt（既换目录又换名）。dst 的末段就是新名字。
  * ★ 政策：默认【不覆盖】—— 覆盖会吃掉目标文件，必须 App 显式 overwrite=true。 */
-static const img_arg A_NTFSMOVE[] = {
-    {"img",  IMG_A_STR, true,  NULL, "镜像路径（qcow2）", NULL},
-    {"lba",  IMG_A_U64, true,  NULL, "NTFS 分区起始 LBA", chk_lba},
-    {"src",  IMG_A_STR, true,  NULL, "盘内现有路径（/ 开头）", NULL},
-    {"dst",  IMG_A_STR, true,  NULL, "盘内新路径（/ 开头；末段不同=改名，父目录不同=移动）", NULL},
-    {"overwrite", IMG_A_BOOL, false, "false", "目标已存在时是否覆盖（默认 false=直接报错）", NULL},
-    {"allow_dir_move", IMG_A_BOOL, false, "true",
-     "目录能否搬到别的父目录（默认 true —— 2026-10-23 真 Windows 验收通过后解禁；传 false 可恢复旧政策）", NULL},
-};
 #if IMG_WITH_NTFS3G   /* 只在开启 NTFS 时用到；关掉时不该留下 unused 警告 */
 /* 把 img_ntfs_move_path 的返回码翻成【能分开病因】的错误码：
  * "源不存在"/"目标已存在"/"目标是目录"/"空间不够"/"底层失败" 各一条 ——
  * 之前踩过"所有失败共用一个码"的坑（排查时分不出打错字还是卷坏了）。 */
-static const char *ntfs_move_code(int rc){
-    switch(rc){
-        case IMG_ENOENT:   return "NTFS-PATH-NOTFOUND";
-        case IMG_EEXISTS:  return "NTFS-DEST-EXISTS";
-        case IMG_ENOTSUP:  return "NTFS-SRC-IS-DIR";   /* 只在 allow_dir_move=false 或"搬进自己子树"时出现 */
-        case IMG_ESTATE:   return "NTFS-DEST-IS-DIR";  /* 目标是目录：不许拿文件顶掉它 */
-        case IMG_EFULL:    return "FAT-ENOSPC";
-        case IMG_ECORRUPT: return "NTFS-DIR-PHANTOM";  /* 写后自证没过：目录/名字没真落盘 */
-        case IMG_ECYCLE:   return "NTFS-MOVE-INTO-SELF"; /* 搬进自己/自己的子树 */
-        case IMG_EINVAL:   return "CMD-ARG-BAD";
-        default:           return "NTFS-MOVE-FAIL";
-    }
-}
 /* 共用：按 lba 从分区表取分区字节数；取不到返回 0 */
 #endif /* IMG_WITH_NTFS3G */
-static int cmd_ntfs_move(img_ctx *ctx, const img_args *in, img_result *out){
-    if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 改名/移动）","重新编译时开启该功能并安装对应系统库");
-#if IMG_WITH_NTFS3G
-    uint64_t lba=img_args_u64(in,"lba",0);
-    const char *src=img_args_get(in,"src"), *dst=img_args_get(in,"dst");
-    bool over=img_args_bool(in,"overwrite",false);
-    if(!src||src[0]!='/'||!dst||dst[0]!='/'){
-        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","src/dst","两个都必须是 / 开头的盘内绝对路径",NULL); return IMG_EINVAL;
-    }
-    if(!strcmp(src,dst)){ img_result_bool(out,"noop",true); return IMG_OK; }   /* 原地改名给自己：无事可做 */
-    img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q) return qc_open_fail(out,ctx);
-    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
-    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
-    uint64_t pb=ntfs_part_bytes(t,lba);
-    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
-    img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
-    if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",dst,"不是合法 NTFS（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
-    img_span sp; img_span_prep(&sp,"ntfs","move","盘内改名/移动");
-    img_span_kv_str(&sp,"src",src); img_span_kv_str(&sp,"dst",dst); img_span_begin(&sp);
-    int mr=img_ntfs_move_path(fs,src,dst,over,img_args_bool(in,"allow_dir_move",true));
-    img_span_end(&sp,mr);
-    /* ★ 校验必须在 umount 之前问（卸载后就问不到了）
-     * ★ 只改大小写（a.txt → A.TXT）时"源还在"这个判断没有意义：
-     *   NTFS 是大小写不敏感的，源名字查到的就是同一个文件（真机实测：
-     *   改名成功了，却被后面的核对判成失败 IMG_ESTATE）。*/
-    bool case_only = (strcasecmp(src,dst)==0);
-    bool gone  = (mr==IMG_OK) && (case_only || !img_ntfs_path_exists(fs,src));
-    bool arrived=(mr==IMG_OK) &&  img_ntfs_path_exists(fs,dst);
-    img_ntfs_umount(fs);
-    if(mr!=IMG_OK){
-        const char *hint = (mr==IMG_ENOENT)?"源路径不存在（先用 ntfs.list 核对大小写与整条路径）":
-                           (mr==IMG_EEXISTS)?"目标已存在：换个名字，或明确传 overwrite=true":
-                           (mr==IMG_ENOTSUP)?"目录只能在【同一个父目录下改名】，不能搬到别的父目录：真 Windows 实测那样会被 chkdsk 判成孤儿、塞进 found.000（要挪目录请复制+删除，或在 Windows 里做）":
-                           (mr==IMG_ESTATE)?"目标是个目录：工具不会用文件顶掉目录":
-                           "改名/移动失败（空间不足或卷状态异常）";
-        img_result_fail(out,mr,ntfs_move_code(mr),src,hint,dst); return mr;
-    }
-    if(!(gone&&arrived)){   /* 报成功但状态不符 → 如实报失败，绝不含糊 */
-        img_result_fail(out,IMG_ESTATE,"NTFS-MOVE-FAIL",src,"改完核对不上（源还在或目标不在）：建议 qc.verify",dst);
-        return IMG_ESTATE;
-    }
-    img_result_str(out,"src",src);
-    img_result_str(out,"dst",dst);
-    img_result_bool(out,"moved",true);
-    img_result_bool(out,"case_only",case_only);
-    return IMG_OK;
-#else
-    (void)ctx;(void)in;(void)out; return IMG_ENOTSUP;
-#endif
-}
 
 /* ================= 命令 6g：ntfs.rm（删盘内文件）====================
  * ★ 政策：只删【文件】。目录一律拒绝（img_ntfs_rm 内部就拒）——
  *   递归删的误操作比"删不掉"可怕得多。 */
-static const img_arg A_NTFSSRM[] = {
-    {"img",  IMG_A_STR, true,  NULL, "镜像路径（qcow2）", NULL},
-    {"lba",  IMG_A_U64, true,  NULL, "NTFS 分区起始 LBA", chk_lba},
-    {"path", IMG_A_STR, true,  NULL, "要删除的盘内路径（文件或目录；/ 开头）", NULL},
-    {"recursive", IMG_A_BOOL, false, "false",
-     "★默认 false：目录只有【空】的时候才删得掉。true=连子项一起递归删（危险，App 要二次确认）", NULL},
-};
-static const img_arg A_NTFSCOPY[] = {
-    {"img",  IMG_A_STR, true,  NULL, "镜像路径（qcow2）", NULL},
-    {"lba",  IMG_A_U64, true,  NULL, "NTFS 分区起始 LBA", chk_lba},
-    {"src",  IMG_A_STR, false, NULL, "盘内源文件（/ 开头）；用 list_file 时可省", NULL},
-    {"dst",  IMG_A_STR, false, NULL, "盘内目标（/ 开头；给目录或以 / 结尾 ⇒ 沿用源文件名）；用 list_file 时可省", NULL},
-    {"conflict", IMG_A_ENUM, false, "fail",
-     "同名怎么办：fail=报错（默认） | overwrite=覆盖 | rename=自动改名为 \"名 (1).扩展名\"", NULL},
-    {"preserve_times", IMG_A_BOOL, false, "true", "保留源文件的四个时间戳（$SI/$FN）", NULL},
-    {"create_parents", IMG_A_BOOL, false, "true", "目标父目录不存在就建", NULL},
-    {"list_file", IMG_A_STR, false, NULL,
-     "★批量：本地清单文件，每行 `盘内源>盘内目标`（# 开头注释、空行忽略）。"
-     "一次挂载全做完，比逐条调用快得多（省掉 N 次 mount）", NULL},
-    {"on_fail", IMG_A_ENUM, false, "continue",
-     "批量时某项失败怎么办：continue=继续（默认） | stop=立刻停", NULL},
-};
-static const img_arg A_FATCOPY[] = {
-    {"img",  IMG_A_STR, true,  NULL, "镜像路径（qcow2）", NULL},
-    {"lba",  IMG_A_U64, true,  NULL, "FAT32 分区起始 LBA", chk_lba},
-    {"src",  IMG_A_STR, true,  NULL, "分区内源文件（/ 开头）", NULL},
-    {"dst",  IMG_A_STR, true,  NULL, "分区内目标（/ 开头；给目录或以 / 结尾 ⇒ 沿用源文件名）", NULL},
-    {"conflict", IMG_A_ENUM, false, "fail",
-     "同名怎么办：fail=报错（默认） | overwrite=覆盖 | rename=自动改名为 \"名 (1).扩展名\"", NULL},
-};
 /* ---------- 盘内复制（NTFS） ---------- */
-#if IMG_WITH_NTFS3G
-static void count_entry_cb(void *ud, const char *n, bool d, uint64_t sz){
-    (void)n; (void)d; (void)sz; (*(int*)ud)++;
-}
-/* 取某路径的父目录 + 目录内条目数（App 局部刷新用：changed[] 的最小信息） */
-static void copy_parent_info(img_ntfs_fs *fs, const char *abs, char *pout, size_t pcap, int *total){
-    snprintf(pout, pcap, "%s", abs);
-    char *sl = strrchr(pout, '/');
-    if (sl && sl != pout) *sl = 0; else snprintf(pout, pcap, "/");
-    int n = 0;
-    if (img_ntfs_list_dir(fs, pout, count_entry_cb, &n) == IMG_OK && total) *total = n;
-}
-#endif
 
 /* ================= 时间戳设置（ntfs.touch / fat.touch） =================
  * 语义照 edk2 那套（用户给的资料）：**传 0 = 该项保持原值**，不更新。
@@ -3272,241 +2981,9 @@ static void jesc(char *out, size_t cap, const char *in){
     out[o]=0;
 }
 
-static const char *batch_code(int rc){
-    switch(rc){
-        case IMG_ENOENT:    return "NTFS-PATH-NOTFOUND\"";
-        case IMG_EEXISTS:   return "NTFS-DEST-EXISTS\"";
-        case IMG_ESTATE:    return "NTFS-DEST-IS-DIR\"";
-        case IMG_ENOTSUP:   return "NTFS-SRC-IS-DIR\"";
-        case IMG_EFULL:     return "FAT-ENOSPC\"";
-        case IMG_ECORRUPT:  return "NTFS-DIR-PHANTOM\"";
-        case IMG_ECYCLE:    return "NTFS-MOVE-INTO-SELF\"";
-        case IMG_ECANCELLED:return "CTL-CANCELLED\"";
-        default:            return "NTFS-COPY-FAIL\"";
-    }
-}
 
-static int cmd_ntfs_copy(img_ctx *ctx, const img_args *in, img_result *out){
-    if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 复制）","重新编译时开启该功能并安装对应系统库");
-#if IMG_WITH_NTFS3G
-    uint64_t lba=img_args_u64(in,"lba",0);
-    const char *src=img_args_get(in,"src"), *dst=img_args_get(in,"dst");
-    /* 单条复制要求 src/dst 都是绝对路径；批量（list_file）时这两个可以为空 */
-    if(!img_args_get(in,"list_file") && (!src||src[0]!='/'||!dst||dst[0]!='/')){
-        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","dst","src/dst 都必须是 / 开头的盘内绝对路径",NULL);
-        return IMG_EINVAL;
-    }
-    img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q) return qc_open_fail(out,ctx);
-    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
-    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
-    uint64_t pb=ntfs_part_bytes(t,lba);
-    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
-    img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
-    if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",dst,"不是合法 NTFS（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
 
-    img_copy_opts o = { IMG_COPY_FAIL, true, true };
-    const char *cf = img_args_get(in,"conflict");
-    if(cf){
-        if(!strcmp(cf,"overwrite")) o.conflict = IMG_COPY_OVERWRITE;
-        else if(!strcmp(cf,"rename")) o.conflict = IMG_COPY_RENAME;
-    }
-    o.preserve_times  = img_args_bool(in,"preserve_times",true);
-    o.create_parents  = img_args_bool(in,"create_parents",true);
 
-    const char *lst = img_args_get(in,"list_file");
-    if (!lst && (!src || !dst)) {
-        img_ntfs_umount(fs);
-        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","src","要么给 src+dst，要么给 list_file（二选一）",NULL);
-        return IMG_EINVAL;
-    }
-    if (lst) {
-        /* ---- 批量：每行 源>目标，一次挂载全做完 ---- */
-        FILE *fp = fopen(lst, "r");
-        if (!fp) {
-            img_ntfs_umount(fs);
-            img_result_fail(out,IMG_ENOENT,"SRC-NOTFOUND",lst,"清单文件打不开",NULL);
-            return IMG_ENOENT;
-        }
-        const char *ofail = img_args_get(in,"on_fail");
-        bool stop_on_fail = ofail && !strcmp(ofail,"stop");
-        IMG_THREAD_LOCAL static char items[96*1024];
-        size_t il = 1; items[0] = '['; items[1] = 0;
-        int okn = 0, badn = 0; uint64_t bytes = 0; bool truncated = false;
-        char line[1400];
-        img_span sp; img_span_prep(&sp,"ntfs","copy-batch","批量盘内复制");
-        img_span_kv_str(&sp,"list",lst); img_span_begin(&sp);
-        while (fgets(line, sizeof line, fp)) {
-            char *nl = strchr(line,'\n'); if (nl) *nl = 0;
-            char *p0 = line;
-            while (*p0 == ' ' || *p0 == '\t') p0++;
-            if (!*p0 || *p0 == '#') continue;
-            char *sep = strchr(p0, '>');
-            if (!sep) { badn++; continue; }
-            *sep = 0;
-            char *src = p0;
-            char *dst = sep + 1;
-            while (*src == ' ' || *src == '\t') src++;
-            char *e = src + strlen(src); while (e > src && (e[-1]==' '||e[-1]=='\t')) *--e = 0;
-            while (*dst == ' ' || *dst == '\t') dst++;
-            e = dst + strlen(dst); while (e > dst && (e[-1]==' '||e[-1]=='\t')) *--e = 0;
-            if (!*src || !*dst) { badn++; continue; }
-            img_copy_result r; memset(&r, 0, sizeof r);
-            int rc2 = img_ntfs_copy(fs, src, dst, &o, img_cmd_prog(), &r);
-            char es[2048], ed[2048];
-            jesc(es,sizeof es,src); jesc(ed,sizeof ed,dst);
-            int need = snprintf(items + il, sizeof items - il,
-                "%s{\"src\":\"%s\",\"dst\":\"%s\",\"ok\":%s,\"ino\":%llu,\"size\":%llu%s%s}",
-                okn + badn ? "," : "", es, ed, rc2 == IMG_OK ? "true" : "false",
-                (unsigned long long)r.ino, (unsigned long long)r.size,
-                rc2 == IMG_OK ? "" : ",\"code\":\"",
-                rc2 == IMG_OK ? "" : batch_code(rc2));
-            if (need > 0 && il + (size_t)need < sizeof items) il += (size_t)need;
-            else truncated = true;
-            if (rc2 == IMG_OK) { okn++; bytes += r.size; }
-            else { badn++; if (stop_on_fail) break; }
-        }
-        fclose(fp);
-        if (il + 2 < sizeof items) { items[il++] = ']'; items[il] = 0; }
-        img_span_kv_u64(&sp,"copied",(uint64_t)okn);
-        img_span_kv_u64(&sp,"failed",(uint64_t)badn);
-        /* ★ 批量语义：命令本身成功（App 能拿到明细）；逐项成败在 failed/items 里。
-         *   否则一旦有一项失败就丢失全部明细（v1 就是这么错的）。*/
-        img_span_end(&sp, IMG_OK);
-        img_ntfs_umount(fs);
-        img_result_u64(out,"copied",(uint64_t)okn);
-        img_result_u64(out,"failed",(uint64_t)badn);
-        img_result_u64(out,"bytes",bytes);
-        img_result_bool(out,"truncated",truncated);
-        img_result_raw(out,"items", items[1] ? items : "[]");
-        return IMG_OK;
-    }
-
-    img_span sp; img_span_prep(&sp,"ntfs","copy","盘内复制");
-    img_span_kv_str(&sp,"src",src); img_span_kv_str(&sp,"dst",dst);
-    img_span_kv_u64(&sp,"conflict",(uint64_t)o.conflict);
-    img_span_begin(&sp);
-    img_copy_result r; memset(&r,0,sizeof r);
-    rc = img_ntfs_copy(fs, src, dst, &o, img_cmd_prog(), &r);
-    img_span_end(&sp, rc);
-    char parent[512]=""; int total=0;
-    if(rc==IMG_OK) copy_parent_info(fs, r.path, parent, sizeof parent, &total);
-    img_ntfs_umount(fs);
-    if(rc){
-        const char *code = (rc==IMG_ENOENT)  ? "NTFS-PATH-NOTFOUND"
-                         : (rc==IMG_EINVAL) ? "CMD-ARG-BAD"
-                         : (rc==IMG_EEXISTS) ? "NTFS-DEST-EXISTS"
-                         : (rc==IMG_ESTATE)  ? "NTFS-DEST-IS-DIR"
-                         : (rc==IMG_ENOTSUP) ? "NTFS-SRC-IS-DIR"
-                         : (rc==IMG_EFULL)   ? "FAT-ENOSPC"
-                         : (rc==IMG_ECORRUPT)? "NTFS-DIR-PHANTOM"
-                         : (rc==IMG_ECANCELLED)?"CTL-CANCELLED":"NTFS-COPY-FAIL";
-        img_result_fail(out,rc,code,src,
-            (rc==IMG_EEXISTS)?"目标已存在（改用 conflict=overwrite 或 rename）":
-            (rc==IMG_ESTATE) ?"目标是目录：不能拿文件顶掉它":
-            (rc==IMG_ENOTSUP)?"源是目录：目录递归复制还没做（下一步）":
-            (rc==IMG_ECORRUPT)?"写完从盘上复查没过（卷已不一致，停止继续写）":
-            (rc==IMG_ECANCELLED)?"已取消（临时文件已清理）":"复制失败（空间/只读/卷状态）",NULL);
-        return rc;
-    }
-    img_result_str(out,"path", r.path);
-    img_result_u64(out,"ino", r.ino);
-    img_result_u64(out,"size", r.size);
-    img_result_bool(out,"replaced", r.replaced);
-    img_result_str(out,"parent", parent);
-    img_result_u64(out,"parent_total", (uint64_t)total);
-    return IMG_OK;
-#else
-    (void)ctx;(void)in;(void)out; return IMG_ENOTSUP;
-#endif
-}
-
-static int cmd_fat_copy(img_ctx *ctx, const img_args *in, img_result *out){
-    uint64_t lba=img_args_u64(in,"lba",0);
-    const char *src=img_args_get(in,"src"), *dst=img_args_get(in,"dst");
-    if(!src||src[0]!='/'||!dst||dst[0]!='/'){
-        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","dst","src/dst 都必须是 / 开头的分区内绝对路径",NULL);
-        return IMG_EINVAL;
-    }
-    img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q) return qc_open_fail(out,ctx);
-    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
-    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
-    uint64_t pb=ntfs_part_bytes(t,lba);
-    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
-    img_fat32_fs *fs=img_fat32_mount(q,lba,true);
-    if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",dst,"不是合法 FAT32（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
-    int conflict=0;
-    const char *cf=img_args_get(in,"conflict");
-    if(cf){ if(!strcmp(cf,"overwrite")) conflict=1; else if(!strcmp(cf,"rename")) conflict=2; }
-    char got[600]=""; uint64_t sz=0; bool replaced=false;
-    img_span sp; img_span_prep(&sp,"fat","copy","盘内复制");
-    img_span_kv_str(&sp,"src",src); img_span_kv_str(&sp,"dst",dst); img_span_begin(&sp);
-    rc = img_fat32_copy(fs, src, dst, conflict, img_cmd_prog(), got, sizeof got, &sz, &replaced);
-    img_span_end(&sp, rc);
-    img_fat32_unmount(fs);
-    if(rc){
-        const char *code = (rc==IMG_EEXISTS)?"FAT-ENTRY-EXISTS"
-                         : (rc==IMG_ESTATE) ?"FAT-DIR-NOT-EMPTY"
-                         : (rc==IMG_EFULL)  ?"FAT-ENOSPC"
-                         : (rc==IMG_ECANCELLED)?"CTL-CANCELLED":"FAT-COPY-FAIL";
-        img_result_fail(out,rc,code,src,
-            (rc==IMG_EEXISTS)?"目标已存在（改用 conflict=overwrite 或 rename）":
-            (rc==IMG_EFULL)  ?"文件大于 64 MiB：FAT 侧暂只支持小文件，大文件请 export 再 put":
-            (rc==IMG_ECANCELLED)?"已取消":"复制失败",NULL);
-        return rc;
-    }
-    img_result_str(out,"path", got);
-    img_result_u64(out,"size", sz);
-    img_result_bool(out,"replaced", replaced);
-    return IMG_OK;
-}
-
-static int cmd_ntfs_rm(img_ctx *ctx, const img_args *in, img_result *out){
-    if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 删除）","重新编译时开启该功能并安装对应系统库");
-#if IMG_WITH_NTFS3G
-    uint64_t lba=img_args_u64(in,"lba",0);
-    const char *path=img_args_get(in,"path");
-    if(!path||path[0]!='/'){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","必须是 / 开头的盘内绝对路径",NULL); return IMG_EINVAL; }
-    img_qcow2 *q=img_ctx_qcow2(ctx);
-    if(!q) return qc_open_fail(out,ctx);
-    img_parttable_t *t=NULL; int rc=img_ctx_parttable(ctx,&t);
-    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
-    uint64_t pb=ntfs_part_bytes(t,lba);
-    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在或 LBA 不在分区表里",NULL); return IMG_EINVAL; }
-    img_ntfs_fs *fs=img_ntfs_mount_rw(q,lba,pb);
-    if(!fs){ img_result_fail(out,IMG_ESTATE,"PART-FS-BAD",path,"不是合法 NTFS（未格式化或 LBA 不对）",NULL); return IMG_ESTATE; }
-    if(!img_ntfs_path_exists(fs,path)){
-        img_ntfs_umount(fs);
-        img_result_fail(out,IMG_ENOENT,"NTFS-PATH-NOTFOUND",path,"要删的路径不存在（先用 ntfs.list 核对）",NULL);
-        return IMG_ENOENT;
-    }
-    bool rec=img_args_bool(in,"recursive",false);
-    int removed=0;
-    img_span sp; img_span_prep(&sp,"ntfs", rec?"rmtree":"rm", rec?"递归删除":"删盘内条目");
-    img_span_kv_str(&sp,"path",path); img_span_kv_u64(&sp,"recursive",rec?1u:0u); img_span_begin(&sp);
-    int rr = rec ? img_ntfs_rm_tree(fs,path,&removed) : img_ntfs_rm(fs,path);
-    if(rr==IMG_OK && !rec) removed=1;
-    img_span_end(&sp,rr);
-    bool gone=(rr==IMG_OK) && !img_ntfs_path_exists(fs,path);
-    img_ntfs_umount(fs);
-    if(rr!=IMG_OK){
-        const char *code=(rr==IMG_ESTATE)?"NTFS-DIR-NOT-EMPTY"
-                        :(rr==IMG_EINVAL)?"CMD-ARG-BAD"
-                        :(rr==IMG_ECORRUPT)?"NTFS-DIR-PHANTOM":"NTFS-RM-FAIL";
-        const char *hint=(rr==IMG_ESTATE)?"目录不空：要连子项一起删请显式传 recursive=true":
-                                          "删除失败（卷状态或权限异常）";
-        img_result_fail(out,rr,code,path,hint,NULL); return rr;
-    }
-    if(!gone){ img_result_fail(out,IMG_ESTATE,"FAT-RM-FAIL",path,"报成功但路径还在（卷状态异常，建议 qc.verify）",NULL); return IMG_ESTATE; }
-    img_result_str(out,"path",path);
-    img_result_u64(out,"removed",(uint64_t)removed);
-    img_result_bool(out,"deleted",true);
-    return IMG_OK;
-#else
-    (void)ctx;(void)in;(void)out; return IMG_ENOTSUP;
-#endif
-}
 
 
 /* ================= WIM/ESD 内部只读（wim.ls / wim.extract）=================
@@ -3763,188 +3240,188 @@ static int cmd_win_finish(img_ctx *ctx, const img_args *in, img_result *out){
 /* ---------------- file.copy：跨分区 / 跨镜像 / 宿主 / ISO / WIM ----------------
  * 与 ntfs.copy（同卷）的分工：同卷仍然走 ntfs.copy（更快、只碰索引），
  * 这条覆盖剩下所有组合，也是 App 文件管理器"复制/粘贴"的唯一入口。*/
-static const img_arg A_FILECOPY[] = {
-    {"img",         IMG_A_STR,  false, NULL,  "默认镜像（两侧没显式给 *_img 时用它）", NULL},
-    {"src",         IMG_A_STR,  false, NULL,  "源：ntfs:/路径 | fat:/路径 | host:/路径 | iso:/路径 | wim:[索引]:/路径（批量时可省）", NULL},
-    {"dst",         IMG_A_STR,  false, NULL,  "目标：ntfs:/路径 | fat:/路径 | host:/路径（批量时可省）", NULL},
-    {"src_img",     IMG_A_STR,  false, NULL,  "源镜像（qcow2 / iso / wim-esd）", NULL},
-    {"dst_img",     IMG_A_STR,  false, NULL,  "目标镜像（qcow2）", NULL},
-    {"src_lba",     IMG_A_U64,  false, "0",   "源分区起始 LBA（0=自动；该文件系统只有唯一分区才挑）", NULL},
-    {"dst_lba",     IMG_A_U64,  false, "0",   "目标分区起始 LBA（0=自动）", NULL},
-    {"src_index",   IMG_A_U64,  false, "1",   "WIM/ESD 映像索引", NULL},
-    {"conflict",    IMG_A_ENUM, false, "fail","同名策略：fail（默认）/ overwrite / rename（名 (1).扩展名）", NULL},
-    {"recursive",   IMG_A_BOOL, false, "true","源是目录时递归复制（false=目录一律拒绝，零副作用）", NULL},
-    {"preserve_times", IMG_A_BOOL, false, "true", "照抄源时间（NTFS 四时间 / FAT 5 字段 / 宿主 atime+mtime）", NULL},
-    {"create_parents", IMG_A_BOOL, false, "true", "目标父目录不存在就建", NULL},
-    {"follow_symlinks", IMG_A_BOOL, false, "false", "宿主源：是否跟随符号链接（默认否，防止复制出环）", NULL},
-    {"list_file", IMG_A_STR, false, NULL, "批量粘贴清单（每行 源>目标，两侧都是位置串）", NULL},
-    {"on_fail", IMG_A_STR, false, "continue", "批量时某项失败：continue（默认）或 stop", NULL},
-};
-
-static const char *xcopy_code(int rc){
-    switch(rc){
-        case IMG_ENOENT:    return "COPY-SRC-NOTFOUND";
-        case IMG_EAGAIN:    return "COPY-LBA-AMBIGUOUS";
-        case IMG_EEXISTS:   return "COPY-DEST-EXISTS";
-        case IMG_ESTATE:    return "COPY-DEST-CONFLICT";
-        case IMG_ENOTSUP:   return "COPY-UNSUPPORTED";
-        case IMG_EFULL:     return "COPY-NO-SPACE";
-        case IMG_ECORRUPT:  return "COPY-VERIFY-FAIL";
-        case IMG_ERANGE:    return "COPY-FILE-TOO-BIG";
-        case IMG_ECANCELLED:return "CTL-CANCELLED";
-        case IMG_ECYCLE:    return "COPY-INTO-SELF";
-        case IMG_ESAMEFILE: return "COPY-SAME-FILE";
-        case IMG_ENAMETOOLONG:return "COPY-NAME-TOO-LONG";
-        case IMG_EFORMAT:   return "PART-FS-BAD";
-        case IMG_EINVAL:    return "CMD-ARG-BAD";
-        default:            return "COPY-FAIL";
-    }
-}
+/* ---------------- 统一 copy / move / rm（2026-10-24） ----------------
+ * 三条命令取代：ntfs.copy / fat.copy / file.copy / ntfs.move / fat.move /
+ * ntfs.rm / fat.rm / ntfs.rename。
+ * 路径语法见 include/img_path.h：qcow2!p3:/a、iso!:/b!1:/c、host:/d。*/
+/* 复制/移动失败时的建议（按 rc；文案只进日志，不进 JSON 信封） */
 static const char *xcopy_hint(int rc){
     switch(rc){
-        case IMG_ENOENT:    return "源路径或镜像不存在：先用 ntfs.list / fat.ls / host 路径核对";
-        case IMG_EAGAIN:    return "镜像里该文件系统有多个分区：显式传 --src_lba/--dst_lba（先 part.show 看）";
+        case IMG_ENOENT:    return "路径不存在：先 list 父目录核对名称（大小写不敏感）";
+        case IMG_EAGAIN:    return "该文件系统有多个分区：把路径写成 !p3: 或 !lba165888:";
         case IMG_EEXISTS:   return "目标已存在：改用 conflict=overwrite 或 conflict=rename";
-        case IMG_ESTATE:    return "目标类型冲突（文件/目录互顶）：换一个目标名或先删掉旧对象";
-        case IMG_ENOTSUP:   return "该组合不支持：目标不能是 ISO/WIM；源是目录时 recursive 必须为 true";
-        case IMG_EFULL:     return "空间不足（镜像内分区或宿主磁盘）：清理后重试";
-        case IMG_ECORRUPT:  return "写完从盘上复查没过：卷可能已不一致，停止继续写并考虑重建该分区";
-        case IMG_ERANGE:    return "FAT32 单文件上限 4 GiB-1：改用 NTFS 分区或拆文件";
-        case IMG_ECANCELLED:return "已取消（已写入的部分保留，未完成的临时文件已清理）";
-        case IMG_ECYCLE:    return "目标在源目录的子树里：会无限递归，已拒绝（换目标位置）";
-        case IMG_ESAMEFILE: return "源和目标指向同一个文件：要复制一份副本请用 conflict=rename";
-        case IMG_ENAMETOOLONG:return "名字超过 255 字符上限：先改名再复制（工具不会静默截断）";
-        default:            return "复制失败：看 err.at 定位是哪一侧；需要时导出诊断日志";
+        case IMG_ESTATE:    return "目标类型冲突（文件/目录互顶）：换目标名或先删旧对象";
+        case IMG_ENOTSUP:   return "该组合不支持：目标不能是 ISO/WIM；目录复制/跨卷移动需要 recursive=true";
+        case IMG_EFULL:     return "空间不足（镜像内分区或宿主磁盘）";
+        case IMG_ECORRUPT:  return "写完复查失败：停止写入，保留现场并考虑备份";
+        case IMG_ERANGE:    return "FAT32 单文件上限 4 GiB-1：改用 NTFS 或拆分";
+        case IMG_ECANCELLED:return "已取消；已写入的部分保留";
+        case IMG_EREADONLY: return "ISO/WIM/ESD 是只读安装源，不能写入";
+        case IMG_EPARTIAL:  return "复制成功但删源失败：两份都在，手动处理，不要自动重试";
+        case IMG_EREFUSED:  return "按安全策略拒绝：宿主删除需要 allow_host_delete=true";
+        default:            return "失败：看 err.at 定位是哪一侧；需要时导出诊断日志";
     }
 }
 
-/* 单条复制：解析两侧位置 → 调引擎。错误码由调用方决定怎么包装。*/
-static int file_copy_one(img_ctx *ctx, const img_args *in,
-                         const char *ss, const char *ds,
-                         img_xcopy_stats *stp){
-    img_xloc sl, dl; char why[256]={0};
-    int rc=img_xcopy_parse(ss,&sl,why,sizeof why);
-    if(rc!=IMG_OK) return rc;
-    rc=img_xcopy_parse(ds,&dl,why,sizeof why);
-    if(rc!=IMG_OK) return rc;
-    if(dl.kind==IMG_XK_ISO || dl.kind==IMG_XK_WIM) return IMG_EINVAL;
+static const img_arg A_COPY[] = {
+    {"src", IMG_A_STR, false, NULL, "源：/path!p3:/a、iso!:/b、host:/c（批量时可省）", NULL},
+    {"dst", IMG_A_STR, false, NULL, "目标：/path!p3:/a、host:/c（批量时可省；不能是 ISO/WIM）", NULL},
+    {"conflict", IMG_A_ENUM, false, "fail", "同名策略：fail | overwrite | rename（名 (1).扩展名）", NULL},
+    {"recursive", IMG_A_BOOL, false, "true", "源是目录时递归复制；false=目录一律拒绝", NULL},
+    {"preserve_times", IMG_A_BOOL, false, "true", "保留源时间戳", NULL},
+    {"create_parents", IMG_A_BOOL, false, "true", "目标父目录不存在就建", NULL},
+    {"follow_symlinks", IMG_A_BOOL, false, "false", "宿主源是否跟随符号链接", NULL},
+    {"list_file", IMG_A_STR, false, NULL, "批量：每行 `源路径>目标路径`（可带 !p3:）", NULL},
+    {"on_fail", IMG_A_ENUM, false, "continue", "批量失败策略：continue | stop", NULL},
+};
+static const img_arg A_MOVE[] = {
+    {"src", IMG_A_STR, false, NULL, "源（同 copy；批量时可省）", NULL},
+    {"dst", IMG_A_STR, false, NULL, "目标（同 copy；批量时可省）", NULL},
+    {"conflict", IMG_A_ENUM, false, "fail", "同名策略：fail | overwrite | rename", NULL},
+    {"recursive", IMG_A_BOOL, false, "true", "目录移动/跨卷移动必须为 true", NULL},
+    {"preserve_times", IMG_A_BOOL, false, "true", "跨卷复制时保留时间戳", NULL},
+    {"create_parents", IMG_A_BOOL, false, "true", "目标父目录不存在就建", NULL},
+    {"allow_host_delete", IMG_A_BOOL, false, "false", "允许删除宿主源文件（App 弹窗确认后再传 true）", NULL},
+    {"list_file", IMG_A_STR, false, NULL, "批量：每行 `源路径>目标路径`", NULL},
+    {"on_fail", IMG_A_ENUM, false, "continue", "批量失败策略：continue | stop", NULL},
+};
+static const img_arg A_RENAME[] = {
+    {"path", IMG_A_STR, true, NULL, "要改名的路径（! 语法）", NULL},
+    {"name", IMG_A_STR, true, NULL, "新名字（只写名字，不能带 / \\ ! :）", NULL},
+};
+static const img_arg A_RM[] = {
+    {"path", IMG_A_STR, true, NULL, "要删除的路径（同 copy 的路径语法）", NULL},
+    {"recursive", IMG_A_BOOL, false, "false", "目录递归删除（危险；UI 二次确认）", NULL},
+    {"allow_host_delete", IMG_A_BOOL, false, "false", "允许删除宿主文件（App 弹窗确认后再传 true）", NULL},
+};
 
-    const char *self = ctx ? img_ctx_path(ctx) : NULL;
-    const char *arg_img = img_args_get(in,"img");
-    const char *si = img_args_get(in,"src_img");
-    const char *di = img_args_get(in,"dst_img");
-    const char *defimg = arg_img ? arg_img : self;
-
-    if(sl.kind==IMG_XK_NTFS || sl.kind==IMG_XK_FAT){
-        const char *p = si ? si : defimg;
-        if(!p || !*p) return IMG_EINVAL;
-        snprintf(sl.img,sizeof sl.img,"%s",p);
-    } else if(sl.kind==IMG_XK_ISO || sl.kind==IMG_XK_WIM){
-        if(!si || !*si) return IMG_EINVAL;
-        snprintf(sl.img,sizeof sl.img,"%s",si);
-    }
-    if(dl.kind==IMG_XK_NTFS || dl.kind==IMG_XK_FAT){
-        const char *p = di ? di : defimg;
-        if(!p || !*p) return IMG_EINVAL;
-        snprintf(dl.img,sizeof dl.img,"%s",p);
-    }
-    if(!sl.lba) sl.lba=img_args_u64(in,"src_lba",0);
-    if(!dl.lba) dl.lba=img_args_u64(in,"dst_lba",0);
-    sl.index=(int)img_args_u64(in,"src_index",1);
-
-    img_xcopy_opts o={ IMG_COPY_FAIL, true, true, true, false, 32 };
-    const char *cf=img_args_get(in,"conflict");
-    if(cf){
-        if(!strcmp(cf,"overwrite")) o.conflict=IMG_COPY_OVERWRITE;
-        else if(!strcmp(cf,"rename")) o.conflict=IMG_COPY_RENAME;
-        else if(strcmp(cf,"fail")) return IMG_EINVAL;
-    }
-    o.recursive      = img_args_bool(in,"recursive",true);
-    o.preserve_times = img_args_bool(in,"preserve_times",true);
-    o.create_parents = img_args_bool(in,"create_parents",true);
-    o.follow_symlinks= img_args_bool(in,"follow_symlinks",false);
-
-    memset(stp,0,sizeof *stp);
-    return img_xcopy_run(&sl,&dl,&o,img_cmd_prog(),stp);
-}
-
-static void file_copy_fill(img_result *out, const char *ss, const char *ds,
-                           const img_xcopy_stats *st){
-    img_result_u64(out,"copied_files",st->files);
-    img_result_u64(out,"copied_dirs",st->dirs);
-    img_result_u64(out,"bytes",st->bytes);
-    img_result_u64(out,"skipped",st->skipped);
-    img_result_u64(out,"ads",st->ads);
-    img_result_str(out,"src",ss);
-    img_result_str(out,"dst",ds);
-    if(st->final_path[0]){
-        img_result_str(out,"dst_path",st->final_path);
-        char par[2048]; snprintf(par,sizeof par,"%s",st->final_path);
-        char *slash=strrchr(par,'/');
-        if(slash){ if(slash==par) par[1]=0; else *slash=0; img_result_str(out,"parent",par); }
+static void p2loc(const img_path *p, img_xloc *l){
+    memset(l,0,sizeof *l);
+    l->kind=p->kind; l->lba=p->lba; l->index=p->index;
+    if(p->kind==IMG_XK_HOST){
+        /* 宿主位置：img 为空，path 就是宿主绝对路径 */
+        snprintf(l->path,sizeof l->path,"%s",p->host);
+    } else {
+        snprintf(l->img,sizeof l->img,"%s",p->host);
+        snprintf(l->path,sizeof l->path,"%s",p->inner);
     }
 }
 
-static int cmd_file_copy(img_ctx *ctx, const img_args *in, img_result *out){
+static bool path_same_volume(const img_path *a, const img_path *b){
+    if(a->kind!=b->kind) return false;
+    if(a->kind==IMG_XK_HOST){
+        char ra[PATH_MAX], rb[PATH_MAX];
+        if(realpath(a->host,ra)&&realpath(b->host,rb)) return strcmp(ra,rb)==0;
+        return strcmp(a->host,b->host)==0;
+    }
+    if(a->kind!=IMG_XK_NTFS && a->kind!=IMG_XK_FAT) return false;
+    if(a->lba!=b->lba) return false;
+    char ra[PATH_MAX], rb[PATH_MAX];
+    if(realpath(a->host,ra)&&realpath(b->host,rb)) return strcmp(ra,rb)==0;
+    return strcmp(a->host,b->host)==0;
+}
+
+static const char *op_code(int rc, int side){
+    switch(rc){
+        case IMG_ENOENT:     return side==2?"PATH-DST-NOTFOUND":"PATH-SRC-NOTFOUND";
+        case IMG_EAGAIN:     return "PATH-PART-AMBIGUOUS";
+        case IMG_EEXISTS:    return "COPY-DST-EXISTS";
+        case IMG_ESTATE:     return side==2?"COPY-DST-CONFLICT":"COPY-SRC-UNSUPPORTED";
+        case IMG_ENOTSUP:    return "COPY-UNSUPPORTED";
+        case IMG_EFULL:      return "COPY-NO-SPACE";
+        case IMG_ECORRUPT:   return "COPY-VERIFY-FAIL";
+        case IMG_ERANGE:     return "COPY-FILE-TOO-BIG";
+        case IMG_ECANCELLED: return "CTL-CANCELLED";
+        case IMG_EFORMAT:    return "PATH-FS-BAD";
+        case IMG_EINVAL:     return "PATH-BAD";
+        case IMG_ENAMETOOLONG:return "COPY-NAME-TOO-LONG";
+        case IMG_ESAMEFILE:  return "COPY-SAME-FILE";
+        case IMG_ECYCLE:     return "COPY-INTO-SELF";
+        case IMG_EREADONLY:  return "PATH-READONLY";
+        case IMG_EPARTIAL:   return "MOVE-PARTIAL";
+        case IMG_EREFUSED:   return "MOVE-HOST-DELETE-REFUSED";
+        default:             return "COPY-FAIL";
+    }
+}
+
+static int parse_or_fail(const char *spec, img_path *p, const char *which,
+                         img_result *out){
+    char why[256]={0};
+    int rc=img_path_parse(spec,p,why,sizeof why);
+    if(rc!=IMG_OK){
+        img_result_fail(out,rc,"PATH-BAD",which,why[0]?why:"路径无法解析",
+            "写法：/镜像.qcow2!p3:/路径、/镜像.iso!:/路径、/a.esd!1:/路径、host:/手机路径");
+    }
+    return rc;
+}
+
+static int cmd_copy(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx;
     const char *ss=img_args_get(in,"src"), *ds=img_args_get(in,"dst");
     const char *lst=img_args_get(in,"list_file");
-    if(!lst && (!ss || !ds)){
-        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","src","要么给 src+dst，要么给 list_file（二选一）",NULL);
+    if(!lst && (!ss||!ds)){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","src","要么给 src+dst，要么给 list_file",NULL);
         return IMG_EINVAL;
     }
-    if(lst && (ss || ds)){
-        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","list_file","list_file 与 src/dst 不能同时给",NULL);
-        return IMG_EINVAL;
-    }
+    int conflict=IMG_COPY_FAIL;
+    const char *cf=img_args_get(in,"conflict");
+    if(cf){ if(!strcmp(cf,"overwrite")) conflict=IMG_COPY_OVERWRITE;
+            else if(!strcmp(cf,"rename")) conflict=IMG_COPY_RENAME;
+            else if(strcmp(cf,"fail")){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","conflict","只能是 fail/overwrite/rename",NULL); return IMG_EINVAL; } }
+    img_xcopy_opts o={ conflict, true, true, true, false, 32 };
+    o.recursive=img_args_bool(in,"recursive",true);
+    o.preserve_times=img_args_bool(in,"preserve_times",true);
+    o.create_parents=img_args_bool(in,"create_parents",true);
+    o.follow_symlinks=img_args_bool(in,"follow_symlinks",false);
 
     if(lst){
-        /* ---- 批量粘贴：每行 "源>目标"（两侧都是位置串），一次调用全做完 ----
-         * 语义与 ntfs.copy 的批量一致：命令本身成功（App 能拿到逐项明细），
-         * 单项失败只记在 items/failed 里。*/
         FILE *fp=fopen(lst,"r");
         if(!fp){ img_result_fail(out,IMG_ENOENT,"SRC-NOTFOUND",lst,"清单文件打不开",NULL); return IMG_ENOENT; }
         const char *ofail=img_args_get(in,"on_fail");
-        bool stop_on_fail = ofail && !strcmp(ofail,"stop");
+        bool stop_on_fail=ofail && !strcmp(ofail,"stop");
         IMG_THREAD_LOCAL static char items[96*1024];
         size_t il=1; items[0]='['; items[1]=0;
         int okn=0,badn=0; uint64_t bytes=0; bool truncated=false;
-        char line[1600];
-        img_span sp; img_span_prep(&sp,"file","copy-batch","批量跨位置复制");
-        img_span_kv_str(&sp,"list",lst); img_span_begin(&sp);
+        char line[4200];
         while(fgets(line,sizeof line,fp)){
             char *nl=strchr(line,'\n'); if(nl) *nl=0;
-            char *p0=line;
-            while(*p0==' '||*p0=='\t') p0++;
-            if(!*p0 || *p0=='#') continue;
-            char *sep=strchr(p0,'>');
+            char *p0=line; while(*p0==' '||*p0=='\t') p0++;
+            if(!*p0||*p0=='#') continue;
+            char *sep=strrchr(p0,'>');          /* 路径里可能有 >？取最后一个 */
             if(!sep){ badn++; continue; }
             *sep=0;
-            char *a=p0, *b=sep+1;
-            char *e=a+strlen(a); while(e>a && (e[-1]==' '||e[-1]=='\t')) *--e=0;
+            char *a=p0,*b=sep+1;
+            char *e=a+strlen(a); while(e>a&&(e[-1]==' '||e[-1]=='\t')) *--e=0;
             while(*b==' '||*b=='\t') b++;
-            e=b+strlen(b); while(e>b && (e[-1]==' '||e[-1]=='\t')) *--e=0;
+            e=b+strlen(b); while(e>b&&(e[-1]==' '||e[-1]=='\t')) *--e=0;
             if(!*a||!*b){ badn++; continue; }
-            img_xcopy_stats st;
-            int rc2=file_copy_one(ctx,in,a,b,&st);
-            char ea[2048], eb[2048], ep[2048], tail[2304];
+            img_path ps,pd; int rc;
+            memset(&ps,0,sizeof ps); memset(&pd,0,sizeof pd);
+            rc=img_path_parse(a,&ps,NULL,0);
+            if(rc==IMG_OK) rc=img_path_parse(b,&pd,NULL,0);
+            img_xcopy_stats stx; memset(&stx,0,sizeof stx);
+            if(rc==IMG_OK && pd.is_readonly) rc=IMG_EREADONLY;
+            if(rc==IMG_OK){
+                img_xloc ls,ld; p2loc(&ps,&ls); p2loc(&pd,&ld);
+                rc=img_xcopy_run(&ls,&ld,&o,img_cmd_prog(),&stx);
+            }
+            img_path_cleanup(&ps); img_path_cleanup(&pd);
+            char ea[2200],eb[2200],ep[2200],tail[2300];
             jesc(ea,sizeof ea,a); jesc(eb,sizeof eb,b);
-            jesc(ep,sizeof ep,st.final_path[0]?st.final_path:"");
-            if(rc2==IMG_OK) snprintf(tail,sizeof tail,",\"path\":\"%s\"",ep);
-            else            snprintf(tail,sizeof tail,",\"code\":\"%s\"",xcopy_code(rc2));
+            jesc(ep,sizeof ep,stx.final_path);
+            if(rc==IMG_OK) snprintf(tail,sizeof tail,",\"path\":\"%s\",\"ino\":%llu,\"size\":%llu",
+                                    ep,(unsigned long long)stx.top_ino,(unsigned long long)stx.top_size);
+            else snprintf(tail,sizeof tail,",\"ino\":0,\"size\":0,\"code\":\"%s\"",op_code(rc,0));
             int need=snprintf(items+il,sizeof items-il,
                 "%s{\"src\":\"%s\",\"dst\":\"%s\",\"ok\":%s,\"files\":%llu,\"dirs\":%llu,\"bytes\":%llu%s}",
-                (okn+badn)?",":"", ea, eb, rc2==IMG_OK?"true":"false",
-                (unsigned long long)st.files,(unsigned long long)st.dirs,
-                (unsigned long long)st.bytes, tail);
+                (okn+badn)?",":"",ea,eb,rc==IMG_OK?"true":"false",
+                (unsigned long long)stx.files,(unsigned long long)stx.dirs,
+                (unsigned long long)stx.bytes,tail);
             if(need>0 && il+(size_t)need<sizeof items) il+=(size_t)need; else truncated=true;
-            if(rc2==IMG_OK){ okn++; bytes+=st.bytes; }
-            else { badn++; if(stop_on_fail) break; }
+            if(rc==IMG_OK){ okn++; bytes+=stx.bytes; } else { badn++; if(stop_on_fail) break; }
         }
         fclose(fp);
         if(il+2<sizeof items){ items[il++]=']'; items[il]=0; }
-        img_span_kv_u64(&sp,"copied",(uint64_t)okn);
-        img_span_kv_u64(&sp,"failed",(uint64_t)badn);
-        img_span_end(&sp,IMG_OK);
         img_result_u64(out,"copied",(uint64_t)okn);
         img_result_u64(out,"failed",(uint64_t)badn);
         img_result_u64(out,"bytes",bytes);
@@ -3953,67 +3430,257 @@ static int cmd_file_copy(img_ctx *ctx, const img_args *in, img_result *out){
         return IMG_OK;
     }
 
-    /* 镜像文件先做一次可读性检查：报错要能区分"源镜像没了"和"盘内路径没了" */
-    img_xloc sl0, dl0; char why[256]={0};
-    if(img_xcopy_parse(ss,&sl0,why,sizeof why)!=IMG_OK){
-        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","src",why,
-                        "源写法：ntfs:/a/b、fat:/a、host:/sdcard/x、iso:/sources/x.wim、wim:1:/Windows");
-        return IMG_EINVAL;
+    img_path ps,pd;
+    int rc=parse_or_fail(ss,&ps,"src",out);
+    if(rc==IMG_OK) rc=parse_or_fail(ds,&pd,"dst",out);
+    if(rc!=IMG_OK){ img_path_cleanup(&ps); return rc; }
+    if(pd.is_readonly){
+        img_path_cleanup(&ps); img_path_cleanup(&pd);
+        img_result_fail(out,IMG_EREADONLY,"PATH-READONLY",ds,"目标是只读容器（ISO/WIM/ESD）",NULL);
+        return IMG_EREADONLY;
     }
-    if(img_xcopy_parse(ds,&dl0,why,sizeof why)!=IMG_OK){
-        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","dst",why,"目标写法：ntfs:/a/b、fat:/a、host:/sdcard/x");
-        return IMG_EINVAL;
-    }
-    if(dl0.kind==IMG_XK_ISO || dl0.kind==IMG_XK_WIM){
-        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","dst","目标只能是 ntfs/fat/host（ISO/WIM 是只读安装源）",NULL);
-        return IMG_EINVAL;
-    }
-    const char *self=ctx?img_ctx_path(ctx):NULL;
-    const char *arg_img=img_args_get(in,"img");
-    const char *si=img_args_get(in,"src_img"), *di=img_args_get(in,"dst_img");
-    const char *defimg=arg_img?arg_img:self;
-    const char *simg = (sl0.kind==IMG_XK_NTFS||sl0.kind==IMG_XK_FAT) ? (si?si:defimg) : si;
-    const char *dimg = (dl0.kind==IMG_XK_NTFS||dl0.kind==IMG_XK_FAT) ? (di?di:defimg) : NULL;
-    if((sl0.kind==IMG_XK_NTFS||sl0.kind==IMG_XK_FAT||sl0.kind==IMG_XK_ISO||sl0.kind==IMG_XK_WIM)
-       && (!simg||!*simg)){
-        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","src_img","源在镜像/ISO/WIM 里，但没给镜像路径",NULL);
-        return IMG_EINVAL;
-    }
-    if((dl0.kind==IMG_XK_NTFS||dl0.kind==IMG_XK_FAT) && (!dimg||!*dimg)){
-        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","dst_img","目标在镜像里，但没给镜像路径",NULL);
-        return IMG_EINVAL;
-    }
-    if(simg && *simg && access(simg,R_OK)!=0){
-        img_result_fail(out,IMG_ENOENT,"COPY-SRC-NOTFOUND",simg,"源镜像打不开（不存在/无权限）",NULL);
-        return IMG_ENOENT;
-    }
-    if(dimg && *dimg && access(dimg,R_OK)!=0){
-        img_result_fail(out,IMG_ENOENT,"IMG-OPEN-FAIL",dimg,"目标镜像打不开（不存在/无权限）",NULL);
-        return IMG_ENOENT;
-    }
-
-    img_span sp; img_span_prep(&sp,"file","copy","跨位置复制");
-    img_span_kv_str(&sp,"src",ss); img_span_kv_str(&sp,"dst",ds); img_span_begin(&sp);
-    img_xcopy_stats st;
-    int rc=file_copy_one(ctx,in,ss,ds,&st);
-    img_span_kv_u64(&sp,"files",st.files);
-    img_span_kv_u64(&sp,"bytes",st.bytes);
-    img_span_end(&sp,rc);
+    img_xloc ls,ld; p2loc(&ps,&ls); p2loc(&pd,&ld);
+    img_xcopy_stats st; memset(&st,0,sizeof st);
+    rc=img_xcopy_run(&ls,&ld,&o,img_cmd_prog(),&st);
+    img_path_cleanup(&ps); img_path_cleanup(&pd);
     if(rc!=IMG_OK){
-        char why2[256];
-        snprintf(why2,sizeof why2,"已完成 %llu 个文件 / %.1f MiB 后失败（%s侧）",
+        char why[300];
+        snprintf(why,sizeof why,"已完成 %llu 个文件 / %.1f MiB 后失败%s",
                  (unsigned long long)st.files,(double)st.bytes/1048576.0,
-                 st.side==1?"源":(st.side==2?"目标":"写入"));
-        const char *cde=xcopy_code(rc);
-        /* 同一错误码在两侧含义不同：ENOENT 在目标侧是"目标分区/路径不存在"，
-         * 在源侧才是"源不存在"。不给 App 区分会把它引到错的方向去查。*/
-        if(rc==IMG_ENOENT && st.side==2) cde="COPY-DST-NOTFOUND";
-        if(rc==IMG_ESTATE && st.side==2) cde="COPY-DST-FS-BAD";
-        if(rc==IMG_EAGAIN) cde="COPY-LBA-AMBIGUOUS";
-        img_result_fail(out,rc,cde,st.side==2?ds:ss,why2,xcopy_hint(rc));
+                 st.side==1?"（源侧）":(st.side==2?"（目标侧）":""));
+        img_result_fail(out,rc,op_code(rc,st.side),ss,why,xcopy_hint(rc));
         return rc;
     }
-    file_copy_fill(out,ss,ds,&st);
+    img_result_u64(out,"copied_files",st.files);
+    img_result_u64(out,"copied_dirs",st.dirs);
+    img_result_u64(out,"bytes",st.bytes);
+    img_result_u64(out,"skipped",st.skipped);
+    img_result_u64(out,"ads",st.ads);
+    img_result_u64(out,"size",st.top_size);
+    img_result_u64(out,"ino",st.top_ino);
+    if(st.final_path[0]) img_result_str(out,"path",st.final_path);
+    img_result_bool(out,"replaced",st.replaced);
+    img_result_u64(out,"parent_total",st.parent_total);
+    img_result_str(out,"mode",path_same_volume(&ps,&pd)?"same_volume":"cross_volume");
+    img_result_str(out,"src",ss);
+    img_result_str(out,"dst",ds);
+    if(st.final_path[0]){
+        img_result_str(out,"dst_path",st.final_path);
+        char par[2048]; snprintf(par,sizeof par,"%s",st.final_path);
+        char *slash=strrchr(par,'/');
+        if(slash){ if(slash==par) par[1]=0; else *slash=0; img_result_str(out,"parent",par); }
+    }
+    return IMG_OK;
+}
+
+static int cmd_move(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx;
+    const char *ss=img_args_get(in,"src"), *ds=img_args_get(in,"dst");
+    const char *lst=img_args_get(in,"list_file");
+    if(!lst && (!ss||!ds)){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","src","要么给 src+dst，要么给 list_file",NULL);
+        return IMG_EINVAL;
+    }
+    int conflict=IMG_COPY_FAIL;
+    const char *cf=img_args_get(in,"conflict");
+    if(cf){ if(!strcmp(cf,"overwrite")) conflict=IMG_COPY_OVERWRITE;
+            else if(!strcmp(cf,"rename")) conflict=IMG_COPY_RENAME;
+            else if(strcmp(cf,"fail")){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","conflict","只能是 fail/overwrite/rename",NULL); return IMG_EINVAL; } }
+    img_xmove_opts o={ conflict, true, true, true, false, true, 32 };
+    o.recursive=img_args_bool(in,"recursive",true);
+    o.preserve_times=img_args_bool(in,"preserve_times",true);
+    o.create_parents=img_args_bool(in,"create_parents",true);
+    o.allow_host_delete=img_args_bool(in,"allow_host_delete",false);
+
+    if(lst){
+        FILE *fp=fopen(lst,"r");
+        if(!fp){ img_result_fail(out,IMG_ENOENT,"SRC-NOTFOUND",lst,"清单文件打不开",NULL); return IMG_ENOENT; }
+        const char *ofail=img_args_get(in,"on_fail");
+        bool stop_on_fail=ofail && !strcmp(ofail,"stop");
+        IMG_THREAD_LOCAL static char items[96*1024];
+        size_t il=1; items[0]='['; items[1]=0;
+        int okn=0,badn=0; uint64_t bytes=0; bool truncated=false;
+        char line[4200];
+        while(fgets(line,sizeof line,fp)){
+            char *nl=strchr(line,'\n'); if(nl) *nl=0;
+            char *p0=line; while(*p0==' '||*p0=='\t') p0++;
+            if(!*p0||*p0=='#') continue;
+            char *sep=strrchr(p0,'>');
+            if(!sep){ badn++; continue; }
+            *sep=0;
+            char *a=p0,*b=sep+1;
+            char *e=a+strlen(a); while(e>a&&(e[-1]==' '||e[-1]=='\t')) *--e=0;
+            while(*b==' '||*b=='\t') b++;
+            e=b+strlen(b); while(e>b&&(e[-1]==' '||e[-1]=='\t')) *--e=0;
+            if(!*a||!*b){ badn++; continue; }
+            img_path ps,pd; int rc;
+            memset(&ps,0,sizeof ps); memset(&pd,0,sizeof pd);
+            rc=img_path_parse(a,&ps,NULL,0);
+            if(rc==IMG_OK) rc=img_path_parse(b,&pd,NULL,0);
+            img_xmove_stats stx; memset(&stx,0,sizeof stx);
+            if(rc==IMG_OK){
+                img_xloc ls,ld; p2loc(&ps,&ls); p2loc(&pd,&ld);
+                rc=img_xmove_run(&ls,&ld,&o,img_cmd_prog(),&stx);
+            }
+            img_path_cleanup(&ps); img_path_cleanup(&pd);
+            char ea[2200],eb[2200],ep[2200],tail[2300];
+            jesc(ea,sizeof ea,a); jesc(eb,sizeof eb,b); jesc(ep,sizeof ep,stx.final_path);
+            if(rc==IMG_OK) snprintf(tail,sizeof tail,",\"path\":\"%s\",\"mode\":\"%s\"",ep,stx.mode);
+            else snprintf(tail,sizeof tail,",\"code\":\"%s\"",op_code(rc,0));
+            int need=snprintf(items+il,sizeof items-il,
+                "%s{\"src\":\"%s\",\"dst\":\"%s\",\"ok\":%s,\"files\":%llu,\"dirs\":%llu,\"bytes\":%llu%s}",
+                (okn+badn)?",":"",ea,eb,rc==IMG_OK?"true":"false",
+                (unsigned long long)stx.files,(unsigned long long)stx.dirs,
+                (unsigned long long)stx.bytes,tail);
+            if(need>0 && il+(size_t)need<sizeof items) il+=(size_t)need; else truncated=true;
+            if(rc==IMG_OK){ okn++; bytes+=stx.bytes; } else { badn++; if(stop_on_fail) break; }
+        }
+        fclose(fp);
+        if(il+2<sizeof items){ items[il++]=']'; items[il]=0; }
+        img_result_u64(out,"moved",(uint64_t)okn);
+        img_result_u64(out,"failed",(uint64_t)badn);
+        img_result_u64(out,"bytes",bytes);
+        img_result_bool(out,"truncated",truncated);
+        img_result_raw(out,"items",items[1]?items:"[]");
+        return IMG_OK;
+    }
+
+    img_path ps,pd;
+    int rc=parse_or_fail(ss,&ps,"src",out);
+    if(rc==IMG_OK) rc=parse_or_fail(ds,&pd,"dst",out);
+    if(rc!=IMG_OK){ img_path_cleanup(&ps); return rc; }
+    if(ps.is_readonly || pd.is_readonly){
+        img_path_cleanup(&ps); img_path_cleanup(&pd);
+        img_result_fail(out,IMG_EREADONLY,"PATH-READONLY",ps.is_readonly?ss:ds,
+                        "ISO/WIM/ESD 是只读安装源，不能作为移动的源或目标",NULL);
+        return IMG_EREADONLY;
+    }
+    img_xloc ls,ld; p2loc(&ps,&ls); p2loc(&pd,&ld);
+    img_xmove_stats st; memset(&st,0,sizeof st);
+    rc=img_xmove_run(&ls,&ld,&o,img_cmd_prog(),&st);
+    bool src_host=(ps.kind==IMG_XK_HOST);
+    img_path_cleanup(&ps); img_path_cleanup(&pd);
+    if(rc!=IMG_OK){
+        const char *cde=op_code(rc,st.side);
+        if(rc==IMG_EREFUSED) cde=src_host?"MOVE-HOST-DELETE-REFUSED":"MOVE-REFUSED";
+        char why[300];
+        snprintf(why,sizeof why,"mode=%s deleted=%s",
+                 st.mode[0]?st.mode:"-",st.deleted?"true":"false");
+        img_result_fail(out,rc,cde,ss,why,
+            rc==IMG_EPARTIAL?"复制已完成但删除源失败：两份都在，请手动处理（不要重试）":
+            rc==IMG_EREFUSED?"宿主文件删除需要 App 弹窗确认并传 allow_host_delete=true":
+            xcopy_hint(rc));
+        return rc;
+    }
+    img_result_str(out,"mode",st.mode);
+    img_result_u64(out,"files",st.files);
+    img_result_u64(out,"dirs",st.dirs);
+    img_result_u64(out,"bytes",st.bytes);
+    img_result_u64(out,"ads",st.ads);
+    img_result_bool(out,"deleted",st.deleted);
+    img_result_bool(out,"noop",st.noop);
+    img_result_bool(out,"case_only",st.case_only);
+    img_result_str(out,"src",ss);
+    img_result_str(out,"dst",ds);
+    if(st.final_path[0]) img_result_str(out,"dst_path",st.final_path);
+    return IMG_OK;
+}
+
+/* 取父目录（按 / 切；根返回 "/"） */
+static void dirname_of(const char *p, char *out, size_t cap){
+    snprintf(out,cap,"%s",p?p:"");
+    char *s=strrchr(out,'/');
+    if(!s){ out[0]=0; return; }
+    if(s==out){ out[1]=0; return; }
+    *s=0;
+}
+
+/* rename = 同父 move。参数是"新名字"，不是完整路径，避免 UI 拼错。*/
+static int cmd_rename(img_ctx *ctx, const img_args *in, img_result *out){
+    const char *ps=img_args_get(in,"path");
+    const char *nn=img_args_get(in,"name");
+    if(!ps||!nn||!*nn){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","name","需要 path + name",NULL);
+        return IMG_EINVAL;
+    }
+    if(strchr(nn,'/')||strchr(nn,'\\')||strchr(nn,'!')||strchr(nn,':')||
+       !strcmp(nn,".")||!strcmp(nn,"..")){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","name",
+                        "新名字不能包含 / \\ ! : 且不能是 . / ..","只写文件名本身；换目录请用 move");
+        return IMG_EINVAL;
+    }
+    img_path p;
+    int rc=parse_or_fail(ps,&p,"path",out);
+    if(rc!=IMG_OK) return rc;
+    if(p.is_readonly){
+        img_path_cleanup(&p);
+        img_result_fail(out,IMG_EREADONLY,"PATH-READONLY",ps,"ISO/WIM/ESD 是只读安装源",NULL);
+        return IMG_EREADONLY;
+    }
+    char dir[2048], dst[4096];
+    if(p.kind==IMG_XK_HOST){
+        dirname_of(p.host,dir,sizeof dir);
+        if(!strcmp(dir,"/")) snprintf(dst,sizeof dst,"/%s",nn);
+        else if(dir[0])        snprintf(dst,sizeof dst,"%s/%s",dir,nn);
+        else                   snprintf(dst,sizeof dst,"%s",nn);
+    } else {
+        dirname_of(p.inner,dir,sizeof dir);
+        if(!strcmp(dir,"/")) snprintf(dst,sizeof dst,"%s!lba%llu:/%s",p.host,
+                                      (unsigned long long)p.lba,nn);
+        else                 snprintf(dst,sizeof dst,"%s!lba%llu:%s/%s",p.host,
+                                      (unsigned long long)p.lba,dir,nn);
+    }
+    img_path_cleanup(&p);
+
+    img_args *a=img_args_new();
+    if(!a){ img_result_fail(out,IMG_ENOMEM,"CMD-FAILED",ps,"内存不足",NULL); return IMG_ENOMEM; }
+    img_args_set(a,"src",ps);
+    img_args_set(a,"dst",dst);
+    static const char *flags[]={"conflict","recursive","preserve_times","create_parents",
+                                "allow_host_delete",NULL};
+    for(int i=0; flags[i]; i++){
+        const char *v=img_args_get(in,flags[i]);
+        if(v) img_args_set(a,flags[i],v);
+    }
+    rc=cmd_move(ctx,a,out);
+    img_args_free(a);
+    return rc;
+}
+
+static int cmd_rm(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx;
+    const char *spec=img_args_get(in,"path");
+    img_path p;
+    int rc=parse_or_fail(spec,&p,"path",out);
+    if(rc!=IMG_OK) return rc;
+    bool rec=img_args_bool(in,"recursive",false);
+    bool allow=img_args_bool(in,"allow_host_delete",false);
+    /* 根目录永远不删：镜像内的 "/" 和宿主的 "/" 都一样。*/
+    if((p.kind==IMG_XK_HOST && (!p.host[0] || !strcmp(p.host,"/"))) ||
+       (p.kind!=IMG_XK_HOST && (!p.inner[0] || !strcmp(p.inner,"/")))){
+        img_path_cleanup(&p);
+        img_result_fail(out,IMG_EREFUSED,"RM-ROOT-REFUSED",spec,
+                        "不允许删除根目录","选择具体的文件或子目录");
+        return IMG_EREFUSED;
+    }
+    uint64_t removed=0;
+    img_xloc l; p2loc(&p,&l);
+    rc=img_xrm_run(&l,rec,allow,&removed);
+    bool host=(p.kind==IMG_XK_HOST);
+    img_path_cleanup(&p);
+    if(rc!=IMG_OK){
+        const char *cde=op_code(rc,0);
+        if(rc==IMG_ESTATE || rc==IMG_ENOTSUP) cde="RM-DIR-NOT-EMPTY";
+        if(rc==IMG_EREFUSED) cde=host?"RM-HOST-DELETE-REFUSED":"RM-REFUSED";
+        img_result_fail(out,rc,cde,spec,
+            rc==IMG_EREFUSED?(host?"宿主文件删除需要 allow_host_delete=true，且不允许删除存储根目录":
+                                    "该对象不允许删除"):NULL,
+            rc==IMG_EREADONLY?"ISO/WIM/ESD 是只读安装源":NULL);
+        return rc;
+    }
+    img_result_str(out,"path",spec);
+    img_result_u64(out,"removed",removed);
+    img_result_bool(out,"deleted",true);
     return IMG_OK;
 }
 
@@ -4034,8 +3701,6 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_PARTSCAN,(int)(sizeof A_PARTSCAN/sizeof A_PARTSCAN[0]), cmd_part_scan},
     {"ntfs.list", "1.0", "列 NTFS 目录（给 App 名单：显示什么/搬谁由 App 决定）",
         A_NTFSLIST,(int)(sizeof A_NTFSLIST/sizeof A_NTFSLIST[0]), cmd_ntfs_list},
-    {"ntfs.rename","1.0", "把【给定名单】的顶层项移进目标目录（冲突自动编号 .001；工具不设默认名）",
-        A_NTFSREN,(int)(sizeof A_NTFSREN/sizeof A_NTFSREN[0]), cmd_ntfs_rename},
     {"img.clone", "1.0", "克隆保留分区到新盘（不列的分区留空 → 换系统主路径；旧镜像自动改名/校验/回滚）",
         A_IMGCLONE,(int)(sizeof A_IMGCLONE/sizeof A_IMGCLONE[0]), cmd_img_clone},
     {"winre.auto","1.0", "写入/删除【首次开机自动启用 WinRE】脚本（SetupComplete.cmd，官方 reagentc 机制）",
@@ -4054,10 +3719,6 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_FATEXPORT,(int)(sizeof A_FATEXPORT/sizeof A_FATEXPORT[0]), cmd_fat_export},
     {"fat.exists", "1.0", "查 FAT32 路径是否存在（断点续跑探测原语）",
         A_FATEXISTS,(int)(sizeof A_FATEXISTS/sizeof A_FATEXISTS[0]), cmd_fat_exists},
-    {"fat.rm",    "1.0", "删除 FAT32 里的文件；目录默认只删空的（recursive=true 才递归）",
-        A_FATRM,  (int)(sizeof A_FATRM  /sizeof A_FATRM[0]),  cmd_fat_rm},
-    {"fat.move",  "1.0", "FAT32 分区内改名/移动【单条路径】（目标已存在则拒绝）",
-        A_FATMOVE,(int)(sizeof A_FATMOVE/sizeof A_FATMOVE[0]), cmd_fat_move},
     {"ctl.cancel","1.0", "请求取消正在执行的操作（另一线程调用；协作式，下一个检查点生效）",
         NULL, 0, cmd_ctl_cancel},
     /* ---- 2026-10-20：补齐 App 建盘流水线（手册 §11.0 的 7 个缺口）---- */
@@ -4069,18 +3730,16 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_NTFSPUT,(int)(sizeof A_NTFSPUT/sizeof A_NTFSPUT[0]), cmd_ntfs_put},
     {"ntfs.export","1.0", "把 NTFS 分区里的文件导出到本地（抽 bootmgr/boot.sdi/winre.wim）",
         A_NTFSEXPORT,(int)(sizeof A_NTFSEXPORT/sizeof A_NTFSEXPORT[0]), cmd_ntfs_export},
-    {"ntfs.move",  "1.0", "盘内改名/移动【单条路径】（末段不同=改名，父目录不同=移动；目录跨父默认允许）",
-        A_NTFSMOVE,(int)(sizeof A_NTFSMOVE/sizeof A_NTFSMOVE[0]), cmd_ntfs_move},
     {"win.finish", "1.0", "裸灌后首次启动收尾：离线把 SYSTEM\\Setup\\Status\\ChildCompletion\\setup.exe 改成 3（微软官方修复）",
         A_WINFINISH,(int)(sizeof A_WINFINISH/sizeof A_WINFINISH[0]), cmd_win_finish},
-    {"ntfs.rm",    "1.0", "删除盘内文件；目录默认只删空的（recursive=true 才递归）",
-        A_NTFSSRM,(int)(sizeof A_NTFSSRM/sizeof A_NTFSSRM[0]), cmd_ntfs_rm},
-    {"ntfs.copy",  "1.0", "盘内复制（同卷）：临时名+原子改名，可选保留时间戳/同名策略",
-        A_NTFSCOPY,(int)(sizeof A_NTFSCOPY/sizeof A_NTFSCOPY[0]), cmd_ntfs_copy},
-    {"fat.copy",   "1.0", "FAT32 盘内复制（同卷）：可选同名策略",
-        A_FATCOPY,(int)(sizeof A_FATCOPY/sizeof A_FATCOPY[0]), cmd_fat_copy},
-    {"file.copy",  "1.0", "跨位置复制：NTFS/FAT 同镜像跨分区、跨 qcow2、宿主↔镜像、ISO/WIM→镜像（支持目录递归）",
-        A_FILECOPY,(int)(sizeof A_FILECOPY/sizeof A_FILECOPY[0]), cmd_file_copy},
+    {"copy", "1.0", "统一复制：同卷/跨分区/跨镜像/宿主/ISO/WIM；路径用 !p3: 语法",
+        A_COPY,(int)(sizeof A_COPY/sizeof A_COPY[0]), cmd_copy},
+    {"move", "1.0", "统一移动/改名：同卷纯索引；跨卷复制+校验+删源；ISO/WIM 只读",
+        A_MOVE,(int)(sizeof A_MOVE/sizeof A_MOVE[0]), cmd_move},
+    {"rm", "1.0", "统一删除：镜像内文件/目录、宿主文件/目录；递归需显式开启",
+        A_RM,(int)(sizeof A_RM/sizeof A_RM[0]), cmd_rm},
+    {"rename", "1.0", "统一改名：同父目录改名（copy/move 的便捷入口）",
+        A_RENAME,(int)(sizeof A_RENAME/sizeof A_RENAME[0]), cmd_rename},
     {"ntfs.touch", "1.0", "设置盘内路径的时间（--now / --time= / --ref= 三选一；0=该项不改）",
         A_NTFSTOUCH,(int)(sizeof A_NTFSTOUCH/sizeof A_NTFSTOUCH[0]), cmd_ntfs_touch},
     {"fat.touch",  "1.0", "设置 FAT 上路径的时间（同上；精度 2 秒）",

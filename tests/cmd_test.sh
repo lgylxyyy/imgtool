@@ -117,7 +117,7 @@ else
   echo "  ⏭ 跳过（没找到 .esd 样本）"
 fi
 
-echo "════ 4b. part.scan / ntfs.list / ntfs.rename（三级口径 + 原语）════"
+echo "════ 4b. part.scan / ntfs.list（三级口径）════"
 # 未格式化 → level 0
 $T/imglayout mk "$W/scan.qcow2" $((20*1024*1024*1024)) gpt --esp 200 --msr 16 >/dev/null 2>&1
 SL=$($T/imgpart show "$W/scan.qcow2" | python3 -c "
@@ -132,26 +132,6 @@ j=$("$T/imgcmd" part.scan --img="$W/scan.qcow2" --lba=$SL)
 lv=$(echo "$j" | jq_ "d['data']['level']")
 hd=$(echo "$j" | jq_ "d['data']['has_data']")
 [ "$lv" = "1" ] && [ "$hd" = "False" ] && ok "NTFS 空卷 → level=1 has_data=False（不误报）" || ng "空卷误报: level=$lv has_data=$hd"
-# ntfs.rename：搬一个真实文件 + 真实目录 → 目录自动编号
-$T/imgntfsfs "$W/scan.qcow2" $SL mkdir /Old >/dev/null 2>&1
-printf 'payload' > /tmp/scan_p.txt
-$T/imgntfsfs "$W/scan.qcow2" $SL put /tmp/scan_p.txt /p.txt >/dev/null 2>&1
-$T/imgntfsfs "$W/scan.qcow2" $SL put /tmp/scan_p.txt /Old/p.txt >/dev/null 2>&1
-j=$("$T/imgcmd" ntfs.rename --img="$W/scan.qcow2" --lba=$SL --dst=Windows.old --names="p.txt,Old")
-mv=$(echo "$j" | jq_ "d['data']['moved']")
-du=$(echo "$j" | jq_ "d['data']['dir_used']")
-[ "$mv" = "2" ] && ok "ntfs.rename 搬了 2 项" || ng "moved=$mv（期望 2）"
-[ "$du" = "/Windows.old" ] && ok "目标目录自动定名 /Windows.old" || ng "dir_used=$du"
-printf 'p2' > /tmp/scan_p2.txt
-$T/imgntfsfs "$W/scan.qcow2" $SL put /tmp/scan_p2.txt /p2.txt >/dev/null 2>&1
-j2=$("$T/imgcmd" ntfs.rename --img="$W/scan.qcow2" --lba=$SL --dst=Windows.old --names=p2.txt)
-du2=$(echo "$j2" | jq_ "d['data']['dir_used']")
-[ "$du2" = "/Windows.old.001" ] && ok "重名冲突 → 自动编号 .001" || ng "期望 .001 实得 $du2"
-check_err "ntfs.rename 名字不存在" "FAT-ENTRY-NOTFOUND" \
-  "$T/imgcmd" ntfs.rename --img="$W/scan.qcow2" --lba=$SL --dst=Tmp --names=不存在的名字 --progress=bar
-# 上游 ntfsls 复核：根目录应只剩 Windows.old / Windows.old.001（工具会重复打印 → sort -u 去重）
-ls1=$($T/imgntfsfs "$W/scan.qcow2" $SL ls / 2>&1 | grep -vE "复核|上游" | sort -u | tr '\n' ' ')
-[ "$ls1" = "Windows.old Windows.old.001 " ] && ok "根目录只剩两项（上游 ntfsls 对拍）" || ng "根目录内容: $ls1"
 # ntfs.list 反用例：坏路径
 check_err "ntfs.list 路径不存在" "FAT-LS-FAIL" \
   "$T/imgcmd" ntfs.list --img="$W/scan.qcow2" --lba=$SL --path=/no/such --progress=bar
