@@ -3250,6 +3250,28 @@ static int cmd_fat_touch(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+/* 把任意路径转义成 JSON 字符串内容（不写外层引号）。
+ * 文件名里可以有 " \ 换行 —— 直接 snprintf("%s") 会产出非法 JSON，
+ * App 解析失败时只会看到"未知错误"，比复制失败更难查。 */
+static void jesc(char *out, size_t cap, const char *in){
+    size_t o=0;
+    if(!cap) return;
+    for(const unsigned char *p=(const unsigned char*)in; p && *p; p++){
+        if(o+8>=cap) break;
+        switch(*p){
+        case '"':  out[o++]='\\'; out[o++]='"';  break;
+        case '\\': out[o++]='\\'; out[o++]='\\'; break;
+        case '\n': out[o++]='\\'; out[o++]='n';  break;
+        case '\r': out[o++]='\\'; out[o++]='r';  break;
+        case '\t': out[o++]='\\'; out[o++]='t';  break;
+        default:
+            if(*p<0x20) o+=(size_t)snprintf(out+o,cap-o,"\\u%04x",*p);
+            else out[o++]=(char)*p;
+        }
+    }
+    out[o]=0;
+}
+
 static const char *batch_code(int rc){
     switch(rc){
         case IMG_ENOENT:    return "NTFS-PATH-NOTFOUND\"";
@@ -3331,9 +3353,11 @@ static int cmd_ntfs_copy(img_ctx *ctx, const img_args *in, img_result *out){
             if (!*src || !*dst) { badn++; continue; }
             img_copy_result r; memset(&r, 0, sizeof r);
             int rc2 = img_ntfs_copy(fs, src, dst, &o, img_cmd_prog(), &r);
+            char es[2048], ed[2048];
+            jesc(es,sizeof es,src); jesc(ed,sizeof ed,dst);
             int need = snprintf(items + il, sizeof items - il,
                 "%s{\"src\":\"%s\",\"dst\":\"%s\",\"ok\":%s,\"ino\":%llu,\"size\":%llu%s%s}",
-                okn + badn ? "," : "", src, dst, rc2 == IMG_OK ? "true" : "false",
+                okn + badn ? "," : "", es, ed, rc2 == IMG_OK ? "true" : "false",
                 (unsigned long long)r.ino, (unsigned long long)r.size,
                 rc2 == IMG_OK ? "" : ",\"code\":\"",
                 rc2 == IMG_OK ? "" : batch_code(rc2));
@@ -3850,6 +3874,7 @@ static void file_copy_fill(img_result *out, const char *ss, const char *ds,
     img_result_u64(out,"copied_dirs",st->dirs);
     img_result_u64(out,"bytes",st->bytes);
     img_result_u64(out,"skipped",st->skipped);
+    img_result_u64(out,"ads",st->ads);
     img_result_str(out,"src",ss);
     img_result_str(out,"dst",ds);
     if(st->final_path[0]){
@@ -3901,13 +3926,16 @@ static int cmd_file_copy(img_ctx *ctx, const img_args *in, img_result *out){
             if(!*a||!*b){ badn++; continue; }
             img_xcopy_stats st;
             int rc2=file_copy_one(ctx,in,a,b,&st);
+            char ea[2048], eb[2048], ep[2048], tail[2304];
+            jesc(ea,sizeof ea,a); jesc(eb,sizeof eb,b);
+            jesc(ep,sizeof ep,st.final_path[0]?st.final_path:"");
+            if(rc2==IMG_OK) snprintf(tail,sizeof tail,",\"path\":\"%s\"",ep);
+            else            snprintf(tail,sizeof tail,",\"code\":\"%s\"",xcopy_code(rc2));
             int need=snprintf(items+il,sizeof items-il,
-                "%s{\"src\":\"%s\",\"dst\":\"%s\",\"ok\":%s,\"files\":%llu,\"dirs\":%llu,\"bytes\":%llu%s%s%s}",
-                (okn+badn)?",":"", a,b, rc2==IMG_OK?"true":"false",
+                "%s{\"src\":\"%s\",\"dst\":\"%s\",\"ok\":%s,\"files\":%llu,\"dirs\":%llu,\"bytes\":%llu%s}",
+                (okn+badn)?",":"", ea, eb, rc2==IMG_OK?"true":"false",
                 (unsigned long long)st.files,(unsigned long long)st.dirs,
-                (unsigned long long)st.bytes,
-                rc2==IMG_OK?"":",\"code\":\"", rc2==IMG_OK?"":xcopy_code(rc2),
-                rc2==IMG_OK?"":"\"");
+                (unsigned long long)st.bytes, tail);
             if(need>0 && il+(size_t)need<sizeof items) il+=(size_t)need; else truncated=true;
             if(rc2==IMG_OK){ okn++; bytes+=st.bytes; }
             else { badn++; if(stop_on_fail) break; }

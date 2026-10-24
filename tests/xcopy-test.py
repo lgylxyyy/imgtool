@@ -260,6 +260,20 @@ check('批量：3 项全成功', d.get('ok') and data(d).get('copied') == 3 and 
       json.dumps(d)[:300])
 check('  批量结果可解析且 bytes 正确（3×12）', data(d).get('bytes') == 36, data(d))
 
+# ─────────── 14b. 批量 JSON 转义（文件名里有引号） ───────────
+os.makedirs(os.path.join(W, 'quote'), exist_ok=True)
+mk(b'Q\n', 'quote/quo"te.txt')
+run('file.copy', img=A, dst_lba=AN, src='host:' + os.path.join(W, 'quote'), dst='ntfs:/Q')
+ql = os.path.join(W, 'quote.list')
+with open(ql, 'w') as f:
+    f.write('ntfs@%d:/Q/quo\"te.txt > fat@%d:/quo.txt\n' % (AN, AESP))
+d = run('file.copy', img=A, list_file=ql)
+check('批量：文件名含双引号也能产出合法 JSON，且成功',
+      d.get('ok') and data(d).get('copied') == 1 and data(d).get('items')[0].get('ok') is True,
+      json.dumps(d)[:240])
+check('  成功项带 path（UI 刷新用）',
+      data(d).get('items') and data(d).get('items')[0].get('path') == '/quo.txt', data(d).get('items'))
+
 # ─────────── 15. lba 自动挑（该文件系统唯一） ───────────
 d = run('file.copy', img=A, src='ntfs:/Users/a.txt', dst='fat:/AutoLba.txt')
 check('省略 lba（两侧各只有一种文件系统）⇒ 自动挑中', d.get('ok'), json.dumps(d)[:200])

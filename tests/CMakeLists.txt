@@ -91,3 +91,10 @@ target_link_libraries(identify_test PRIVATE imgtool)
 
 add_executable(race_test race_test.c)
 target_link_libraries(race_test PRIVATE imgtool)
+
+# ADS（命名数据流）探针：file.copy / ntfs.copy 必须保留附加数据
+if(NTFS_INC AND NTFS_LIB)
+  add_executable(ads_probe ads_probe.c)
+  target_include_directories(ads_probe PRIVATE ${NTFS_INC})
+  target_link_libraries(ads_probe PRIVATE imgtool ${NTFS_LIB})
+endif()

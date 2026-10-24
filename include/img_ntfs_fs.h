@@ -163,6 +163,23 @@ typedef struct {
 int img_ntfs_copy(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs,
                   const img_copy_opts *opt, img_prog *prog, img_copy_result *out);
 
+/* ---------- 命名数据流（ADS / alternate data streams） ----------
+ * NTFS 允许一个文件挂多条 $DATA：无名的就是"文件内容"，
+ * 命名的（如 Zone.Identifier）是附加数据。Windows 的复制会保留它们；
+ * 我们的 file.copy（NTFS→NTFS）也保留，NTFS→FAT/宿主 会丢弃（FAT 没有这个概念）。
+ * 这些接口同时给 UI 浏览/调试用。*/
+typedef void (*img_ntfs_xattr_cb)(void *ud, const char *name, uint64_t size);
+int  img_ntfs_list_xattrs(img_ntfs_fs *fs, const char *abs_path,
+                          img_ntfs_xattr_cb cb, void *ud);      /* 返回条数或 IMG_E* */
+int  img_ntfs_get_xattr(img_ntfs_fs *fs, const char *abs_path, const char *name,
+                        void **out, size_t *out_len);           /* 调用方 free */
+int  img_ntfs_set_xattr(img_ntfs_fs *fs, const char *abs_path, const char *name,
+                        const void *data, size_t len);
+/* 把 src 上所有命名流复制到 dst（两个路径可以在不同卷/不同镜像）。
+ * count 返回成功复制的流数。目标已有同名流会被覆盖。*/
+int  img_ntfs_copy_xattrs(img_ntfs_fs *src_fs, const char *src_abs,
+                          img_ntfs_fs *dst_fs, const char *dst_abs, int *count);
+
 /* ---------- 流式读写（跨分区/跨镜像/宿主复制的地基，2026-10-24） ----------
  * rd_open 打开一条"只读文件句柄"：拿到大小/时间/属性，之后按 off 随机读。
  * 失败：IMG_ENOENT 路径不存在 / IMG_ENOTSUP 是目录 / IMG_EIO 打不开属性。*/

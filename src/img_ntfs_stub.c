@@ -133,3 +133,21 @@ int img_ntfs_dir_lookup_ino(img_ntfs_fs *fs, const char *dir_abs, const char *na
                             uint64_t *out_ino){
     (void)fs;(void)dir_abs;(void)name;(void)out_ino; return NA;
 }
+
+/* 命名数据流（裁剪构建没有 NTFS，全部不支持） */
+int img_ntfs_list_xattrs(img_ntfs_fs *fs, const char *abs_path,
+                         img_ntfs_xattr_cb cb, void *ud){
+    (void)fs;(void)abs_path;(void)cb;(void)ud; return NA;
+}
+int img_ntfs_get_xattr(img_ntfs_fs *fs, const char *abs_path, const char *name,
+                       void **out, size_t *out_len){
+    (void)fs;(void)abs_path;(void)name;(void)out;(void)out_len; return NA;
+}
+int img_ntfs_set_xattr(img_ntfs_fs *fs, const char *abs_path, const char *name,
+                       const void *data, size_t len){
+    (void)fs;(void)abs_path;(void)name;(void)data;(void)len; return NA;
+}
+int img_ntfs_copy_xattrs(img_ntfs_fs *src_fs, const char *src_abs,
+                         img_ntfs_fs *dst_fs, const char *dst_abs, int *count){
+    (void)src_fs;(void)src_abs;(void)dst_fs;(void)dst_abs;(void)count; return NA;
+}

@@ -790,6 +790,13 @@ static int copy_file(xctx *c, const char *spath, const char *dpath, bool top){
     rc=dst_write_file(c->d,target,&st,&meta,c->o,c->prog,existed,NULL,NULL);
     src_close_stream(c->s,holder);
     if(rc!=IMG_OK){ c->st->side=2; return rc; }
+    /* NTFS → NTFS 保留命名数据流（ADS）；FAT/宿主没有这个概念，只能丢弃。*/
+    if(c->s->loc.kind==IMG_XK_NTFS && c->d->loc.kind==IMG_XK_NTFS){
+        int n=0;
+        rc=img_ntfs_copy_xattrs(c->s->ntfs,spath,c->d->ntfs,target,&n);
+        if(rc!=IMG_OK){ c->st->side=2; return rc; }
+        c->st->ads+=(uint64_t)n;
+    }
     c->st->files++;
     c->st->bytes+=meta.size;
     if(top) xstrlcpy(c->st->final_path,target,sizeof c->st->final_path);

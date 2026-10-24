@@ -20,6 +20,8 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#define ADS_DBG(...) do{ if(getenv("IMG_NTFS_FS_DEBUG")) fprintf(stderr,__VA_ARGS__); }while(0)
+
 struct img_ntfs_fs {
     ntfs_volume   *vol;
     struct ntfs_device *dev;
@@ -904,6 +906,163 @@ void img_ntfs_rd_close(img_ntfs_rd *rd){
     free(rd);
 }
 
+/* ---------- 命名数据流（ADS） ---------- */
+static int xattr_name_utf8(const ATTR_RECORD *a, char *out, size_t cap){
+    /* ★ name_offset 是【相对 MFT 记录起点】的偏移，不是相对属性起点。
+     *   写成 (u8*)a + name_offset 会读到垃圾名字（我第一版就是这么错的）。*/
+    const ntfschar *nm=(const ntfschar*)((const u8*)a+le16_to_cpu(a->name_offset));
+    char *s=NULL;
+    int n=ntfs_ucstombs(nm,(int)a->name_length,&s,0);
+    if(n<0||!s) return IMG_EIO;
+    if((size_t)n>=cap){ free(s); return IMG_ENAMETOOLONG; }
+    memcpy(out,s,(size_t)n); out[n]=0;
+    free(s);
+    return IMG_OK;
+}
+
+int img_ntfs_list_xattrs(img_ntfs_fs *fs, const char *abs_path,
+                         img_ntfs_xattr_cb cb, void *ud){
+    if(!fs||!abs_path||!cb) return IMG_EINVAL;
+    ntfs_inode *ni=lookup(fs->vol,abs_path,NULL);
+    if(!ni) return IMG_ENOENT;
+    ntfs_attr_search_ctx *ctx=ntfs_attr_get_search_ctx(ni,NULL);
+    if(!ctx){ ntfs_inode_close(ni); return IMG_EIO; }
+    int n=0, rc=IMG_OK;
+    while(ntfs_attrs_walk(ctx)==0){
+        ATTR_RECORD *a=ctx->attr;
+        if(a->type!=AT_DATA || !a->name_length) continue;
+        char nm[256];
+        rc=xattr_name_utf8(a,nm,sizeof nm);
+        if(rc!=IMG_OK) break;
+        uint64_t sz=a->non_resident ? le64_to_cpu(a->data_size)
+                                    : (uint64_t)le32_to_cpu(a->data_size);
+        cb(ud,nm,sz);
+        n++;
+    }
+    /* 不拿 errno 判结束：libntfs-3g 的 walk 结束后 errno 可能是上一步留下的
+     * （实测 EEXIST/ENOENT 混杂），据此判失败会把成功当坏盘。显式错误已经
+     * 在循环里落到 rc 上了。*/
+    ntfs_attr_put_search_ctx(ctx);
+    ntfs_inode_close(ni);
+    return (rc==IMG_OK)?n:rc;
+}
+
+int img_ntfs_get_xattr(img_ntfs_fs *fs, const char *abs_path, const char *name,
+                       void **out, size_t *out_len){
+    if(out) *out=NULL;
+    if(out_len) *out_len=0;
+    if(!fs||!abs_path||!name||!out||!out_len) return IMG_EINVAL;
+    ntfs_inode *ni=lookup(fs->vol,abs_path,NULL);
+    if(!ni) return IMG_ENOENT;
+    ntfschar *un=NULL; size_t ul=0;
+    if(!to_ntfs(name,&un,&ul)){ ntfs_inode_close(ni); return IMG_EINVAL; }
+    ntfs_attr *na=ntfs_attr_open(ni,AT_DATA,un,ul);
+    free(un);
+    if(!na){ ntfs_inode_close(ni); return IMG_ENOENT; }
+    uint64_t sz=(uint64_t)na->data_size;
+    void *buf=malloc(sz?sz:1);
+    if(!buf){ ntfs_attr_close(na); ntfs_inode_close(ni); return IMG_ENOMEM; }
+    uint64_t off=0; int rc=IMG_OK;
+    while(off<sz){
+        s64 r=ntfs_attr_pread(na,(s64)off,(s64)(sz-off),(u8*)buf+off);
+        if(r<=0){ rc=IMG_EIO; break; }
+        off+=(uint64_t)r;
+    }
+    ntfs_attr_close(na); ntfs_inode_close(ni);
+    if(rc!=IMG_OK){ free(buf); return rc; }
+    *out=buf; *out_len=(size_t)sz;
+    return IMG_OK;
+}
+
+int img_ntfs_set_xattr(img_ntfs_fs *fs, const char *abs_path, const char *name,
+                       const void *data, size_t len){
+    if(!fs||!abs_path||!name) return IMG_EINVAL;
+    ntfs_inode *ni=lookup(fs->vol,abs_path,NULL);
+    if(!ni) return IMG_ENOENT;
+    ntfschar *un=NULL; size_t ul=0;
+    if(!to_ntfs(name,&un,&ul)){ ntfs_inode_close(ni); return IMG_EINVAL; }
+    ntfs_attr *na=ntfs_attr_open(ni,AT_DATA,un,ul);
+    if(!na){
+        if(ntfs_attr_add(ni,AT_DATA,un,(u8)ul,NULL,0)<0){
+            free(un); ntfs_inode_close(ni); return IMG_EIO;
+        }
+        na=ntfs_attr_open(ni,AT_DATA,un,ul);
+    }
+    free(un);
+    if(!na){ ntfs_inode_close(ni); return IMG_EIO; }
+    int rc=IMG_OK;
+    if(ntfs_attr_truncate(na,0)<0) rc=IMG_EIO;
+    if(rc==IMG_OK && len){
+        s64 w=ntfs_attr_pwrite(na,0,(s64)len,data);
+        if(w!=(s64)len) rc=IMG_EIO;
+    }
+    ntfs_attr_close(na);
+    if(ntfs_inode_close(ni)<0 && rc==IMG_OK) rc=IMG_EIO;
+    return rc;
+}
+
+int img_ntfs_copy_xattrs(img_ntfs_fs *src_fs, const char *src_abs,
+                         img_ntfs_fs *dst_fs, const char *dst_abs, int *count){
+    if(count) *count=0;
+    if(!src_fs||!dst_fs||!src_abs||!dst_abs) return IMG_EINVAL;
+    ntfs_inode *si=lookup(src_fs->vol,src_abs,NULL);
+    if(!si){ ADS_DBG("  [ads] src missing\n"); return IMG_ENOENT; }
+    ntfs_inode *di=lookup(dst_fs->vol,dst_abs,NULL);
+    if(!di){ ADS_DBG("  [ads] dst missing\n"); ntfs_inode_close(si); return IMG_ENOENT; }
+    ADS_DBG("  [ads] start %s -> %s\n",src_abs,dst_abs);
+
+    enum { CH=64*1024 };
+    u8 *buf=malloc(CH);
+    if(!buf){ ntfs_inode_close(si); ntfs_inode_close(di); return IMG_ENOMEM; }
+
+    ntfs_attr_search_ctx *ctx=ntfs_attr_get_search_ctx(si,NULL);
+    if(!ctx){ free(buf); ntfs_inode_close(si); ntfs_inode_close(di); return IMG_EIO; }
+
+    int n=0, rc=IMG_OK;
+    while(ntfs_attrs_walk(ctx)==0){
+        ATTR_RECORD *a=ctx->attr;
+        if(a->type!=AT_DATA || !a->name_length) continue;
+        char nm[256];
+        rc=xattr_name_utf8(a,nm,sizeof nm);
+        if(rc!=IMG_OK){ ADS_DBG("  [ads] name rc=%d\n",rc); break; }
+        ADS_DBG("  [ads] stream %s\n",nm);
+        ntfschar *un=NULL; size_t ul=0;
+        if(!to_ntfs(nm,&un,&ul)){ rc=IMG_EINVAL; break; }
+        ntfs_attr *sa=ntfs_attr_open(si,AT_DATA,un,ul);
+        if(!sa){ ADS_DBG("  [ads] src open errno=%d\n",errno); free(un); rc=IMG_EIO; break; }
+        uint64_t sz=(uint64_t)sa->data_size;
+        ntfs_attr *da=ntfs_attr_open(di,AT_DATA,un,ul);
+        if(!da){
+            int ar=ntfs_attr_add(di,AT_DATA,un,(u8)ul,NULL,0);
+            ADS_DBG("  [ads] add rc=%d errno=%d\n",ar,errno);
+            if(ar<0){ free(un); ntfs_attr_close(sa); rc=IMG_EIO; break; }
+            da=ntfs_attr_open(di,AT_DATA,un,ul);
+        }
+        free(un);
+        if(!da){ ntfs_attr_close(sa); rc=IMG_EIO; break; }
+        if(ntfs_attr_truncate(da,0)<0) rc=IMG_EIO;
+        uint64_t off=0;
+        while(rc==IMG_OK && off<sz){
+            s64 r=ntfs_attr_pread(sa,(s64)off,(s64)CH,buf);
+            if(r<=0){ ADS_DBG("  [ads] pread=%lld errno=%d\n",(long long)r,errno); rc=IMG_EIO; break; }
+            s64 w=ntfs_attr_pwrite(da,(s64)off,r,buf);
+            if(w!=r){ ADS_DBG("  [ads] pwrite=%lld/%lld errno=%d\n",(long long)w,(long long)r,errno); rc=(errno==ENOSPC)?IMG_EFULL:IMG_EIO; break; }
+            off+=(uint64_t)r;
+            if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
+        }
+        ntfs_attr_close(sa); ntfs_attr_close(da);
+        if(rc!=IMG_OK) break;
+        n++;
+    }
+    ADS_DBG("  [ads] done n=%d rc=%d\n",n,rc);
+    ntfs_attr_put_search_ctx(ctx);
+    free(buf);
+    ntfs_inode_close(si);
+    if(ntfs_inode_close(di)<0 && rc==IMG_OK) rc=IMG_EIO;
+    if(count) *count=n;
+    return rc;
+}
+
 /* srcread：把 rd 包成 img_stream，给 write_stream 用 */
 typedef struct { img_ntfs_rd *rd; } ntfs_rd_wrap;
 static int ntfs_wrap_read(void *ud, uint64_t off, void *buf, size_t want, size_t *got){
@@ -1140,6 +1299,11 @@ int img_ntfs_copy(img_ntfs_fs *fs, const char *src_abs, const char *dst_abs,
     img_stream st; st.ud=&wr; st.read=ntfs_wrap_read; st.close=NULL;
     rc = img_ntfs_write_stream(fs, final, &st, &meta, &o, prog, out);
     img_ntfs_rd_close(rd);
+    if (rc == IMG_OK) {
+        int n = 0;
+        int arc = img_ntfs_copy_xattrs(fs, src_abs, fs, out->path, &n);
+        if (arc != IMG_OK) return arc;
+    }
     return rc;
 }
 

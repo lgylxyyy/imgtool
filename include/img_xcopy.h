@@ -64,6 +64,7 @@ typedef struct {
     uint64_t dirs;
     uint64_t bytes;
     uint64_t skipped;      /* 跳过的符号链接/不支持项 */
+    uint64_t ads;          /* 复制的命名数据流条数（仅 NTFS→NTFS） */
     char     final_path[2048];   /* 顶层落点（改名后的真实路径；给 UI 刷新用） */
     int      side;               /* 失败发生在哪一侧：0=复制中 / 1=源 / 2=目标 */
     char     first_error[256];
