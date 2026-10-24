@@ -845,7 +845,8 @@ static int copy_file(xctx *c, const char *spath, const char *dpath, bool top){
     rc=apply_conflict(c,final,&existed,&ed,false,target,sizeof target);
     if(rc!=IMG_OK) return rc;
     rc=check_dst_name(c->d,target,c->st->first_error,sizeof c->st->first_error);
-    if(rc!=IMG_OK){ c->st->side=2; return rc; }        /* 零副作用：还没开写 */
+    if(rc!=IMG_OK){ c->st->side=2; xstrlcpy(c->st->bad_name,target,sizeof c->st->bad_name);
+                    return rc; }                       /* 零副作用：还没开写 */
     if(name_too_long(c->d,target)){ c->st->side=2; return IMG_ENAMETOOLONG; }
     /* 源和目标是同一个文件：读的同时覆盖会毁掉源。要"自己复制一份"请用 conflict=rename。*/
     if(same_volume(c->s,c->d) && path_cmp(c->s,c->d,spath,target)==0) return IMG_ESAMEFILE;
@@ -894,7 +895,8 @@ static int copy_dir(xctx *c, const char *spath, const char *dpath, int depth, bo
     rc=apply_conflict(c,final,&existed,&ed,true,target,sizeof target);
     if(rc!=IMG_OK) return rc;
     rc=check_dst_name(c->d,target,c->st->first_error,sizeof c->st->first_error);
-    if(rc!=IMG_OK){ c->st->side=2; return rc; }        /* 零副作用：还没建目录 */
+    if(rc!=IMG_OK){ c->st->side=2; xstrlcpy(c->st->bad_name,target,sizeof c->st->bad_name);
+                    return rc; }                       /* 零副作用：还没建目录 */
     if(name_too_long(c->d,target)){ c->st->side=2; return IMG_ENAMETOOLONG; }
     /* 造环：把目录复制进它自己/它的子树 —— 会在建任何东西之前拒绝 */
     if(same_volume(c->s,c->d) && is_under(c->s,c->d,spath,target)) return IMG_ECYCLE;
@@ -1278,7 +1280,9 @@ int img_xmove_run(const img_xloc *src, const img_xloc *dst,
             if(rc==IMG_OK && !case_only){
                 /* Windows 非法名字：改名/移动的目标末级名先校验，拒绝时零副作用 */
                 rc=check_dst_name(&de,target,st->first_error,sizeof st->first_error);
-                if(rc!=IMG_OK){ st->side=2; goto mv_done; }
+                if(rc!=IMG_OK){ st->side=2;
+                                xstrlcpy(st->bad_name,target,sizeof st->bad_name);
+                                goto mv_done; }
                 /* create_parents=false 且目标父目录不存在：必须在写之前拒绝，
                  * 并把责任归到目标侧（否则会误报"源不存在"）。*/
                 if(!o.create_parents){

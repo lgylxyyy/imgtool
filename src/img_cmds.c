@@ -3454,7 +3454,8 @@ static int cmd_copy(img_ctx *ctx, const img_args *in, img_result *out){
             snprintf(why,sizeof why,"已完成 %llu 个文件 / %.1f MiB 后失败%s",
                      (unsigned long long)st.files,(double)st.bytes/1048576.0,
                      st.side==1?"（源侧）":(st.side==2?"（目标侧）":""));
-        img_result_fail(out,rc,op_code(rc,st.side),ss,why,xcopy_hint(rc));
+        img_result_fail(out,rc,op_code(rc,st.side),
+                        st.bad_name[0]?st.bad_name:ss,why,xcopy_hint(rc));
         return rc;
     }
     img_result_u64(out,"copied_files",st.files);
@@ -3575,7 +3576,7 @@ static int cmd_move(img_ctx *ctx, const img_args *in, img_result *out){
         else
             snprintf(why,sizeof why,"mode=%s deleted=%s",
                      st.mode[0]?st.mode:"-",st.deleted?"true":"false");
-        img_result_fail(out,rc,cde,ss,why,
+        img_result_fail(out,rc,cde,st.bad_name[0]?st.bad_name:ss,why,
             rc==IMG_EPARTIAL?"复制已完成但删除源失败：两份都在，请手动处理（不要重试）":
             rc==IMG_EREFUSED?"宿主文件删除需要 App 弹窗确认并传 allow_host_delete=true":
             xcopy_hint(rc));

@@ -328,6 +328,9 @@ for img, lba, tag in ((A, AN, 'NTFS'), (A, AESP, 'FAT')):
     after = ncount(A, AN, '/') if tag == 'NTFS' else len(flist(A, AESP, '/'))
     check('host 名字带 : 复制进 %s 目录 ⇒ NAME-INVALID + 零副作用' % tag,
           code(d) == 'NAME-INVALID' and before == after, (code(d), before, after))
+    check('  err.at 指向被拒绝的目标名字（不是源）',
+          str((d.get('err') or {}).get('at', '')).endswith('bad:name.txt'),
+          (d.get('err') or {}).get('at'))
 for nm in ('trail.', 'trail '):
     mk(b'T\n', nm)
     d = run('copy', 'host:' + os.path.join(W, nm), uri(A, AN, '/'))

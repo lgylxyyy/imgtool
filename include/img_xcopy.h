@@ -72,6 +72,7 @@ typedef struct {
     bool     replaced;           /* 顶层文件是否覆盖了旧文件 */
     int      side;               /* 失败发生在哪一侧：0=复制中 / 1=源 / 2=目标 */
     char     first_error[256];
+    char     bad_name[1024];     /* 被拒绝的目标名字（NAME-INVALID 时给 err.at 用）*/
 } img_xcopy_stats;
 
 /* 解析 "ntfs:/a/b" 这类位置串。失败返回 IMG_EINVAL 并填 why。 */
@@ -111,6 +112,7 @@ typedef struct {
     char     final_path[2048];
     int      side;
     char     first_error[256];   /* 失败原因的人话（如非法名字具体哪个字符） */
+    char     bad_name[1024];     /* 被拒绝的目标名字（NAME-INVALID 时给 err.at 用）*/
 } img_xmove_stats;
 
 int img_xmove_run(const img_xloc *src, const img_xloc *dst,
