@@ -23,6 +23,25 @@ make -j8          # 只要 mkntfs 与 libntfs-3g，FUSE 驱动可忽略
 - `ntfsprogs/.libs/mkntfs`        319,648 字节
 - `libntfs-3g/.libs/libntfs-3g.a` 2,728,028 字节
 
+## 宿主用 mkntfs 目标文件（`/workspace/build/mkntfs_obj`）
+
+`IMG_WITH_NTFS=ON` 时 CMake 会 glob `../build/mkntfs_obj/mkntfs-*.o`，并把
+`ntfscp.o / ntfsls.o / ntfscat.o` 给 `imgntfscp` / `imgntfsfs` 用。
+**这 8 个 .o 是构建输入，不是可随手删的构建垃圾**（删了 → `features.mkntfs=false`，
+`fs.format --fs=ntfs` 报 `FEATURE-UNAVAILABLE`）。
+
+一条命令重建（源码树用 `/workspace/third_party/ntfs-3g`，已 configure 过）：
+
+```bash
+imgtool/tools/build-mkntfs-obj.sh                    # → /workspace/build/mkntfs_obj
+cd imgtool/build && cmake .. -DCMAKE_BUILD_TYPE=Release -DIMG_WITH_NTFS=ON && make -j8
+./tools/imgcmd --list | grep -o '"features":{[^}]*}'  # mkntfs 必须是 true
+```
+
+脚本做的事：`gcc -DHAVE_CONFIG_H -I<src> -I<src>/include -I<src>/include/ntfs-3g -I<src>/ntfsprogs`
+逐个编译 `attrdef/boot/sd/utils/mkntfs`，再 `objcopy --redefine-sym main=mkntfs_main`
+（工具三份改成 `ntfscp_main/ntfsls_main/ntfscat_main`），最后断言“没有裸 main”。
+
 ## 集成方式（性能最优）
 实现 `struct ntfs_device_operations` 的 7 个回调 → qcow2 后端，
 使 mkntfs **进程内直接格式化 qcow2 分区**：无临时文件、无 fork、无 loop、无 root。
