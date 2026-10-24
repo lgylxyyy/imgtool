@@ -110,6 +110,7 @@ typedef struct {
     bool     case_only;       /* 只改大小写 */
     char     final_path[2048];
     int      side;
+    char     first_error[256];   /* 失败原因的人话（如非法名字具体哪个字符） */
 } img_xmove_stats;
 
 int img_xmove_run(const img_xloc *src, const img_xloc *dst,

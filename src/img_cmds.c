@@ -79,6 +79,7 @@ static int feat_unavail(img_result *out, const char *feat, const char *howto){
 #include "img_ntfs_fs.h"
 #include "img_xcopy.h"
 #include "img_path.h"   /* part.scan / ntfs.list / ntfs.rename */
+#include "img_name.h"   /* rename/copy/move 的 Windows 文件名规则 */
 typedef struct { img_io *io; } rd_io_t;
 static int rd_io(void *ud, uint64_t off, void *buf, size_t len){
     rd_io_t *r=(rd_io_t*)ud;
@@ -3259,6 +3260,7 @@ static const char *xcopy_hint(int rc){
         case IMG_EREADONLY: return "ISO/WIM/ESD 是只读安装源，不能写入";
         case IMG_EPARTIAL:  return "复制成功但删源失败：两份都在，手动处理，不要自动重试";
         case IMG_EREFUSED:  return "按安全策略拒绝：宿主删除需要 allow_host_delete=true";
+        case IMG_ENAMEINVALID:return "去掉 Windows 不允许的字符（< > : \" / \\ | ? *）、尾随点和空格，别用 CON/NUL/COM1 这类设备名";
         default:            return "失败：看 err.at 定位是哪一侧；需要时导出诊断日志";
     }
 }
@@ -3340,6 +3342,7 @@ static const char *op_code(int rc, int side){
         case IMG_EREADONLY:  return "PATH-READONLY";
         case IMG_EPARTIAL:   return "MOVE-PARTIAL";
         case IMG_EREFUSED:   return "MOVE-HOST-DELETE-REFUSED";
+        case IMG_ENAMEINVALID:return "NAME-INVALID";
         default:             return "COPY-FAIL";
     }
 }
@@ -3445,9 +3448,12 @@ static int cmd_copy(img_ctx *ctx, const img_args *in, img_result *out){
     img_path_cleanup(&ps); img_path_cleanup(&pd);
     if(rc!=IMG_OK){
         char why[300];
-        snprintf(why,sizeof why,"已完成 %llu 个文件 / %.1f MiB 后失败%s",
-                 (unsigned long long)st.files,(double)st.bytes/1048576.0,
-                 st.side==1?"（源侧）":(st.side==2?"（目标侧）":""));
+        if(st.first_error[0])
+            snprintf(why,sizeof why,"%s",st.first_error);
+        else
+            snprintf(why,sizeof why,"已完成 %llu 个文件 / %.1f MiB 后失败%s",
+                     (unsigned long long)st.files,(double)st.bytes/1048576.0,
+                     st.side==1?"（源侧）":(st.side==2?"（目标侧）":""));
         img_result_fail(out,rc,op_code(rc,st.side),ss,why,xcopy_hint(rc));
         return rc;
     }
@@ -3564,8 +3570,11 @@ static int cmd_move(img_ctx *ctx, const img_args *in, img_result *out){
         const char *cde=op_code(rc,st.side);
         if(rc==IMG_EREFUSED) cde=src_host?"MOVE-HOST-DELETE-REFUSED":"MOVE-REFUSED";
         char why[300];
-        snprintf(why,sizeof why,"mode=%s deleted=%s",
-                 st.mode[0]?st.mode:"-",st.deleted?"true":"false");
+        if(st.first_error[0])
+            snprintf(why,sizeof why,"%s",st.first_error);
+        else
+            snprintf(why,sizeof why,"mode=%s deleted=%s",
+                     st.mode[0]?st.mode:"-",st.deleted?"true":"false");
         img_result_fail(out,rc,cde,ss,why,
             rc==IMG_EPARTIAL?"复制已完成但删除源失败：两份都在，请手动处理（不要重试）":
             rc==IMG_EREFUSED?"宿主文件删除需要 App 弹窗确认并传 allow_host_delete=true":
@@ -3603,15 +3612,27 @@ static int cmd_rename(img_ctx *ctx, const img_args *in, img_result *out){
         img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","name","需要 path + name",NULL);
         return IMG_EINVAL;
     }
-    if(strchr(nn,'/')||strchr(nn,'\\')||strchr(nn,'!')||strchr(nn,':')||
+    if(strchr(nn,'/')||strchr(nn,'\\')||strchr(nn,'!')||
        !strcmp(nn,".")||!strcmp(nn,"..")){
         img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","name",
-                        "新名字不能包含 / \\ ! : 且不能是 . / ..","只写文件名本身；换目录请用 move");
+                        "新名字不能包含 / \\ ! 且不能是 . / ..","只写文件名本身；换目录请用 move");
         return IMG_EINVAL;
     }
     img_path p;
     int rc=parse_or_fail(ps,&p,"path",out);
     if(rc!=IMG_OK) return rc;
+    if(p.kind!=IMG_XK_HOST){
+        /* NTFS/FAT 的 Windows 名字规则（非法字符 / 保留设备名 / 尾点尾空格）。
+         * 在打开镜像之前就拒绝 —— 零副作用。宿主按宿主规则，不拦这里。*/
+        img_name_status ns=img_name_check(nn);
+        if(ns!=IMG_NAME_OK){
+            char det[220]; snprintf(det,sizeof det,"%s",img_name_reason(ns,nn));
+            img_path_cleanup(&p);
+            img_result_fail(out,IMG_ENAMEINVALID,"NAME-INVALID","name",det,
+                "去掉 Windows 不允许的字符（< > : \" / \\ | ? *）、尾随点和空格，别用 CON/NUL/COM1 这类设备名");
+            return IMG_ENAMEINVALID;
+        }
+    }
     if(p.is_readonly){
         img_path_cleanup(&p);
         img_result_fail(out,IMG_EREADONLY,"PATH-READONLY",ps,"ISO/WIM/ESD 是只读安装源",NULL);

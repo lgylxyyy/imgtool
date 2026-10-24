@@ -1427,7 +1427,35 @@ int img_fat32_rename(img_fat32_fs *fs, const char *src_abs, const char *dst_abs)
     int rc=dir_find(fs, sdir, sname, &se);
     if(rc!=IMG_OK) return rc;
     if(!se.found) return IMG_ENOENT;
-    if(sdir==ddir && !strcasecmp(sname, dname)) return IMG_EINVAL;   /* 自己改自己 */
+    if(sdir==ddir && !strcmp(sname, dname)) return IMG_EINVAL;   /* 完全同名：自己改自己 */
+    /* 只改大小写（a.txt → A.txt）：FAT 目录项查找不区分大小写，
+     * 直接 dir_add_entry 会撞上"自己已存在"。做法：先改到临时名，再改到目标名；
+     * 第二步失败就改回原名（回滚到原样，不留半个状态）。目录同样适用。
+     * 说明：NTFS 那边是 img_ntfs_move_path 自带的 case-only 改名，不走这里。*/
+    if(sdir==ddir && !strcasecmp(sname, dname)){
+        char parent[4096], tmp[4096];
+        snprintf(parent,sizeof parent,"%s",src_abs);
+        char *sl=strrchr(parent,'/');
+        if(!sl) return IMG_EINVAL;
+        if(sl==parent) parent[1]=0; else *sl=0;      /* "/a.txt" → "/" */
+        bool got=false;
+        for(int n=0;n<1000 && !got;n++){
+            char nm[64]; snprintf(nm,sizeof nm,"~ics%d.tmp",n);
+            dir_ent te;
+            if(dir_find(fs,sdir,nm,&te)!=IMG_OK) return IMG_EIO;
+            if(te.found) continue;                   /* 撞上真文件：换下一个 */
+            if(snprintf(tmp,sizeof tmp,"%s%s%s",parent,
+                        (parent[0]&&parent[strlen(parent)-1]=='/')?"":"/",nm) >= (int)sizeof tmp)
+                return IMG_ENAMETOOLONG;
+            got=true;
+        }
+        if(!got) return IMG_EEXISTS;
+        rc=img_fat32_rename(fs,src_abs,tmp);
+        if(rc!=IMG_OK) return rc;
+        rc=img_fat32_rename(fs,tmp,dst_abs);
+        if(rc!=IMG_OK) (void)img_fat32_rename(fs,tmp,src_abs);   /* 回滚 */
+        return rc;
+    }
     rc=dir_find(fs, ddir, dname, &de);
     if(rc!=IMG_OK) return rc;
     if(de.found) return IMG_EEXISTS;

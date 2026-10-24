@@ -52,6 +52,7 @@ typedef enum {
     IMG_EPARTIAL      = -20,  /* 移动：复制成功但删源失败（两份都在） */
     IMG_EREFUSED      = -21,  /* 政策拒绝（如未允许删宿主文件、拒绝删根目录） */
     IMG_EREADONLY     = -22,  /* 目标是只读容器（ISO/WIM/ESD） */
+    IMG_ENAMEINVALID  = -23,  /* 名字是 Windows 不接受的（非法字符/保留名/尾点；写前拒绝） */
 } img_err_t;
 
 const char *img_strerror(int err);

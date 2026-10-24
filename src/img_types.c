@@ -24,6 +24,7 @@ const char *img_strerror(int e){
     case IMG_EPARTIAL:   return "复制成功但删除源失败（两份都在）";
     case IMG_EREFUSED:   return "按安全策略拒绝";
     case IMG_EREADONLY:  return "目标是只读容器";
+    case IMG_ENAMEINVALID:return "名字是 Windows 不接受的";
     default:             return "未知错误";
     }
 }

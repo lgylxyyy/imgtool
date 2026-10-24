@@ -47,6 +47,7 @@ set(IMG_SOURCES
   src/img_fat32_fs.c
   src/img_xcopy.c      # 跨分区/跨镜像/宿主↔镜像/ISO/WIM → 镜像 的统一复制引擎
   src/img_path.c       # 统一容器路径（! 语法：qcow2!p3:/x、iso!:/a!1:/b）
+  src/img_name.c       # Windows 文件名合法性（NTFS/FAT 写前校验：非法字符/保留名/尾点）
   src/img_wim_apply.c
   src/img_wim_fs.c        # WIM/ESD 内部只读浏览 + 抽单文件
   src/img_ntfs_fmt.c     # 常驻：模块缺席时返回 IMG_ENOTSUP，不让链接炸

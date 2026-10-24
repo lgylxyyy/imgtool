@@ -28,6 +28,7 @@
 #include "img_partition.h"
 #include "img_stream.h"
 #include "img_lock.h"
+#include "img_name.h"
 #include "img_event.h"
 
 #include <stdio.h>
@@ -675,18 +676,27 @@ static void case_cb(void *ud, const char *name, bool is_dir, uint64_t size){
     if(!strcasecmp(name,c->want)){ snprintf(c->out,c->cap,"%s",name); c->found=1; }
 }
 static int actual_case_path(xep *e, const char *path, char *out, size_t cap){
-    if(e->loc.kind!=IMG_XK_NTFS){ snprintf(out,cap,"%s",path); return IMG_OK; }
+    if(e->loc.kind!=IMG_XK_NTFS && e->loc.kind!=IMG_XK_FAT){
+        snprintf(out,cap,"%s",path); return IMG_OK;
+    }
     char dir[4096], name[1024];
     parent_of(path,dir,sizeof dir);
-    snprintf(name,sizeof name,"%s",base_of(path));
+    xstrlcpy(name,base_of(path),sizeof name);
     if(!name[0] || !strcmp(name,".")){ xstrlcpy(out,path,cap); return IMG_OK; }
-    case_ud c={name,out,cap,0};
-    if(img_ntfs_list_dir(e->ntfs,dir,case_cb,&c)==IMG_OK && c.found){
-        size_t dl=strlen(dir), nl=strlen(name);
+    /* ★ 回调把"盘上的真实名字"写进 found，不能直接写 out：
+     *   下面还要拼 dir + 名字，写进 out 会被拼装覆盖掉（曾经因此
+     *   a.txt→A.TXT 的 actual 一直是用户输入的大小写）。*/
+    char found[1024]; found[0]=0;
+    case_ud c={name,found,sizeof found,0};
+    int lrc = (e->loc.kind==IMG_XK_FAT)
+            ? img_fat32_list_dir(e->fat,dir,case_cb,&c)
+            : img_ntfs_list_dir(e->ntfs,dir,case_cb,&c);
+    if(lrc==IMG_OK && c.found){
+        size_t dl=strlen(dir), nl=strlen(found);
         if(strcmp(dir,"/")==0){
-            if(nl+2<=cap){ out[0]='/'; memcpy(out+1,name,nl+1); return IMG_OK; }
+            if(nl+2<=cap){ out[0]='/'; memcpy(out+1,found,nl+1); return IMG_OK; }
         } else if(dl+nl+2<=cap){
-            memcpy(out,dir,dl); out[dl]='/'; memcpy(out+dl+1,name,nl+1); return IMG_OK;
+            memcpy(out,dir,dl); out[dl]='/'; memcpy(out+dl+1,found,nl+1); return IMG_OK;
         }
     }
     xstrlcpy(out,path,cap);
@@ -809,6 +819,19 @@ static bool name_too_long(xep *d, const char *path){
     return u8_chars(b) > 255;
 }
 
+/* Windows 文件名前置校验：只对 NTFS/FAT 目标。宿主按宿主规则（ext4 允许 ':' 等）。
+ * ★ 必须在【任何写动作之前】调用 —— 拒绝时盘上不能多出任何东西。*/
+static int check_dst_name(xep *d, const char *path, char *why, size_t cap){
+    if(!d) return IMG_OK;
+    if(d->loc.kind!=IMG_XK_NTFS && d->loc.kind!=IMG_XK_FAT) return IMG_OK;
+    const char *b=base_of(path);
+    if(!b[0]) return IMG_OK;                 /* 卷根没有末级名字，交给上层判 */
+    img_name_status s=img_name_check(b);
+    if(s==IMG_NAME_OK) return IMG_OK;
+    if(why&&cap) snprintf(why,cap,"%s",img_name_reason(s,b));
+    return IMG_ENAMEINVALID;
+}
+
 static int copy_file(xctx *c, const char *spath, const char *dpath, bool top){
     img_src_meta meta; bool isdir=false;
     int rc=src_stat(c->s,spath,&isdir,&meta);
@@ -821,6 +844,8 @@ static int copy_file(xctx *c, const char *spath, const char *dpath, bool top){
     char target[4096];
     rc=apply_conflict(c,final,&existed,&ed,false,target,sizeof target);
     if(rc!=IMG_OK) return rc;
+    rc=check_dst_name(c->d,target,c->st->first_error,sizeof c->st->first_error);
+    if(rc!=IMG_OK){ c->st->side=2; return rc; }        /* 零副作用：还没开写 */
     if(name_too_long(c->d,target)){ c->st->side=2; return IMG_ENAMETOOLONG; }
     /* 源和目标是同一个文件：读的同时覆盖会毁掉源。要"自己复制一份"请用 conflict=rename。*/
     if(same_volume(c->s,c->d) && path_cmp(c->s,c->d,spath,target)==0) return IMG_ESAMEFILE;
@@ -868,6 +893,8 @@ static int copy_dir(xctx *c, const char *spath, const char *dpath, int depth, bo
     char target[4096];
     rc=apply_conflict(c,final,&existed,&ed,true,target,sizeof target);
     if(rc!=IMG_OK) return rc;
+    rc=check_dst_name(c->d,target,c->st->first_error,sizeof c->st->first_error);
+    if(rc!=IMG_OK){ c->st->side=2; return rc; }        /* 零副作用：还没建目录 */
     if(name_too_long(c->d,target)){ c->st->side=2; return IMG_ENAMETOOLONG; }
     /* 造环：把目录复制进它自己/它的子树 —— 会在建任何东西之前拒绝 */
     if(same_volume(c->s,c->d) && is_under(c->s,c->d,spath,target)) return IMG_ECYCLE;
@@ -1195,17 +1222,25 @@ int img_xmove_run(const img_xloc *src, const img_xloc *dst,
         if(getenv("IMG_XCOPY_DEBUG")) fprintf(stderr,"[mv] src_stat rc=%d root=%s\n",rc,se.root);
         if(rc==IMG_OK){
             char final[4096]; bool existed=false, ed=false;
-            rc=resolve_final(&c,se.root,de.loc.path,true,final,sizeof final,&existed,&ed);
-            if(getenv("IMG_XCOPY_DEBUG")) fprintf(stderr,"[mv] resolve rc=%d final=%s existed=%d\n",rc,final,existed);
+            /* 先把"用户写的源路径"换成盘上真实大小写（NTFS/FAT）；
+             * 否则 a.txt→A.TXT 这种操作的比较对象是错的。*/
+            char sactual[4096];
+            actual_case_path(&se,se.root,sactual,sizeof sactual);
+            /* 目标路径与源只差大小写（a.txt → A.TXT）：这就是"改名"，不能走
+             * resolve_final —— 那里会把已存在的同名目录当成"搬进去"，
+             * 目录大小写改名就会被拼成 /Dir1/DIR1 并误报 COPY-INTO-SELF。*/
+            bool ci_target = (se.loc.kind==IMG_XK_NTFS || se.loc.kind==IMG_XK_FAT) &&
+                             !strcasecmp(sactual,de.loc.path) && strcmp(sactual,de.loc.path);
+            /* 盘上真实路径就等于目标（用户大小写写错但本来就是那个名字）⇒ 交给 no-op 分支 */
+            bool same_target = !strcmp(sactual,de.loc.path);
+            if(ci_target || same_target) snprintf(final,sizeof final,"%s",de.loc.path);
+            else rc=resolve_final(&c,sactual,de.loc.path,true,final,sizeof final,&existed,&ed);
+            if(getenv("IMG_XCOPY_DEBUG")) fprintf(stderr,"[mv] resolve rc=%d final=%s existed=%d actual=%s\n",rc,final,existed,sactual);
             char target[4096];
             bool case_only=false;
-            if(rc==IMG_OK && isdir && is_under(&se,&de,se.root,final)){
-                rc=IMG_ECYCLE;   /* 目录搬进自己/自己的子树：写之前拒绝 */
-            }
             if(rc==IMG_OK){
                 /* mv a a：no-op 成功（与 shell 行为一致）；必须在冲突判定之前。*/
-                if((se.loc.kind==IMG_XK_HOST && !strcmp(se.root,final)) ||
-                   (se.loc.kind!=IMG_XK_HOST && !strcasecmp(se.root,final) && !strcmp(se.root,final))){
+                if(!strcmp(sactual,final)){
                     snprintf(st->mode,sizeof st->mode,"rename");
                     st->files=isdir?0:1; st->dirs=isdir?1:0;
                     st->bytes=isdir?0:meta.size;
@@ -1216,9 +1251,14 @@ int img_xmove_run(const img_xloc *src, const img_xloc *dst,
                     rc=IMG_OK;
                     goto mv_done;
                 }
-                /* 大小写改名：NTFS 大小写不敏感，按"已存在"拒绝会把正常操作判死。*/
-                case_only = (se.loc.kind==IMG_XK_NTFS) &&
-                            !strcasecmp(se.root,final) && strcmp(se.root,final);
+                /* 大小写改名：NTFS/FAT 都大小写不敏感，按"已存在"拒绝会把正常操作判死。
+                 * 必须【先于】造环判定：is_under 是大小写无关的，a→A 会被误判成"搬进自己"。
+                 * （FAT 侧由 img_fat32_rename 用"临时名 → 目标名"实现，见该函数注释）*/
+                case_only = (se.loc.kind==IMG_XK_NTFS || se.loc.kind==IMG_XK_FAT) &&
+                            !strcasecmp(sactual,final) && strcmp(sactual,final);
+            }
+            if(rc==IMG_OK && !case_only && isdir && is_under(&se,&de,sactual,final)){
+                rc=IMG_ECYCLE;   /* 目录搬进自己/自己的子树：写之前拒绝 */
             }
             if(getenv("IMG_XCOPY_DEBUG")) fprintf(stderr,"[mv] case_only=%d kind=%d final=%s root=%s\n",(int)case_only,(int)se.loc.kind,final,se.root);
             if(rc==IMG_OK && case_only){
@@ -1229,13 +1269,16 @@ int img_xmove_run(const img_xloc *src, const img_xloc *dst,
             }
             if(rc==IMG_OK && case_only){
                 st->case_only=true;
-                char sactual[4096];
-                actual_case_path(&se,se.root,sactual,sizeof sactual);
                 if(se.loc.kind==IMG_XK_NTFS)
                     rc=img_ntfs_move_path(se.ntfs,sactual,target,true,true);
+                else if(se.loc.kind==IMG_XK_FAT)
+                    rc=img_fat32_rename(se.fat,sactual,target);
                 else rc=IMG_EEXISTS;
             }
             if(rc==IMG_OK && !case_only){
+                /* Windows 非法名字：改名/移动的目标末级名先校验，拒绝时零副作用 */
+                rc=check_dst_name(&de,target,st->first_error,sizeof st->first_error);
+                if(rc!=IMG_OK){ st->side=2; goto mv_done; }
                 /* create_parents=false 且目标父目录不存在：必须在写之前拒绝，
                  * 并把责任归到目标侧（否则会误报"源不存在"）。*/
                 if(!o.create_parents){
@@ -1246,8 +1289,6 @@ int img_xmove_run(const img_xloc *src, const img_xloc *dst,
                     }
                 }
                 if(se.loc.kind==IMG_XK_NTFS){
-                    char sactual[4096];
-                    actual_case_path(&se,se.root,sactual,sizeof sactual);
                     rc=img_ntfs_move_path(se.ntfs,sactual,target,
                                           o.conflict==IMG_COPY_OVERWRITE && existed,true);
                 } else if(se.loc.kind==IMG_XK_FAT){
@@ -1255,7 +1296,7 @@ int img_xmove_run(const img_xloc *src, const img_xloc *dst,
                         int rr=img_fat32_rm(se.fat,target);
                         if(rr!=IMG_OK && rr!=IMG_ENOENT) rc=rr;
                     }
-                    if(rc==IMG_OK) rc=img_fat32_rename(se.fat,se.root,target);
+                    if(rc==IMG_OK) rc=img_fat32_rename(se.fat,sactual,target);
                 } else if(se.loc.kind==IMG_XK_HOST){
                     if(o.create_parents){
                         char pdir[4096]; parent_of(target,pdir,sizeof pdir);

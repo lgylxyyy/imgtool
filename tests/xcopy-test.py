@@ -264,18 +264,26 @@ check('批量：3 项全成功', d.get('ok') and data(d).get('copied') == 3 and 
 check('  批量结果可解析且 bytes 正确（3×12）', data(d).get('bytes') == 36, data(d))
 
 # ─────────── 14b. 批量 JSON 转义（文件名里有引号） ───────────
-os.makedirs(os.path.join(W, 'quote'), exist_ok=True)
-mk(b'Q\n', 'quote/quo"te.txt')
-run('file.copy', img=A, dst_lba=AN, src='host:' + os.path.join(W, 'quote'), dst='ntfs:/Q')
+# ★ 2026-10-24：`"` 是 Windows 非法字符，NTFS/FAT 目标现在会 NAME-INVALID（P0-2）。
+#   所以 JSON 转义改在宿主（ext4 允许）上测；镜像侧拒绝另有断言。
+mk(b'Q\n', 'quo"te.txt')
+qs = os.path.join(W, 'quo"te.txt')
+qd = os.path.join(W, 'out"put.txt')
 ql = os.path.join(W, 'quote.list')
 with open(ql, 'w') as f:
-    f.write('ntfs@%d:/Q/quo\"te.txt > fat@%d:/quo.txt\n' % (AN, AESP))
-d = run('file.copy', img=A, list_file=ql)
+    f.write('host:%s > host:%s\n' % (qs, qd))
+d = run('file.copy', list_file=ql)
 check('批量：文件名含双引号也能产出合法 JSON，且成功',
       d.get('ok') and data(d).get('copied') == 1 and data(d).get('items')[0].get('ok') is True,
       json.dumps(d)[:240])
 check('  成功项带 path（UI 刷新用）',
-      data(d).get('items') and data(d).get('items')[0].get('path') == '/quo.txt', data(d).get('items'))
+      data(d).get('items') and str(data(d).get('items')[0].get('path', '')).endswith('out"put.txt'),
+      data(d).get('items'))
+d = run('file.copy', img=A, dst_lba=AN, src='host:' + qs, dst='ntfs:/')
+check('同一个引号名字复制进 NTFS 目录（名字跟源走）⇒ NAME-INVALID，零副作用',
+      code(d) == 'NAME-INVALID'
+      and not data(run('ntfs.exists', img=A, lba=AN, path='/quo\"te.txt')).get('exists'),
+      json.dumps(d)[:240])
 
 # ─────────── 15. lba 自动挑（该文件系统唯一） ───────────
 d = run('file.copy', img=A, src_lba=AN, dst_lba=AESP, src='ntfs:/Users/a.txt', dst='fat:/AutoLba.txt')

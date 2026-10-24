@@ -272,6 +272,80 @@ with open(lst2, 'w') as f:
 d = run('move', list_file=lst2)
 check('批量 move：1/1 成功', d.get('ok') and data(d).get('moved') == 1, json.dumps(d)[:240])
 
+# ---------- 9b. FAT 大小写改名（P0-1） ----------
+def flist(img, lba, path):
+    d = run('fat.ls', img=img, lba=lba, path=path)
+    return [e['name'] for e in (data(d).get('entries') or [])]
+
+
+def ncount(img, lba, path):
+    return len(data(run('ntfs.list', img=img, lba=lba, path=path)).get('names') or [])
+
+
+mk(b'CASE\n', 'case.txt')
+run('copy', 'host:' + os.path.join(W, 'case.txt'), uri(A, AESP, '/case.txt'))
+d = run('rename', uri(A, AESP, '/case.txt'), 'CASE.TXT')
+check('FAT 只改大小写改名（文件）⇒ ok + case_only',
+      d.get('ok') and data(d).get('case_only') is True, json.dumps(d)[:240])
+names = flist(A, AESP, '/')
+check('  盘上只剩大写名（没有两份）',
+      names.count('CASE.TXT') == 1 and 'case.txt' not in names, names)
+out2 = os.path.join(W, 'case-back.txt')
+run('copy', uri(A, AESP, '/CASE.TXT'), 'host:' + out2)
+check('  改名后内容不变', os.path.exists(out2) and rd(out2) == b'CASE\n')
+os.makedirs(os.path.join(W, 'casedir'), exist_ok=True)
+mk(b'IN\n', 'casedir/in.txt')
+run('copy', 'host:' + os.path.join(W, 'casedir'), uri(A, AESP, '/casedir'))
+d = run('rename', uri(A, AESP, '/casedir'), 'CaseDir')
+check('FAT 只改大小写改名（目录）+ 子文件保留',
+      d.get('ok') and data(d).get('case_only') is True and fexists(A, AESP, '/CaseDir/in.txt'),
+      json.dumps(d)[:240])
+d = run('rename', uri(A, AESP, '/CaseDir'), 'casedir')
+check('  再改回去也成功', d.get('ok') and 'casedir' in flist(A, AESP, '/'), data(d))
+d = run('rename', uri(A, AESP, '/casedir/in.txt'), 'IN.TXT')
+check('FAT 大小写改名：用户大小写写错也能命中（源写 /CASEDIR/IN.TXT）',
+      run('rename', uri(A, AESP, '/CASEDIR/IN.TXT'), 'IN2.TXT').get('ok')
+      and fexists(A, AESP, '/casedir/IN2.TXT'), json.dumps(d)[:200])
+
+# ---------- 9c. Windows 非法文件名校验（P0-2） ----------
+mk(b'NAME\n', 'namesrc.txt')
+run('copy', 'host:' + os.path.join(W, 'namesrc.txt'), uri(A, AN, '/name-src.txt'))
+cnt_before = ncount(A, AN, '/')
+for n in ('a:b.txt', 'a?b.txt', 'a*b.txt', 'a"b.txt', 'a<b.txt', 'a>b.txt',
+          'a|b.txt', 'CON', 'nul.txt', 'COM1', 'a.', 'a '):
+    d = run('rename', uri(A, AN, '/name-src.txt'), n)
+    check('非法名字 %r ⇒ NAME-INVALID' % n, code(d) == 'NAME-INVALID', (code(d), json.dumps(d)[:160]))
+check('  零副作用：原文件还在、名字没变、条目数没变',
+      exists(A, AN, '/name-src.txt') and ncount(A, AN, '/') == cnt_before,
+      (cnt_before, ncount(A, AN, '/')))
+
+# 源名字非法 + 目标目录（名字从源来）：NTFS / FAT 都要在写之前拒绝
+bad_src = os.path.join(W, 'bad:name.txt')
+mk(b'BAD\n', 'bad:name.txt')
+for img, lba, tag in ((A, AN, 'NTFS'), (A, AESP, 'FAT')):
+    before = ncount(A, AN, '/') if tag == 'NTFS' else len(flist(A, AESP, '/'))
+    d = run('copy', 'host:' + bad_src, uri(A, lba, '/'))
+    after = ncount(A, AN, '/') if tag == 'NTFS' else len(flist(A, AESP, '/'))
+    check('host 名字带 : 复制进 %s 目录 ⇒ NAME-INVALID + 零副作用' % tag,
+          code(d) == 'NAME-INVALID' and before == after, (code(d), before, after))
+for nm in ('trail.', 'trail '):
+    mk(b'T\n', nm)
+    d = run('copy', 'host:' + os.path.join(W, nm), uri(A, AN, '/'))
+    check('host 名字尾随 %r 复制进 NTFS ⇒ NAME-INVALID' % nm[-1],
+          code(d) == 'NAME-INVALID', code(d))
+
+# 宿主目标按宿主规则：':' 允许（ext4）
+hp = os.path.join(W, 'host:ok.txt')
+d = run('copy', uri(A, AN, '/name-src.txt'), 'host:' + hp)
+check('宿主目标是 ext4 ⇒ 允许 :（不套 Windows 规则）',
+      d.get('ok') and os.path.exists(hp), json.dumps(d)[:200])
+# 正常名字不受影响：中文 + 空格 + 长名
+long_name = '很长的名字 ' * 10 + '.txt'
+d = run('rename', uri(A, AN, '/name-src.txt'), long_name)
+check('正常名字（中文/空格/%d 字符）不受影响' % len(long_name),
+      d.get('ok') and exists(A, AN, '/' + long_name), json.dumps(d)[:200])
+run('rename', uri(A, AN, '/' + long_name), 'name-src.txt')
+
 # ---------- 10. 收尾 ----------
 check('qc.verify A', run('qc.verify', img=A).get('ok'))
 check('qc.verify B', run('qc.verify', img=B).get('ok'))
