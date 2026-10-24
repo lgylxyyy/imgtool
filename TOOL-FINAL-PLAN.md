@@ -65,19 +65,19 @@
 |---|---|
 | `run_all` | **26 通过 / 0 失败 / 2 跳过** |
 | `DEGRADED=1` | **27 通过 / 0 失败 / 1 跳过** |
-| `fileops-test`（统一路径 + 四命令） | **44 / 0 / 1 跳过** |
+| `fileops-test`（统一路径 + 四命令 + 名字规则） | **69 / 0 / 1 跳过** |
 | `cmd_test` | **87 / 0** |
 | `copy-test` | 60 / 0 |
-| `xcopy-test` | 57 / 0 |
+| `xcopy-test` | 58 / 0 |
 | `ntfs-move-test` | 80 / 0 |
 | `fat-fs-test` | 48 / 0 |
 | `ads-test` | 14 / 0 |
 | `ntfs-inventory-test` | 26 / 0 |
-| i18n 对账 | **47 命令 / 99 参数 / 79 错误码**，退 0 |
+| i18n 对账 | **47 命令 / 99 参数 / 80 错误码**，退 0 |
 
 ### 1.4 真机 / APK
 
-- 三 ABI 交叉编译：零警告，833 导出符号，`LOAD` 16 KiB 对齐，
+- 三 ABI 交叉编译：零警告，**836** 导出符号，`LOAD` 16 KiB 对齐，
   NEEDED 只有 `libc.so` / `libdl.so`。
 - APK `app/testbench`：**9,292,280 B**，sha1
   `487ca3af717f273a91417a5e6f2ca73c46934819`；APK 内 `libimgtool.so`
@@ -152,6 +152,21 @@ if(sdir==ddir && !strcasecmp(sname,dname)) return IMG_EINVAL;   /* 自己改自�
 - 验收：新增 `tests/name-test.py`（或并入 `fileops-test`）：
   `a:b.txt` / `CON` / `a.` / `a ` / `a?b` 复制/改名到 NTFS、FAT 都报 `NAME-INVALID`；
   同样名字写宿主（ext4）允许；正常中文/空格/长名字不受影响。
+
+### P0 完成情况（2026-10-24 收盘 ✅）
+
+| 项 | 结果 | 证据 |
+|---|---|---|
+| P0-1 FAT 大小写改名 | ✅ | `img_fat32_rename` 临时名→目标名（失败回滚）；`case_only` 判定扩到 FAT；目录同样支持 |
+| 目录大小写改名误判 | ✅ 修掉 | 以前 `rename /Dir1 DIR1` 被拼成 `/Dir1/DIR1` 报 `COPY-INTO-SELF`；现在 ci 相等不走 `resolve_final` |
+| `actual_case_path` 老 bug | ✅ 修掉 | 回调结果被拼装覆盖，实际一直用用户输入的大小写；现在 NTFS/FAT 都换成盘上真实大小写 |
+| P0-2 非法文件名校验 | ✅ | 新增 `src/img_name.c`；`copy`/`move`/`rename` 写前校验；`NAME-INVALID` |
+| 测试 | ✅ | `fileops-test` **69/0/1**（原 44）、`xcopy-test` **58/0**；`run_all` **26/0/2**；`DEGRADED` **27/0/1** |
+| 真机 | ✅ 19 项 | Redmi / Android 17 / arm64-v8a：FAT 文件+目录大小写改名、内容不变、7 个非法名拒绝且条目数不变、host 非法名拒绝、中文名正常 |
+| 三 ABI | ✅ 零警告 | 836 导出符号，`LOAD 0x4000`，NEEDED 仍只有 `libc.so`/`libdl.so` |
+
+> APK 尚未重打包：P0 只影响文件页行为，装机用的 testbench APK 仍是旧 `libimgtool.so`
+> （真机验收走的是 `/data/local/tmp/imgtest` 里的新二进制）。App 开工时一并重打包。
 
 ### P0 完成定义
 
@@ -244,12 +259,12 @@ rm     "<path>" [--recursive=true] [--allow_host_delete=true]
 
 ## 6. 实施顺序（P0 做完 → App）
 
-1. **T7-P0-1** FAT 大小写改名（含 `img_xmove_run` case_only）。
-2. **T7-P0-2** 非法文件名校验 + `NAME-INVALID` + i18n + 测试。
-3. 跑 `run_all` / `DEGRADED` / 三 ABI / 真机两条用例。
-4. 同步文档（UI 规格错误码、手册、SUMMARY、HANDOFF、AGENT-MEMORY）。
-5. 合并 master、提交、APK 重打包（可选）。
-6. **开始 App**：Compose 壳 → 文件页 → 全流程装机 → 控制台/设置。
+1. ✅ **T7-P0-1** FAT 大小写改名（含 `img_xmove_run` case_only）—— `imgtool` `66fb940`
+2. ✅ **T7-P0-2** 非法文件名校验 + `NAME-INVALID` + i18n + 测试 —— 同一个提交
+3. ✅ 跑 `run_all`（26/0/2）/ `DEGRADED`（27/0/1）/ 三 ABI（零警告）/ 真机 19 项。
+4. ✅ 同步文档（UI 规格错误码、手册、SUMMARY、HANDOFF、AGENT-MEMORY）。
+5. ⏭ 合并 `imgtool-android`（已 merge）与 APK 重打包（App 开工时一起做）。
+6. ▶ **下一步：开始 App**：Compose 壳 → 文件页 → 全流程装机 → 控制台/设置。
 
 > P1 不与 App 抢跑；App 文件页先按“不确定进度 + 失败提示”做。
 
@@ -312,7 +327,7 @@ adb shell true
 | `docs/接手必读-2026-10-23.md` | 历史决策、坑、真机证据 |
 | `docs/NTFS移动改名-规范与实现对照.md` | MS-FSA 对照 |
 | `app/docs/工具能力与App集成手册.md` | 逐命令/错误码/§21.11.13 新契约 |
-| `app/i18n/strings.json` | 47 命令/99 参数/79 错误码中英文案 |
+| `app/i18n/strings.json` | 47 命令/99 参数/80 错误码中英文案 |
 
 ---
 
