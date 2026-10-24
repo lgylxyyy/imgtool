@@ -60,6 +60,14 @@ check_err(){
   else ng "$d → 期望 $want 实得 $got（rc=$rc 卡片建议=$sug）"; fi
 }
 check_err "未知命令"          CMD-NOTFOUND      $T/imgcmd nosuch.cmd
+# 2026-10-24 合并后：旧命令必须报 CMD-NOTFOUND（即使 --img 不存在，也不能报 IMG-OPEN-FAIL）
+check_err "旧命令 ntfs.copy 已移除" CMD-NOTFOUND $T/imgcmd ntfs.copy --img=/no/such.qcow2 --lba=1 --src=/a --dst=/b
+check_err "旧命令 file.copy 已移除" CMD-NOTFOUND $T/imgcmd file.copy --src=ntfs:/a --dst=ntfs:/b
+# 位置参数边界：copy 最多 2 个；img.info 不支持位置参数；rm 只收 1 个
+$T/imgcmd copy /a /b extra >/dev/null 2>&1; [ $? -eq 2 ] && ok "copy 位置参数过多 → 退出 2" || ng "copy 位置参数过多没拦住"
+$T/imgcmd img.info /x >/dev/null 2>&1; [ $? -eq 2 ] && ok "非文件操作命令不接受位置参数 → 退出 2" || ng "img.info 位置参数没拦住"
+$T/imgcmd rm /a extra >/dev/null 2>&1; [ $? -eq 2 ] && ok "rm 位置参数过多 → 退出 2" || ng "rm 位置参数过多没拦住"
+$T/imgcmd --help=copy 2>&1 | grep -q "用法: imgcmd copy" && ok "--help=copy 显示位置参数用法" || ng "--help=copy 没有用法行"
 check_err "缺必填参数 --img"   CMD-ARG-BAD       $T/imgcmd img.info
 check_err "数字参数传成文字"    CMD-ARG-BAD       $T/imgcmd img.info --img="$W/t.qcow2" --lba=abc
 check_err "LBA=0（MBR 区）"   CMD-ARG-BAD       $T/imgcmd fat.ls --img="$W/t.qcow2" --lba=0

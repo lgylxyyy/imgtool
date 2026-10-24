@@ -97,6 +97,11 @@ typedef struct img_cmd {
     const char *help;
     const img_arg *args; int nargs;
     int (*run)(img_ctx *ctx, const img_args *in, img_result *out);
+    /* 位置参数（2026-10-24）：只有 copy/move/rename/rm 用。
+     * usage 给 CLI --help 与 App 显示；npos 是允许的位置参数个数，
+     * 其余命令保持 NULL/0（传位置参数直接报错，不会瞎填）。*/
+    const char *usage;
+    int npos;
 } img_cmd;
 
 const img_cmd *img_cmd_find(const char *name);

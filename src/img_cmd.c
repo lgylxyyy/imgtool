@@ -410,6 +410,8 @@ int img_cmd_list_json(char *buf,int cap){
         wstr(&cw,"name",c->name);
         wstr(&cw,"since",c->since?c->since:"");
         wstr(&cw,"help",c->help?img_t(c->help):"");   /* ★ 中英双份 */
+        if(c->usage && c->usage[0]) wstr(&cw,"usage",c->usage);
+        if(c->npos>0) wnum(&cw,"npos",c->npos);
         wkey(&cw,"args"); if(cw.p<cw.end)*cw.p++='[';
         for(int j=0;j<c->nargs;j++){
             const img_arg *A=&c->args[j];
