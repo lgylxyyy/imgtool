@@ -95,7 +95,7 @@ static int normalize_inner(const char *in, char *out, size_t cap, char *why, siz
 }
 
 /* ---------- 魔数识别 ---------- */
-enum { CT_QCOW2=1, CT_ISO=2, CT_WIM=3 };
+enum { CT_QCOW2=1, CT_ISO=2, CT_WIM=3, CT_ARCHIVE=4 };
 static int detect_container(const char *path, int *type, char *why, size_t cap){
     int fd=open(path,O_RDONLY);
     if(fd<0){ setwhy2(why,cap,"打不开容器文件：",path); return IMG_ENOENT; }
@@ -105,6 +105,14 @@ static int detect_container(const char *path, int *type, char *why, size_t cap){
         close(fd); *type=CT_QCOW2; return IMG_OK;
     }
     if(n==8 && !memcmp(b,"MSWIM\0\0\0",8)){ close(fd); *type=CT_WIM; return IMG_OK; }
+    /* 压缩包（REQ-31）：zip/7z/rar/cab/gzip/xz/bzip2 认魔数；tar 看 257 处的 "ustar" */
+    if(n>=4 && b[0]=='P' && b[1]=='K' && (b[2]==3||b[2]==5||b[2]==7)){ close(fd); *type=CT_ARCHIVE; return IMG_OK; }
+    if(n>=6 && !memcmp(b,"7z\xBC\xAF\x27\x1C",6)){ close(fd); *type=CT_ARCHIVE; return IMG_OK; }
+    if(n>=7 && !memcmp(b,"Rar!\x1a\x07",6)){ close(fd); *type=CT_ARCHIVE; return IMG_OK; }
+    if(n>=4 && !memcmp(b,"MSCF",4)){ close(fd); *type=CT_ARCHIVE; return IMG_OK; }
+    if(n>=2 && b[0]==0x1f && b[1]==0x8b){ close(fd); *type=CT_ARCHIVE; return IMG_OK; }
+    if(n>=6 && !memcmp(b,"\xFD""7zXZ",5)){ close(fd); *type=CT_ARCHIVE; return IMG_OK; }
+    if(n>=3 && !memcmp(b,"BZh",3)){ close(fd); *type=CT_ARCHIVE; return IMG_OK; }
     n=pread(fd,b,8,0x8001);
     if(n==8 && (!memcmp(b,"CD001",5) || !memcmp(b,"BEA01",5) ||
                 !memcmp(b,"NSR02",5) || !memcmp(b,"NSR03",5))){
@@ -243,9 +251,12 @@ int img_path_parse(const char *spec, img_path *out, char *why, size_t whycap){
         const char *h=spec+5;
         if(!*h){ setwhy(why,whycap,"host: 后面没有路径"); return IMG_EINVAL; }
         if(h[0]!='/'){ setwhy(why,whycap,"host: 后面必须是绝对路径（以 / 开头）"); return IMG_EINVAL; }
-        unescape_seg(h,strlen(h),out->host,sizeof out->host);
-        out->kind=IMG_XK_HOST;
-        return IMG_OK;
+        if(!strchr(h,'!')){            /* 纯宿主路径 */
+            unescape_seg(h,strlen(h),out->host,sizeof out->host);
+            out->kind=IMG_XK_HOST;
+            return IMG_OK;
+        }
+        spec=h;                        /* 带容器：剥掉 host: 继续往下解析（REQ-31）*/
     }
 
     char head[P_CAP];
@@ -279,6 +290,16 @@ int img_path_parse(const char *spec, img_path *out, char *why, size_t whycap){
         if(rc!=IMG_OK) return rc;
         rc=normalize_inner(inner,out->inner,sizeof out->inner,why,whycap);
         if(rc!=IMG_OK) return rc;
+        out->is_readonly=false;
+        return IMG_OK;
+    }
+    if(ct==CT_ARCHIVE){
+        if(sel[0]){ setwhy(why,whycap,"压缩包是单卷容器：选择器留空（!:/path）"); return IMG_EINVAL; }
+        rc=normalize_inner(inner,out->inner,sizeof out->inner,why,whycap);
+        if(rc!=IMG_OK) return rc;
+        out->kind=IMG_XK_ARCHIVE;
+        /* 压缩包不整体只读：zip/7z/tar 可写（整包重写，见 img_archive_w.c），
+         * rar/cab/iso 由写层判 IMG_EREADONLY。REQ-41 */
         out->is_readonly=false;
         return IMG_OK;
     }

@@ -63,6 +63,13 @@ int img_ntfs_write_reagent(img_ntfs_fs *fs, const char *winre_dir_abs,
 int img_ntfs_put_file(img_ntfs_fs *fs, const char *local_path,
                       const char *dst_abs_path, img_prog *prog);
 
+/* 区间读（只读）：读文件 [off, off+want) 到 buf，*got 返回到手的字节数。
+ * ★ 为什么要它：Winre.wim 有几百 MB，但判版本只需要头 208 B + XML 表
+ *   （几 KB）。以前只能 read_file 整份进内存，手机上直接 OOM。
+ * 超出文件尾 → *got 小于 want，返回 IMG_OK；文件不存在 → IMG_ENOENT。*/
+int img_ntfs_read_range(img_ntfs_fs *fs, const char *abs_path, uint64_t off,
+                        void *buf, size_t want, size_t *got);
+
 /* 取文件大小，不存在返回 IMG_ENOENT */
 int img_ntfs_file_size(img_ntfs_fs *fs, const char *abs_path, uint64_t *out_size);
 
@@ -72,6 +79,32 @@ typedef void (*img_ntfs_list_cb)(void *ud, const char *name, bool is_dir, uint64
  * 契约与 img_fat32_list_dir 一致；不含 "."/".."；名字为 UTF-8 */
 int img_ntfs_list_dir(img_ntfs_fs *fs, const char *abs_path,
                       img_ntfs_list_cb cb, void *ud);
+/* REQ-49 §1：show83=true 才把 8.3 短名（FILE_NAME_DOS）也列出来。
+ * 默认它们被当成"同一文件的别名"隐去（同 inode 有长名时才隐）。*/
+int img_ntfs_list_dir_show83(img_ntfs_fs *fs, const char *abs_path, bool show83,
+                             img_ntfs_list_cb cb, void *ud);
+
+/* ---------- 一次遍历拿全字段（REQ-30.3/30.4）----------
+ * 为什么另开一个：--sizes 走一条、--times 又走一条、--ino 再查一次索引 —— 同一个目录被
+ * 扫三遍、每项开一次 inode。这里一次 readdir 就把 size/alloc/时间/属性/ino 全带出来。*/
+typedef struct {
+    const char *name;      /* UTF-8（回调期间有效）*/
+    bool        is_dir;
+    uint64_t    size;      /* $DATA 实际大小 */
+    uint64_t    alloc_bytes;/* 已分配（簇对齐；目录为 0）*/
+    uint64_t    ino;
+    uint32_t    flags;     /* FILE_ATTR_*（0x10=目录 0x20=存档 0x02=隐藏 0x01=只读 0x04=系统）*/
+    uint32_t    links;     /* 硬链接数 */
+    uint64_t    times[4];  /* create, modify, access, mft_change（unix 秒 UTC）*/
+} img_ntfs_ent_t;
+typedef void (*img_ntfs_full_cb)(void *ud, const img_ntfs_ent_t *e);
+int img_ntfs_list_dir_full(img_ntfs_fs *fs, const char *abs_path,
+                           img_ntfs_full_cb cb, void *ud);
+int img_ntfs_list_dir_full_show83(img_ntfs_fs *fs, const char *abs_path, bool show83,
+                                  img_ntfs_full_cb cb, void *ud);
+
+/* 单条详情（REQ-30.3）：路径不存在 → IMG_ENOENT；name 字段不填。*/
+int img_ntfs_stat(img_ntfs_fs *fs, const char *abs_path, img_ntfs_ent_t *out);
 /* 带真实大小的列目录：逐条开 inode 取 data_size（慢，只在用户明确要大小时用）。
  * 契约：目录项的 size 记 0；拿不到大小的条目也记 0。*/
 int img_ntfs_list_dir_sizes(img_ntfs_fs *fs, const char *abs_path,
@@ -80,6 +113,11 @@ int img_ntfs_list_dir_sizes(img_ntfs_fs *fs, const char *abs_path,
 int img_ntfs_free_bytes(img_ntfs_fs *fs, uint64_t *out_free, uint64_t *out_used);
 /* 卷标（无卷标 → 空串；失败返回 <0） */
 int img_ntfs_label(img_ntfs_fs *fs, char *out, size_t cap);
+/* 改卷标（2026-10-25）：只动 $Volume 的 AT_VOLUME_NAME，不碰文件数据、
+ * 不重建文件系统。label="" → 删掉卷标。
+ * 实现：ntfs_attr_remove + ntfs_attr_add + ntfs_inode_sync（libntfs-3g 公开 API），
+ * 不用 fs.format —— 格式化会把整卷清空。 */
+int img_ntfs_set_label(img_ntfs_fs *fs, const char *label);
 /* 删除单个文件或【空】目录（复用 libntfs-3g 的 ntfs_delete；
  * ★ 先 sync 父目录再删 —— 否则 ntfs_delete 收尾会读到未落盘的目录项（move_into 踩过）。
  * 非空目录返回 IMG_ESTATE（不递归删，避免误删整棵树）。 */

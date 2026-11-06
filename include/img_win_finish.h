@@ -29,6 +29,13 @@ typedef struct {
     int  setup_type;               /* \Setup\SetupType */
     int  system_setup_in_progress;  /* \Setup\SystemSetupInProgress */
     bool cmdline_present;          /* \Setup\CmdLine 是否存在 */
+    /* ★ 2026-11-05：Win10/11 用的是另一套状态机（没有 ChildCompletion），
+     *   这两个值用于诊断「是否还在待部署态」。只读，不参与写入。 */
+    int  oobe_in_progress;         /* \Setup\OOBEInProgress */
+    int  setup_phase;              /* \Setup\SetupPhase */
+    int  generalization_state;     /* \Setup\Status\SysprepStatus\GeneralizationState */
+    /* 结论：这台盘属于哪种状态机 —— 决定 win.finish 能不能动手 */
+    int  machine;                  /* 0=未知 1=legacy(Win7/8/8.1，有 ChildCompletion) 2=modern(Win10/11，靠 windeploy) */
 } img_win_finish_t;
 
 /* 返回 IMG_OK / IMG_ESTATE（不是可写 NTFS）/ IMG_EFORMAT（hive 打不开）/ IMG_EIO */

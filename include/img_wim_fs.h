@@ -10,6 +10,7 @@
 #ifndef IMG_WIM_FS_H
 #define IMG_WIM_FS_H
 #include "img_types.h"
+#include "img_stream.h"
 #include "img_progress.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -26,7 +27,8 @@ extern "C" {
  * attributes: 标准 Windows FILE_ATTRIBUTE_* 值（原样透出，App 想显示 hidden/system 就用）
  * depth     : 相对【映像根】的深度（不是相对查询目录 —— 老坑，别再按 1 判断）*/
 typedef void (*img_wim_ent_cb)(void *ud, const char *name, const char *full_path,
-                               bool is_dir, uint64_t size, uint32_t attributes, size_t depth);
+                               bool is_dir, uint64_t size, uint64_t mtime,
+                               uint32_t attributes, size_t depth);
 
 typedef struct {
     bool     exists;
@@ -54,6 +56,35 @@ int img_wim_stat(const char *wim_path, int index, const char *inner_path,
 int img_wim_extract_tree(const char *wim_path, int index, const char *inner_path,
                          const char *out_dir, img_prog *prog,
                          char *err, size_t errcap);
+
+/* 内容判位数（REQ-19 / REQ-22）：
+ *   ① SysWOW64 目录 / System32\wow64.dll → 64 位家族；
+ *   ② 否则按【小到大】抽一个系统文件读 PE Machine：smss.exe → wininit.exe →
+ *      ntdll.dll → ntoskrnl.exe（0x014c=x86 0x8664=x64 0xAA64=arm64 0x01c4=arm）；
+ *   ③ 判不出 → out 置空串（调用方再退介质级信号 / XML），不猜。
+ * src（可选）回填"凭什么"：`syswow64` / `wow64` / `pe:smss.exe` …
+ * 返回非 0 时 out 为空串；why 里是给人看的原因。*/
+int img_wim_probe_arch(const char *wim_path, int index, char *out, size_t cap,
+                       char *src, size_t srccap, char *why, size_t whycap);
+
+/* 这个 WIM 本身是不是一份 WinRE 映像？（根下没有 \Windows → 是）
+ * 给 winre.find / recovery.populate 认"裸 winre.wim"用（REQ-24/25）。*/
+int img_wim_is_winre_self(const char *wim_path, bool *out_self, char *why, size_t whycap);
+
+/* 流式取单个文件（REQ-29）：wimlib 用 TO_STDOUT 解码，字节**按顺序**从 rfd 交出来。
+ *   consume(ud, rfd, total_size, err, errcap) 在【辅助线程】里被调用，负责把字节搬走；
+ *   本函数在【调用线程】里跑 wimlib（实测：wimlib 放进 pthread 再配 pipe 会死锁）。
+ *   rfd 由我们关，调用方不要关。返回 0 = 两侧都成功。*/
+typedef int (*img_wim_consume_fn)(void *ud, int rfd, uint64_t total,
+                                  char *err, size_t errcap);
+int img_wim_stream_consume(const char *wim_path,int index,const char *inner_path,
+                           img_wim_consume_fn consume, void *ud,
+                           uint64_t *out_size, img_prog *prog,
+                           char *err, size_t errcap);
+
+int img_wim_extract_dir(const char *wim_path,int index,const char *inner_path,
+                        const char *dst_dir,img_prog *prog,uint64_t *out_bytes,
+                        int *out_files,char *err,size_t errcap);
 
 int img_wim_extract_file(const char *wim_path, int index, const char *inner_path,
                          const char *dst_path, img_prog *prog, uint64_t *out_bytes,

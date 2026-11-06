@@ -22,6 +22,13 @@ void img_prog_op(img_prog *p, img_op_t op);
 void img_prog_count(img_prog *p, uint64_t cur, uint64_t total);
 void img_prog_bytes(img_prog *p, uint64_t cur_bytes, uint64_t total_bytes);
 void img_prog_item(img_prog *p, const char *item);   /* item 换了就立即上报 */
+/* 全局进度（REQ-49 §3）：cur 单调（传小值会被忽略），pct 单调不减。
+ * total=0 表示未知（此时 overall_pct=-1）。*/
+void img_prog_overall(img_prog *p, uint64_t cur, uint64_t total);
+/* 字节口径声明（REQ-51 B）：kind="extracted" 时 cur/total_bytes 的解压后大小；
+ * archive_* 是压缩包口径（能算就给，算不了给 0）。*/
+void img_prog_bytes_kind(img_prog *p, const char *kind,
+                         uint64_t archive_cur, uint64_t archive_total);
 
 /* 手动强制上报（如里程碑） */
 void img_prog_emit(img_prog *p);

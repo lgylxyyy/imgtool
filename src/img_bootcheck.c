@@ -187,6 +187,11 @@ static bool is_esp(const img_partition_t *p){
 }
 static bool is_recovery(const img_partition_t *p){
     if(p->type_guid[0]) return strncmp(p->type_guid, IMG_GUID_RECOVERY, 8)==0;
+    /* ★ MBR 的 0x27 有两个用途：Windows 的系统保留(SR) 和 恢复分区。
+     *   SR 一定是【活动】分区，恢复分区一定不是 —— 用这个区分。
+     *   否则 BIOS 布局下 boot.check 会对着 SR 报四条 rec.* 警告
+     *   （缺 winre.wim / 缺 ReAgent.xml / 缺 boot.sdi …），全是假警报。*/
+    if(p->status & 0x80) return false;
     return p->type == IMG_MBR_RECOVERY;
 }
 /* NTFS 分区：GPT 用基本数据 GUID；MBR 用 0x07（或 0x27 恢复）。
@@ -383,9 +388,20 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
             IMG_CK_REQUIRED, e1.found,
             e1.found? "存在，%u 字节": "不存在 — UEFI 未找到 Windows 启动管理器",
             e1.size);
-        fat_ent e2 = fat32_find(q,lba,sz,"EFI/Boot/bootx64.efi");
-        add(out,"esp.fallback","\\EFI\\Boot\\bootx64.efi",IMG_CK_WARN,e2.found,
-            e2.found? "存在（通用回退入口）":"不存在 — 只能从固件菜单选 Windows Boot Manager");
+        /* ★ 2026-11-05：兜底启动器按系统位数自适应（以前写死 bootx64.efi，
+         *   x86 盘实际写的是 bootia32.efi，检查项误报"不存在"）。
+         *   位数从 esp.bootmgfw 同源的 \Windows\Boot\EFI\bootmgfw.efi 判不出，
+         *   直接看正式路径文件大小不可靠 —— 用 PE machine 字段最硬，但这里
+         *   用更省的办法：两个名字都查，存在哪个就是哪个（不会都存在：
+         *   boot.populate 按位数只写一个）。 */
+        fat_ent e2  = fat32_find(q,lba,sz,"EFI/Boot/bootx64.efi");
+        fat_ent e2a = fat32_find(q,lba,sz,"EFI/Boot/bootia32.efi");
+        fat_ent e2r = e2.found ? e2 : e2a;
+        add(out,"esp.fallback", e2.found? "\\EFI\\Boot\\bootx64.efi": "\\EFI\\Boot\\bootia32.efi",
+            IMG_CK_WARN,e2r.found,
+            e2r.found? "存在（通用回退入口，%s）"
+                     : "不存在（x64 查 bootx64.efi / x86 查 bootia32.efi 都没有）— 只能从固件菜单选 Windows Boot Manager",
+            e2.found? "x64":"x86");
         fat_ent e3 = fat32_find(q,lba,sz,"EFI/Microsoft/Boot/BCD");
         add(out,"esp.bcd","\\EFI\\Microsoft\\Boot\\BCD",IMG_CK_REQUIRED,e3.found,
             e3.found ? "存在，%u 字节" : "ESP 上没有 BCD", e3.size);
@@ -411,82 +427,38 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
         add(out,"bios.bootmgr","bootmgr 在活动分区",IMG_CK_REQUIRED, have_bm,
             have_bm ? "在 LBA %llu 找到" : "活动分区与系统分区都没有 bootmgr",
             (unsigned long long)lba);
-        bool have_bcd = bp>=0 && ntfs_path_exists(q,lba,sz,"/Boot/BCD");
+        /* ★ bugfix（2026-11-04）：上面 411~414 行为"找 bootmgr"把 lba 切到了系统分区，
+         *   而 BCD 必须查【引导分区】（活动分区 bp）—— 否则活动分区明明有 BCD 却报
+         *   "BIOS 引导分区上没有 /Boot/BCD"（实测 15 个真模板全中招，内置模板也中招）。*/
+        uint64_t bcd_lba = bp>=0 ? t.parts[bp].first_lba : lba;
+        uint64_t bcd_sz  = bp>=0 ? (t.parts[bp].last_lba-t.parts[bp].first_lba+1)*512 : sz;
+        bool have_bcd = bp>=0 && ntfs_path_exists(q,bcd_lba,bcd_sz,"/Boot/BCD");
         add(out,"bios.bootmgr_bcd","\\Boot\\BCD",IMG_CK_REQUIRED, have_bcd,
             have_bcd ? "存在" : "BIOS 引导分区上没有 /Boot/BCD");
         (void)ntp;
     }
-    /* ── ⑤ 恢复分区 ── */
-    if(P.rec<0 && (flags & IMG_BOOTCHK_EXPECT_RECOVERY)){
-        /* 只在调用方明确要求时才算缺失（默认策略：不建恢复分区不是错） */
-        add(out,"rec.present","存在恢复分区",IMG_CK_REQUIRED,false,
-            "分区表里没有 de94bba4 类型的恢复分区 —— 建盘时缺少 --rec，或分区表被重写过");
-    }
-    if(P.rec>=0){
-        uint64_t lba=t.parts[P.rec].first_lba;
-        uint64_t sz=(t.parts[P.rec].last_lba-t.parts[P.rec].first_lba+1)*512;
-        add(out,"rec.type","恢复分区类型 GUID de94bba4",IMG_CK_INFO,true,
-            "LBA %llu",(unsigned long long)lba);
-        /* 官方要求 gpt attributes=0x8000000000000001（bit0=必需，bit63=不分配盘符/隐藏）
-         * 微软 diskpart 实操见 MS Q&A 与 learn.microsoft.com；缺 bit0 时 reagentc 可能拒认 */
-        int ridx=-1;
-        for(int i=0;i<IMG_MAX_PARTITIONS;i++)
-            if(t.parts[i].used && t.parts[i].first_lba==lba){ ridx=i; break; }
-        uint64_t attr = ridx>=0 ? t.parts[ridx].attributes : 0;
-        bool attr_ok = (attr & IMG_GPT_ATTR_PLATFORM_REQUIRED) &&
-                       (attr & IMG_GPT_ATTR_NO_DRIVE_LETTER);
-        add(out,"rec.attr","GPT 属性 0x8000000000000001",IMG_CK_WARN, attr_ok,
-            attr_ok ? "已设 必需+不分配盘符 (0x%016llx)"
-                    : "当前 0x%016llx — 官方要求 0x8000000000000001（缺 %s）",
-            (unsigned long long)attr,
-            attr_ok ? "" : ((attr & IMG_GPT_ATTR_PLATFORM_REQUIRED) ? "bit63" : "bit0 必需位"));
-        /* 兼容两种布局：标准路径 /Recovery/WindowsRE/ 与 根目录（本工具链当前用根目录，
-         * 因为 ntfscp 只能建文件不能建目录 —— 建目录属 NTFS 写入能力，见 Stage B）*/
-        /* Windows 把它写作 Winre.wim，bcdedit/reagentc 用 winre.wim —— 两种都试。
-         * 实测 ntfs_inode_lookup_by_name 在本环境对首字母大小写是敏感的，
-         * 真实卷上也常混用，故显式枚举常见写法而不是依赖大小写折叠。 */
-        bool w_std  = ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/Winre.wim")
-                   || ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/winre.wim")
-                   || ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/WINRE.WIM");
-        bool w_root = w_std ? false
-                   : (ntfs_path_exists(q,lba,sz,"/Winre.wim")
-                   || ntfs_path_exists(q,lba,sz,"/winre.wim"));
-        bool s_std  = ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/boot.sdi")
-                   || ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/Boot.sdi");
-        bool s_root = s_std ? false : ntfs_path_exists(q,lba,sz,"/boot.sdi");
-        add(out,"rec.winre","winre.wim 存在",IMG_CK_WARN, w_std||w_root,
-            (w_std||w_root)
-              ? (w_std ? "在标准路径找到恢复映像" : "在分区根目录找到恢复映像")
-              : "恢复分区内没有 winre.wim");
-        /* ReAgent.xml —— reagentc 靠它注册恢复位置（官方规范第 9 项）*/
-        bool r_std = ntfs_path_exists(q,lba,sz,"/Recovery/WindowsRE/ReAgent.xml");
-        /* ★ 官方真正的家在【系统分区】的 \Windows\System32\Recovery\ReAgent.xml
-         *   （UEFI 布局下恢复分区里根本没有它）。以前只查恢复分区，
-         *   于是盘 A 明摆着有 837 字节的 ReAgent.xml 还被报"缺" —— 纯误报。*/
-        bool r_sys = false;
-        if(!r_std && P.os>=0 && t.parts[P.os].used){
-            uint64_t oslba=t.parts[P.os].first_lba;
-            uint64_t ossz=(t.parts[P.os].last_lba-t.parts[P.os].first_lba+1)*512;
-            r_sys = ntfs_path_exists(q,oslba,ossz,"/Windows/System32/Recovery/ReAgent.xml");
-        }
-        bool r_root = (r_std||r_sys) ? false : ntfs_path_exists(q,lba,sz,"/ReAgent.xml");
-        add(out,"rec.reagent","ReAgent.xml 存在",IMG_CK_WARN, r_std||r_sys||r_root,
-            (r_std||r_sys||r_root)
-              ? (r_std ? "在恢复分区标准路径找到（reagentc 可识别）"
-                       : (r_sys ? "在系统分区 \\Windows\\System32\\Recovery\\ 找到（官方位置）"
-                                : "在分区根目录找到"))
-              : "缺 ReAgent.xml — Windows 自带的 reagentc 认不出恢复位置");
-        add(out,"rec.bootsdi","boot.sdi 存在",IMG_CK_WARN, s_std||s_root,
-            (s_std||s_root)
-              ? (s_std ? "在标准路径找到" : "在根目录找到")
-              : "缺 boot.sdi — ramdisk 无法加载 winre.wim（高级启动会失败）");
-    }
+    /* ── ⑤ 恢复分区：★ 2026-11-04 起彻底移走 ──
+     * 恢复分区属性（0x8000000000000001）与 Winre.wim 的检测/修复全部搬到
+     * WinRE 独立模块（命令 recovery.status，src/img_winre.c）。
+     * 引导链（MBR→VBR→bootmgr→BCD→winload）与恢复环境本来就是两回事，
+     * 以前混在这里，App 的"引导修复"卡片总被恢复分区的警告搅和。 */
+    (void)flags;
 
     if(prog) img_prog_done(prog,"检查完成");
     return IMG_OK;
 }
 
 /* ---------- 输出 ---------- */
+/* suggest 里的 <img> 占位符 → 真实镜像路径（REQ-38：App 拿来直接跑）*/
+static void bc_fill_img(char *dst, size_t cap, const char *src, const char *img){
+    if(!dst||!cap) return;
+    if(!src) { dst[0]=0; return; }
+    if(!img || !*img){ snprintf(dst,cap,"%s",src); return; }
+    const char *p=strstr(src,"<img>");
+    if(!p){ snprintf(dst,cap,"%s",src); return; }
+    snprintf(dst,cap,"%.*s%s%s",(int)(p-src),src,img,p+5);
+}
+
 int img_bootcheck_json(const img_bootcheck_result_t *r, char *buf, int cap){
     if(!r||!buf||cap<=0) return 0;
     /* JSON 字符串里反斜杠与引号必须转义 —— 本模块的 name 里就有
@@ -501,14 +473,18 @@ int img_bootcheck_json(const img_bootcheck_result_t *r, char *buf, int cap){
                           c->level==IMG_CK_WARN?"warn":"info";
         /* ⚠ c->id / c->name 是【指针】，sizeof 只有 8；必须用固定大缓冲。
          *   用 sizeof(指针) 会截断 UTF-8 中文，产出非法 JSON。 */
-        char id[128], nm[256], det[sizeof c->detail*2];
+        char id[128], nm[256], det[sizeof c->detail*2], sg[sizeof c->suggest*2];
         #define ESC(dst,src) do{ int j=0; for(const char *p=(src); *p && j<(int)sizeof(dst)-2; p++){ \
             if(*p=='"'||*p=='\\'){ (dst)[j++]='\\'; } (dst)[j++]=*p; } (dst)[j]=0; }while(0)
         ESC(id, c->id); ESC(nm, label); ESC(det, c->detail);
+        if(c->suggest[0]){ char raw[sizeof c->suggest*2]; bc_fill_img(raw,sizeof raw,c->suggest,r->img); ESC(sg, raw); }
         #undef ESC
         int m=snprintf(line,sizeof line,
-            "{\"id\":\"%s\",\"name\":\"%s\",\"level\":\"%s\",\"pass\":%s,\"detail\":\"%s\"}\n",
-            id, nm, lvl, c->pass?"true":"false", det);
+            "{\"id\":\"%s\",\"name\":\"%s\",\"level\":\"%s\",\"pass\":%s,\"detail\":\"%s\"%s%s%s}\n",
+            id, nm, lvl, c->pass?"true":"false", det,
+            c->suggest[0]?",\"suggest\":\"":"",
+            c->suggest[0]?sg:"",
+            c->suggest[0]?"\"":"");
         if(m<0) break;
         if(n+m >= cap-1) break;
         memcpy(buf+n,line,(size_t)m);
@@ -528,14 +504,18 @@ int img_bootcheck_json_array(const img_bootcheck_result_t *r, char *buf, int cap
         const char *label = img_t(c->name);   /* ★ 中英双份：中文原文即 key */
         const char *lvl = c->level==IMG_CK_REQUIRED?"required":
                           c->level==IMG_CK_WARN?"warn":"info";
-        char id[128], nm[256], det[sizeof c->detail*2];
+        char id[128], nm[256], det[sizeof c->detail*2], sg[sizeof c->suggest*2];
         #define ESC2(dst,src) do{ int j=0; for(const char *p=(src); *p && j<(int)sizeof(dst)-2; p++){ \
             if(*p=='"'||*p=='\\'){ (dst)[j++]='\\'; } (dst)[j++]=*p; } (dst)[j]=0; }while(0)
         ESC2(id, c->id); ESC2(nm, label); ESC2(det, c->detail);
+        if(c->suggest[0]){ char raw[sizeof c->suggest*2]; bc_fill_img(raw,sizeof raw,c->suggest,r->img); ESC2(sg, raw); }
         #undef ESC2
         int m=snprintf(line,sizeof line,
-            "%s{\"id\":\"%s\",\"name\":\"%s\",\"level\":\"%s\",\"pass\":%s,\"detail\":\"%s\"}",
-            i?",":"", id, nm, lvl, c->pass?"true":"false", det);
+            "%s{\"id\":\"%s\",\"name\":\"%s\",\"level\":\"%s\",\"pass\":%s,\"detail\":\"%s\"%s%s%s}",
+            i?",":"", id, nm, lvl, c->pass?"true":"false", det,
+            c->suggest[0]?",\"suggest\":\"":"",
+            c->suggest[0]?sg:"",
+            c->suggest[0]?"\"":"");
         if(m<0) break;
         if(n+m >= cap-2) break;
         memcpy(buf+n,line,(size_t)m); n+=m;

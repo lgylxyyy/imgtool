@@ -17,6 +17,10 @@ struct img_prog {
     char item_buf[512];
     char msg_buf[160];
     volatile int cancelled;
+    uint64_t ov_cur, ov_total;
+    int      ov_pct;
+    char     kind_buf[16];
+    uint64_t arc_cur, arc_total;
     img_progress_t cur;
 };
 
@@ -38,6 +42,9 @@ img_prog *img_prog_new(img_progress_cb cb, void *ud, int throttle_ms){
     p->last_ms = 0; p->start_ms = now_ms();
     p->last_phase = IMG_PH_NONE; p->last_op = IMG_OP_NONE;
     p->cur.pct = -1; p->cur.eta_s = -1; p->cur.elapsed_s = 0;
+    p->cur.overall_pct = -1; p->ov_pct = -1;
+    snprintf(p->kind_buf,sizeof p->kind_buf,"%s","raw");
+    p->cur.bytes_kind=p->kind_buf;
     return p;
 }
 void img_prog_free(img_prog *p){ free(p); }
@@ -67,12 +74,45 @@ static void do_emit(img_prog *p, int force){
         int pc = (int)((double)p->cur.cur / (double)p->cur.total * 100.0);
         p->cur.pct = pc>100?100:(pc<0?0:pc);
     }
+    /* 全局进度（单调）*/
+    {
+        int opc = -1;
+        if(p->ov_total > 0){
+            int pc = (int)((double)p->ov_cur * 100.0 / (double)p->ov_total);
+            if(pc > 100) pc = 100;
+            if(pc < 0) pc = 0;
+            if(pc < p->ov_pct) pc = p->ov_pct;      /* 绝不倒退 */
+            p->ov_pct = pc;
+            opc = pc;
+        }
+        p->cur.overall_pct = opc;
+        p->cur.overall_cur_bytes = p->ov_cur;
+        p->cur.overall_total_bytes = p->ov_total;
+    }
+    p->cur.bytes_kind = p->kind_buf;
+    p->cur.archive_cur_bytes = p->arc_cur;
+    p->cur.archive_total_bytes = p->arc_total;
     p->cur.item = p->item_buf;
     p->cur.msg  = p->msg_buf;
     img_io_touch();               /* 有进度 = 没无响应（长循环里可能很久不写盘）*/
     p->cb(p->ud, &p->cur);
 }
 
+void img_prog_bytes_kind(img_prog *p, const char *kind,
+                         uint64_t archive_cur, uint64_t archive_total){
+    if(!p) return;
+    if(kind) snprintf(p->kind_buf,sizeof p->kind_buf,"%s",kind);
+    p->arc_cur=archive_cur;
+    p->arc_total=archive_total;
+}
+void img_prog_overall(img_prog *p, uint64_t cur, uint64_t total){
+    if(!p) return;
+    if(total) p->ov_total = total;
+    if(cur > p->ov_cur) p->ov_cur = cur;              /* 单调：小值忽略 */
+    else if(p->ov_total && p->ov_cur > p->ov_total) p->ov_cur = p->ov_total;
+    if(p->ov_total && p->ov_cur > p->ov_total) p->ov_cur = p->ov_total;
+    do_emit(p, 0);
+}
 void img_prog_phase(img_prog *p, img_phase_t ph, const char *msg){
     if(!p) return;
     p->cur.phase = ph;
@@ -117,6 +157,21 @@ void img_prog_done(img_prog *p, const char *msg){
     p->cur.pct = 100; p->cur.eta_s = 0;
     if(msg) strcopy(p->msg_buf,sizeof p->msg_buf,msg);
     strcopy(p->item_buf,sizeof p->item_buf,"");
+    /* 全局进度（单调）*/
+    {
+        int opc = -1;
+        if(p->ov_total > 0){
+            int pc = (int)((double)p->ov_cur * 100.0 / (double)p->ov_total);
+            if(pc > 100) pc = 100;
+            if(pc < 0) pc = 0;
+            if(pc < p->ov_pct) pc = p->ov_pct;      /* 绝不倒退 */
+            p->ov_pct = pc;
+            opc = pc;
+        }
+        p->cur.overall_pct = opc;
+        p->cur.overall_cur_bytes = p->ov_cur;
+        p->cur.overall_total_bytes = p->ov_total;
+    }
     p->cur.item = p->item_buf;
     p->cur.msg  = p->msg_buf;
     do_emit(p,1);
@@ -158,11 +213,18 @@ int img_prog_json(const img_progress_t *pr, char *buf, int cap){
         "\"cur\":%llu,\"total\":%llu,"
         "\"curBytes\":%llu,\"totalBytes\":%llu,"
         "\"pct\":%d,\"eta\":%d,\"elapsed\":%d,"
+        "\"overall_pct\":%d,\"overall_cur_bytes\":%llu,\"overall_total_bytes\":%llu,"
+        "\"bytes_kind\":\"%s\",\"archive_cur_bytes\":%llu,\"archive_total_bytes\":%llu,"
         "\"item\":\"%s\",\"msg\":\"%s\"}",
         img_phase_name(pr->phase), img_op_name(pr->op),
         (unsigned long long)pr->cur,(unsigned long long)pr->total,
         (unsigned long long)pr->cur_bytes,(unsigned long long)pr->total_bytes,
-        pr->pct, pr->eta_s, pr->elapsed_s, it, mg);
+        pr->pct, pr->eta_s, pr->elapsed_s,
+        pr->overall_pct, (unsigned long long)pr->overall_cur_bytes,
+        (unsigned long long)pr->overall_total_bytes,
+        pr->bytes_kind?pr->bytes_kind:"raw",
+        (unsigned long long)pr->archive_cur_bytes, (unsigned long long)pr->archive_total_bytes,
+        it, mg);
 }
 
 void img_progress_to_stdout(void *ud, const img_progress_t *p){

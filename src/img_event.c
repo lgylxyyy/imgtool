@@ -174,6 +174,8 @@ void img_log_close(void){
     G.fd=-1; G.out_fd=-1;
 }
 void img_out_open_fd(int fd, bool human){ G.out_fd=fd; G.out_human=human; }
+int  img_log_out_fd(void){ return G.out_fd; }
+void img_log_set_out_fd(int fd){ G.out_fd=fd; }
 void img_out_set_text(img_text_cb cb, void *ud){ g_text_cb=cb; g_text_ud=ud; }
 
 /* 记录当前镜像：失败快照 / CLI 的 .error.txt 要用（即使没开日志也要有） */

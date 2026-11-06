@@ -337,7 +337,7 @@ echo "════ 4h. 恢复分区四件套（part.attr / winre.find / recovery
         echo "  ⏭ 没有 install.wim，跳过恢复分区用例"
     else
         R="$W/rec.qcow2"
-        $T/imgcmd img.create --out="$R" --size-gb=12 --rec-mb=1024 --progress=none >/dev/null 2>&1
+        $T/imgcmd img.create --out="$R" --size-gb=12 --rec-mb=1024 --limits=off --progress=none >/dev/null 2>&1
         REC=$($T/imgcmd part.show --img="$R" --ro --progress=none 2>/dev/null | jq_ "[p['first'] for p in d['data']['pt']['parts'] if p['typeGuid'].startswith('de94bba4')][0]")
         [ -n "$REC" ] && ok "img.create --rec-mb=1024 建出恢复分区（LBA $REC）" || ng "没有恢复分区"
 

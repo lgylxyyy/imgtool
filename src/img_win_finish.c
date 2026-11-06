@@ -80,9 +80,18 @@ int img_win_finish(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes, bool dr
     out->system_setup_in_progress = get_dword(h, setup, "SystemSetupInProgress");
     out->cmdline_present         = (setup && hivex_node_get_value(h, setup, "CmdLine") != 0);
 
+    out->oobe_in_progress = get_dword(h, setup, "OOBEInProgress");
+    out->setup_phase      = get_dword(h, setup, "SetupPhase");
+
     hive_node_h st = setup ? hivex_node_get_child(h, setup, "Status") : 0;
+    hive_node_h ss = st    ? hivex_node_get_child(h, st,   "SysprepStatus") : 0;
+    out->generalization_state = get_dword(h, ss, "GeneralizationState");
+
     hive_node_h cc = st    ? hivex_node_get_child(h, st,   "ChildCompletion") : 0;
     out->found_node = (cc != 0);
+    /* 状态机判定：有 ChildCompletion = legacy（Win7/8/8.1）；没有但有 CmdLine=windeploy
+     * = modern（Win10/11）。modern 不能按 legacy 的办法改（实测改 Setup 键会 0xc00002e3 蓝屏）。 */
+    out->machine = cc ? 1 : (out->cmdline_present ? 2 : 0);
 
     if(cc){
         out->old_setup_exe = get_dword(h, cc, "setup.exe");

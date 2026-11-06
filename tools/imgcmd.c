@@ -294,6 +294,38 @@ static void on_progress(void *ud, const img_progress_t *p){
     if(p->pct>=100) wr_all(2,"\n",1);
 }
 
+/* ★ 2026-10-26（REQ-16 §3E）：--progress=json 的进度行。
+ *   iso.extract 抽 4~5 GB 时 App 的进度条要能看到在干活（以前只有 bar 模式有回调，
+ *   json 模式等于静默）。每条一行，和结果信封同走 stdout —— App 按 "ev" 过滤即可。*/
+static void json_esc(const char *s, char *out, size_t cap){
+    size_t k=0;
+    for(const unsigned char *p=(const unsigned char*)s; p&&*p && k+8<cap; p++){
+        if(*p=='"'||*p=='\\'){ out[k++]='\\'; out[k++]=(char)*p; }
+        else if(*p<0x20) k+=(size_t)snprintf(out+k,cap-k,"\\u%04x",*p);
+        else out[k++]=(char)*p;
+    }
+    out[k]=0;
+}
+static void on_progress_json(void *ud, const img_progress_t *p){
+    (void)ud;
+    if(!p) return;
+    const char *ph=img_phase_name(p->phase), *op=img_op_name(p->op);
+    char line[768], it[256];
+    json_esc(p->item?p->item:"",it,sizeof it);
+    int n=snprintf(line,sizeof line,
+        "{\"ev\":\"progress\",\"phase\":\"%s\",\"op\":\"%s\","
+        "\"cur\":%llu,\"total\":%llu,\"cur_bytes\":%llu,\"total_bytes\":%llu,\"pct\":%d,"
+        "\"item\":\"%s\"",
+        ph?ph:"", op?op:"",
+        (unsigned long long)p->cur,(unsigned long long)p->total,
+        (unsigned long long)p->cur_bytes,(unsigned long long)p->total_bytes,
+        p->pct, it);
+    if(p->eta_s>=0 && n>0 && n<(int)sizeof line-16)
+        n+=snprintf(line+n,sizeof line-(size_t)n,",\"eta_s\":%d",p->eta_s);
+    if(n>0 && n<(int)sizeof line-4) n+=snprintf(line+n,sizeof line-(size_t)n,"}\n");
+    if(n>0) wr_all(1,line,(size_t)n);
+}
+
 /* ================= 用法帮助 ================= */
 static void print_help(const img_cmd *c){
     if(!c){ printf("没有这个命令\n"); return; }
@@ -421,8 +453,10 @@ int main(int argc, char **argv){
     /* 屏幕形态：tty → 人话行；非 tty → JSON；--progress=bar|json|none 强制 */
     ui.human = progress ? (!strcmp(progress,"bar")) : (isatty(2)!=0);
     if(progress && !strcmp(progress,"none")) ui.human=false;
-    /* ★ 只有人话模式才注册进度回调：其余两种模式保持"只出一行信封"的旧行为 */
-    if(ui.human) img_cmd_set_progress(on_progress, &ui);
+    /* ★ 人话模式 → 百分比行；--progress=json → 每条一行 {"ev":"progress",…}；
+     *   --progress=none / 默认非 tty → 不注册（零开销，只有一行信封）。*/
+    if(progress && !strcmp(progress,"json")) img_cmd_set_progress(on_progress_json, NULL);
+    else if(ui.human) img_cmd_set_progress(on_progress, &ui);
     img_out_open_fd(2, ui.human);      /* human=true → 库不再往 stderr 吐机器行 */
     img_out_set_text(on_event, &ui);   /* ★ 库发码 → 这里出中文/英文人话行 */
 
@@ -481,7 +515,13 @@ int main(int argc, char **argv){
     int rc=img_cmd_exec(cmd, ctx, args, &res);
     static char out[128*1024];
     int n=img_result_json(&res,out,sizeof out);
-    if(n>0) fwrite(out,1,(size_t)n,stdout);
+    /* ★ REQ-29：--dst=- / --dst-fd=1 时 stdout 是【数据流】，结果 JSON 必须改走 stderr，
+     *   否则数据末尾会多出一行 JSON（文件多 154 字节，校验和全废）。*/
+    FILE *resf=stdout;
+    const char *dstv=img_args_get(args,"dst");
+    if(dstv && !strcmp(dstv,"-")) resf=stderr;
+    else if(img_args_u64(args,"dst-fd",0)==1) resf=stderr;
+    if(n>0) fwrite(out,1,(size_t)n,resf);
     if(rc!=IMG_OK){
         img_error_info_t ei; img_error_info(&ei);
         if(ei.code[0]) render_card(&ei, ui.human);

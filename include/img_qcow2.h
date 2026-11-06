@@ -82,6 +82,10 @@ uint64_t   img_qcow2_size(const img_qcow2 *q);
 /* 读 guest 空间 [off, off+len)；稀疏区域补 0；返回 IMG_OK 或错误 */
 int img_qcow2_read(img_qcow2 *q, uint64_t off, void *buf, size_t len);
 int img_qcow2_read_full(img_qcow2 *q, uint64_t off, void *buf, size_t len);
+/* ★ 紧凑另存（img.compact）用：guest 区间 [off, off+len) 里有没有【已分配】的簇。
+ *   未分配的簇读出来必然是零 —— 连读都不用读，直接跳过（这才是"只写已分配簇"）。
+ *   不分配内存、不做 I/O 以外的副作用；出错返回错误码（*any 保持 false）。*/
+int img_qcow2_any_allocated(img_qcow2 *q, uint64_t off, uint64_t len, bool *any);
 
 /* ---- 写（阶段1 拆步实现）---- */
 int img_qcow2_write(img_qcow2 *q, uint64_t off, const void *buf, size_t len);

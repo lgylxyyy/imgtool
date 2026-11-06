@@ -25,6 +25,7 @@ const char *img_strerror(int e){
     case IMG_EREFUSED:   return "按安全策略拒绝";
     case IMG_EREADONLY:  return "目标是只读容器";
     case IMG_ENAMEINVALID:return "名字是 Windows 不接受的";
+    case IMG_ESTALE:     return "索引/句柄已过期（包变了或超时）";
     default:             return "未知错误";
     }
 }

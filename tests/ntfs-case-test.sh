@@ -17,7 +17,7 @@ q(){ "$T/imgcmd" "$@" --progress=none 2>/dev/null; }
 jget(){ python3 -c "import json,sys; d=json.load(sys.stdin); v=d.get('data',{}); print($1)"; }
 
 echo "════ NTFS 大小写不敏感 ════"
-q img.create --out="$W/a.qcow2" --size-gb=1 --table=mbr --sys-mb=100 >/dev/null
+q img.create --out="$W/a.qcow2" --size-gb=1 --table=mbr --sys-mb=100 --limits=off >/dev/null
 LBA=$(q part.show --img="$W/a.qcow2" | python3 -c "import json,sys; ps=json.load(sys.stdin)['data']['pt']['parts']; print(sorted(ps,key=lambda p:-p['sectors'])[0]['first'])")
 q fs.format --img="$W/a.qcow2" --lba="$LBA" --fs=ntfs --label=Case >/dev/null
 

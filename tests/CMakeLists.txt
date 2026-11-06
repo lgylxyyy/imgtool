@@ -17,6 +17,12 @@ else()
   message(STATUS "imgtool: 未找到 libntfs-3g dev，跳过 NTFS 设备后端测试")
 endif()
 
+# wimlib 错误码映射（REQ-48 §1）
+if(IMG_WITH_WIM)
+  add_executable(wimcodes_test wimcodes_test.c)
+  target_link_libraries(wimcodes_test PRIVATE imgtool)
+endif()
+
 # BCD 读写测试（需 libhivex）
 find_path(HIVEX_INC hivex.h)
 find_library(HIVEX_LIB hivex)
@@ -98,3 +104,24 @@ if(NTFS_INC AND NTFS_LIB)
   target_include_directories(ads_probe PRIVATE ${NTFS_INC})
   target_link_libraries(ads_probe PRIVATE imgtool ${NTFS_LIB})
 endif()
+
+# 进程内复用：同一进程里连续两次 fs.format（NTFS）不许崩（mkntfs 静态状态）
+add_executable(format_twice_test format_twice_test.c)
+target_link_libraries(format_twice_test PRIVATE imgtool)
+
+# REQ-21：在 1 MB 栈的线程里跑会吃栈的命令（模拟 App 的 ART worker）
+add_executable(stack_test stack_test.c)
+target_link_libraries(stack_test PRIVATE imgtool)
+
+# REQ-25：同一进程里按 App 顺序连跑（ISO 句柄/VFD 槽位泄漏会在这里暴露）
+add_executable(winre_chain winre_chain.c)
+target_link_libraries(winre_chain PRIVATE imgtool)
+
+# REQ-27：dlopen 预编译 .so 再跑命令（专门抓"静态 CLI 好、App 里的 .so 坏"这一类）
+add_executable(dl_cmd dl_cmd.c)
+target_link_libraries(dl_cmd PRIVATE ${CMAKE_DL_LIBS})
+target_include_directories(dl_cmd PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
+# REQ-31：index_token 生命周期（同进程）
+add_executable(archive_chain archive_chain.c)
+target_link_libraries(archive_chain PRIVATE imgtool)

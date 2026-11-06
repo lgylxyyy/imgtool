@@ -81,12 +81,23 @@ int img_clone(const char *src_path, const char *dst_path,
         img_span_begin(&sp);
         if(prog){ img_prog_phase(prog,IMG_PH_COPY,"克隆保留分区"); img_prog_bytes(prog,0,bytes); }
         uint64_t done=0;
+        /* ★ 2026-10-25（img.compact）：按【簇】粒度跳读 ——
+         *   先问源盘这段有没有已分配的簇（没有 → 读出来必然是零，连读都省了），
+         *   再读、再判全零。只按 1 MiB 判零会把一个元数据簇带成 1 MiB 的分配，
+         *   另存出来的文件反而比源盘还大（实测 77 MB → 80 MB）。*/
+        uint64_t unit=img_qcow2_header(sq)->cluster_size;
+        if(unit<4096) unit=4096;
+        if(unit>CLONE_CHUNK) unit=CLONE_CHUNK;
         while(done<bytes && rc==IMG_OK){
-            size_t n=(size_t)((bytes-done)<CLONE_CHUNK?(bytes-done):CLONE_CHUNK);
-            rc=img_qcow2_read_full(sq, off+done, buf, n);
-            if(rc==IMG_OK && memcmp(buf,zero,n)!=0){   /* ★ 全零块跳过（保持稀疏） */
-                rc=img_qcow2_write(dq, off+done, buf, n);
-                if(rc==IMG_OK) st.bytes_written += n;
+            size_t n=(size_t)((bytes-done)<unit?(bytes-done):unit);
+            bool any=false;
+            rc=img_qcow2_any_allocated(sq, off+done, n, &any);
+            if(rc==IMG_OK && any){
+                rc=img_qcow2_read_full(sq, off+done, buf, n);
+                if(rc==IMG_OK && memcmp(buf,zero,n)!=0){   /* ★ 全零块跳过（保持稀疏） */
+                    rc=img_qcow2_write(dq, off+done, buf, n);
+                    if(rc==IMG_OK) st.bytes_written += n;
+                }
             }
             done+=n;
             if(prog) img_prog_bytes(prog,done,bytes);

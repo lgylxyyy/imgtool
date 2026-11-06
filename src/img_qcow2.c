@@ -301,6 +301,27 @@ int img_qcow2_read_full(img_qcow2 *q, uint64_t off, void *buf, size_t len){
     return img_qcow2_read(q, off, buf, len);
 }
 
+/* ---------- 紧凑另存用：这段 guest 区间有没有已分配的簇 ---------- */
+int img_qcow2_any_allocated(img_qcow2 *q, uint64_t off, uint64_t len, bool *any){
+    if(!q||!any) return IMG_EINVAL;
+    *any=false;
+    if(!len || off>=q->h.size) return IMG_OK;
+    if(len > q->h.size - off) len = q->h.size - off;
+    uint64_t c=q->h.cluster_size;
+    uint64_t end=off+len;
+    uint64_t a=off-(off%c);
+    for(; a<end; a+=c){
+        uint64_t l2_addr=0, e=0;
+        int rc=load_l2(q,a,&l2_addr);
+        if(rc==IMG_ENOENT) continue;              /* 整张 L2 都不存在 → 纯稀疏 */
+        if(rc!=IMG_OK) return rc;
+        rc=read_l2_entry(q,l2_addr,a,&e);
+        if(rc!=IMG_OK) return rc;
+        if(e!=0){ *any=true; return IMG_OK; }     /* 非零 = 有映射（含压缩簇） */
+    }
+    return IMG_OK;
+}
+
 /* ---------- 信息 JSON ---------- */
 int img_qcow2_info_json(const img_qcow2 *q, char *buf, int cap){
     if(!q||!buf||cap<16) return 0;

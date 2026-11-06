@@ -20,6 +20,9 @@
  *   · 符号链接默认跳过并计数，不跟随（防止复制出环）。
  */
 #include "img_xcopy.h"
+#include "img_archive_w.h"
+#include "img_archive.h"
+#include <fnmatch.h>
 #include "img_cmd.h"
 #include "img_ntfs_fs.h"
 #include "img_fat32_fs.h"
@@ -144,6 +147,11 @@ typedef struct {
     uint64_t    lba_used;
     char        root[4096];  /* 实际源根（WIM 材料化后指向临时目录） */
     char        tmp_root[2048];   /* WIM 临时目录（关闭时要删） */
+    /* REQ-41：目标是压缩包时的写句柄（整包重写到临时文件，收尾才 rename） */
+    img_aw     *aw;
+    img_aw_names *ns;        /* 计划覆盖时用的只读名字表 */
+    uint64_t    aw_io_done, aw_io_total;
+    char        aw_err[256];
 } xep;
 
 static int fs_at(img_qcow2 *q, uint64_t lba, img_xkind want){
@@ -184,6 +192,8 @@ static int part_bytes_at(img_qcow2 *q, uint64_t lba, uint64_t *out){
 
 static void ep_close(xep *e){
     if(!e) return;
+    if(e->aw){ img_aw_abort(e->aw); e->aw=NULL; }     /* 没 commit 就关 = 失败：临时文件删掉 */
+    if(e->ns){ img_aw_names_free(e->ns); e->ns=NULL; }
     if(e->ntfs && e->own_mount){ img_ntfs_umount(e->ntfs); }
     e->ntfs=NULL;
     if(e->fat && e->own_mount){ img_fat32_unmount(e->fat); }
@@ -202,6 +212,7 @@ static int ep_open(xep *e, const img_xloc *loc, img_ctx *shared, bool writable,
     e->loc=*loc;
     xstrlcpy(e->root, loc->path, sizeof e->root);
     if(loc->kind==IMG_XK_HOST) return IMG_OK;
+    if(loc->kind==IMG_XK_ARCHIVE) return IMG_OK;   /* 压缩包不需要持久端点：按需开流 */
 
     if(loc->kind==IMG_XK_ISO){
         char err[256]={0};
@@ -296,6 +307,15 @@ static int src_stat(xep *s, const char *path, bool *isdir, img_src_meta *meta){
         meta->times[3]=(uint64_t)st.st_ctime;
         return IMG_OK;
     }
+    case IMG_XK_ARCHIVE:{
+        bool d=false; uint64_t sz=0, mt=0; char err[160]="";
+        int rc=img_archive_stat(s->loc.img,path,&d,&sz,&mt,err,sizeof err);
+        if(rc!=IMG_OK) return rc;
+        *isdir=d;
+        meta->size=d?0:sz;
+        if(mt){ meta->has_times=true; meta->times[0]=mt; meta->times[1]=mt; meta->times[2]=mt; meta->times[3]=mt; }
+        return IMG_OK;
+    }
     case IMG_XK_NTFS:{
         uint64_t ino=0; bool d=false;
         int rc=img_ntfs_verify_path(s->ntfs,path,&ino,&d);
@@ -365,7 +385,8 @@ static void cb_ntfs(void *ud, const char *name, bool is_dir, uint64_t size){
 static void cb_fat(void *ud, const char *name, bool is_dir, uint64_t size){
     xlist_push((xlist*)ud,name,is_dir,size);
 }
-static void cb_iso(void *ud, const char *name, bool is_dir, uint64_t size){
+static void cb_iso(void *ud, const char *name, bool is_dir, uint64_t size, uint64_t mtime){
+    (void)mtime;
     xlist_push((xlist*)ud,name,is_dir,size);
 }
 
@@ -482,6 +503,17 @@ static int src_open_stream(xep *s, const char *path, img_stream *out, void **hol
         *holder=h;
         return IMG_OK;
     }
+    case IMG_XK_ARCHIVE:{
+        img_stream st; uint64_t sz=0; char err[160]="";
+        int rc=img_archive_stream_open(s->loc.img,path,&st,&sz,NULL,err,sizeof err);
+        if(rc!=IMG_OK) return rc;
+        img_stream *hs=(img_stream*)calloc(1,sizeof *hs);
+        if(!hs){ if(st.close) st.close(st.ud); return IMG_ENOMEM; }
+        *hs=st;
+        *out=*hs;
+        *holder=hs;           /* close 时要 join 线程 + 关管道，不能只 free */
+        return IMG_OK;
+    }
     case IMG_XK_ISO:{
         iso_stream_ud *h=(iso_stream_ud*)calloc(1,sizeof *h);
         if(!h) return IMG_ENOMEM;
@@ -502,6 +534,11 @@ static void src_close_stream(xep *s, void *holder){
     case IMG_XK_HOST: close(((host_rd*)holder)->fd); break;
     case IMG_XK_NTFS: img_ntfs_rd_close(((ntfs_stream_ud*)holder)->rd); break;
     case IMG_XK_FAT:  img_fat32_rd_close(((fat_stream_ud*)holder)->rd); break;
+    case IMG_XK_ARCHIVE:{
+        img_stream *hs=(img_stream*)holder;
+        if(hs->close) hs->close(hs->ud);
+        break;
+    }
     default: break;
     }
     free(holder);
@@ -510,6 +547,14 @@ static void src_close_stream(xep *s, void *holder){
 /* ================= 目标 ================= */
 static int dst_exists(xep *d, const char *path, bool *isdir){
     switch(d->loc.kind){
+    case IMG_XK_ARCHIVE:{
+        if(!d->aw && !d->ns) return 0;
+        bool dd=false;
+        int hit = d->aw ? img_aw_lookup(d->aw,path,&dd) : img_aw_names_lookup(d->ns,path,&dd);
+        if(hit<=0) return 0;
+        if(isdir) *isdir=dd;
+        return 1;
+    }
     case IMG_XK_HOST:{
         struct stat st;
         if(stat(path,&st)!=0) return 0;
@@ -530,12 +575,33 @@ static int dst_exists(xep *d, const char *path, bool *isdir){
     }
 }
 static int dst_mkdir_p(xep *d, const char *path){
+    if(d->loc.kind==IMG_XK_ARCHIVE){
+        if(!d->aw) return IMG_ESTATE;
+        char err[200]="";
+        int rc=img_aw_add_dir(d->aw,path,0,err,sizeof err);
+        if(rc!=IMG_OK && d->aw_err[0]==0) snprintf(d->aw_err,sizeof d->aw_err,"%s",err);
+        return rc;
+    }
     if(d->loc.kind==IMG_XK_HOST) return host_mkdir_p(path,0755);
     if(d->loc.kind==IMG_XK_NTFS) return img_ntfs_mkdir_p(d->ntfs,path);
     if(d->loc.kind==IMG_XK_FAT)  return img_fat32_mkdir_p(d->fat,path);
     return IMG_ENOTSUP;
 }
 static int dst_unique_name(xep *d, const char *dir, const char *base, char *out, size_t cap){
+    if(d->loc.kind==IMG_XK_ARCHIVE){
+        for(int i=1;i<1000;i++){
+            const char *dot=strrchr(base,'.');
+            bool has_ext=dot && dot!=base && dot[1];
+            char cand[400];
+            if(has_ext) snprintf(cand,sizeof cand,"%.*s (%d)%s",(int)(dot-base),base,i,dot);
+            else snprintf(cand,sizeof cand,"%s (%d)",base,i);
+            char full[1400];
+            if(join_path(dir,cand,full,sizeof full)!=IMG_OK) return IMG_EINVAL;
+            bool exists = d->aw ? img_aw_has(d->aw,full) : (d->ns?img_aw_names_has(d->ns,full):false);
+            if(!exists){ xstrlcpy(out,cand,cap); return IMG_OK; }
+        }
+        return IMG_EEXISTS;
+    }
     if(d->loc.kind==IMG_XK_HOST){
         for(int i=1;i<1000;i++){
             const char *dot=strrchr(base,'.');
@@ -555,6 +621,7 @@ static int dst_unique_name(xep *d, const char *dir, const char *base, char *out,
     return IMG_ENOTSUP;
 }
 static int dst_set_times(xep *d, const char *path, const img_src_meta *meta){
+    if(d->loc.kind==IMG_XK_ARCHIVE) return IMG_OK;   /* 条目时间在建条目时已写 */
     if(!meta->has_times) return IMG_OK;
     if(d->loc.kind==IMG_XK_NTFS){
         uint64_t t[4]; memcpy(t,meta->times,sizeof t);
@@ -583,6 +650,14 @@ static int dst_write_file(xep *d, const char *final, const img_stream *src,
                           img_prog *prog, bool existed, uint64_t *out_size, bool *out_replaced){
     if(out_size) *out_size=meta->size;
     if(out_replaced) *out_replaced=existed;
+    if(d->loc.kind==IMG_XK_ARCHIVE){
+        if(!d->aw) return IMG_ESTATE;
+        uint64_t mt = (o->preserve_times && meta->has_times) ? meta->times[1] : 0;
+        d->aw_err[0]=0;
+        int rc=img_aw_add_file(d->aw,final,src,meta->size,mt,prog,
+                               &d->aw_io_done,d->aw_io_total,d->aw_err,sizeof d->aw_err);
+        return rc;
+    }
     if(d->loc.kind==IMG_XK_NTFS){
         img_copy_opts co={ existed?IMG_COPY_OVERWRITE:IMG_COPY_FAIL, o->preserve_times, o->create_parents };
         img_copy_result r;
@@ -652,6 +727,8 @@ static void cnt_cb(void *ud, const char *name, bool is_dir, uint64_t size){
     (void)name;(void)is_dir;(void)size; ((cnt_ud*)ud)->n++;
 }
 static uint64_t dst_count(xep *d, const char *dir){
+    if(d->loc.kind==IMG_XK_ARCHIVE)
+        return d->aw ? img_aw_count_children(d->aw,dir) : 0;
     if(d->loc.kind==IMG_XK_HOST){
         DIR *dp=opendir(dir);
         if(!dp) return 0;
@@ -806,6 +883,139 @@ static int apply_conflict(xctx *c, const char *final, bool *existed,
     return IMG_OK;
 }
 
+/* ================= 目标：压缩包（REQ-41 ①） =================
+ * 写包只能整包重写（zip 中央目录在尾部、7z/tar 是顺序格式）。所以：
+ *   ① 先把"包里已有什么"读成名字表（不读数据）；
+ *   ② conflict=overwrite 时走一遍源树，算出"哪些旧条目会被替换" → 重写时跳过它们
+ *      （否则包里会出现两条同名，解压时谁赢看实现）；
+ *   ③ 开临时包，搬旧条目 → 追加新条目 → rename。
+ * conflict=fail / rename 不需要 ②：fail 在第一条冲突处失败（临时包删掉，原包不动），
+ * rename 直接挑一个不冲突的新名字。*/
+static int x_excluded(const img_xcopy_opts *o, const char *name);   /* 定义在后面 */
+
+typedef struct { char **v; int n, cap; } ac_skip;
+
+static int ac_skip_add(ac_skip *l, const char *p){
+    if(l->n>=l->cap){
+        int nc=l->cap?l->cap*2:16;
+        char **nv=(char**)realloc(l->v,(size_t)nc*sizeof(char*));
+        if(!nv) return IMG_ENOMEM;
+        l->v=nv; l->cap=nc;
+    }
+    l->v[l->n]=strdup(p);
+    if(!l->v[l->n]) return IMG_ENOMEM;
+    l->n++;
+    return IMG_OK;
+}
+static void ac_skip_free(ac_skip *l){
+    if(!l) return;
+    for(int i=0;i<l->n;i++) free(l->v[i]);
+    free(l->v); l->v=NULL; l->n=l->cap=0;
+}
+
+/* 源树干跑：只 stat/list，不读数据；把"会被新内容覆盖掉的旧路径"记进 sk。
+ * 与 copy_dir/copy_file 的目标路径算法保持一致（都走 resolve_final）。*/
+static int arch_plan_node(xctx *c, const img_aw_names *ns, const char *spath, const char *dpath,
+                          int depth, bool top, ac_skip *sk){
+    if(depth>c->max_depth) return IMG_ESTATE;
+    img_src_meta meta; bool isdir=false;
+    int rc=src_stat(c->s,spath,&isdir,&meta);
+    if(rc!=IMG_OK) return rc;
+    char final[4096]; bool existed=false, ed=false;
+    rc=resolve_final(c,spath,dpath,top,final,sizeof final,&existed,&ed);
+    if(rc!=IMG_OK) return rc;
+    if(img_aw_names_has(ns,final)){
+        rc=ac_skip_add(sk,final);
+        if(rc!=IMG_OK) return rc;
+    }
+    if(!isdir) return IMG_OK;
+    xlist l;
+    rc=src_list(c->s,spath,&l);
+    if(rc!=IMG_OK) return rc;
+    for(int i=0;i<l.n && rc==IMG_OK;i++){
+        if(l.v[i].skip) continue;
+        if(x_excluded(c->o,l.v[i].name)) continue;
+        char cs[4096], cd[4096];
+        if(join_path(spath,l.v[i].name,cs,sizeof cs)!=IMG_OK ||
+           join_path(final ,l.v[i].name,cd,sizeof cd)!=IMG_OK){ rc=IMG_EINVAL; break; }
+        rc=arch_plan_node(c,ns,cs,cd,depth+1,false,sk);
+    }
+    free(l.v);
+    return rc;
+}
+
+/* 开写之前：定格式 + 准备名字表 + 开临时包。*/
+static int arch_dst_prepare(xctx *c){
+    xep *d=c->d;
+    char err[256]="";
+    img_aw_fmt f=IMG_AW_NONE;
+    int rc=img_aw_fmt_of_existing(d->loc.img,&f,err,sizeof err);
+    bool exists=(rc==IMG_OK);
+    if(rc==IMG_ENOENT){
+        f=img_aw_fmt_by_name(d->loc.img);
+        if(f==IMG_AW_NONE){
+            snprintf(d->aw_err,sizeof d->aw_err,
+                     "这个扩展名认不出格式（用 .zip / .7z / .tar / .tgz / .iso）；新建包请用 archive.create");
+            return IMG_EINVAL;
+        }
+    }else if(rc==IMG_ENOTSUP || rc==IMG_EREADONLY){
+        snprintf(d->aw_err,sizeof d->aw_err,"%s",err[0]?err:"这个包只能读，不能写（RAR/ISO 请用 7z 或 archive.create）");
+        return IMG_EREADONLY;
+    }else if(rc!=IMG_OK){
+        snprintf(d->aw_err,sizeof d->aw_err,"%s",err[0]?err:"原包打不开");
+        return rc;
+    }
+    if(!img_aw_writable(f)){
+        snprintf(d->aw_err,sizeof d->aw_err,"这个包只能读，不能写（RAR/ISO）");
+        return IMG_EREADONLY;
+    }
+
+    ac_skip sk={0};
+    int nskip=0; const char *const *skv=NULL;
+    if(exists && c->o->conflict==IMG_COPY_OVERWRITE){
+        rc=img_aw_names_load(d->loc.img,&d->ns,err,sizeof err);
+        if(rc!=IMG_OK){
+            snprintf(d->aw_err,sizeof d->aw_err,"%s",err[0]?err:"原包打不开（已损坏？）");
+            return (rc==IMG_ENOENT)?IMG_ENOENT:IMG_EFORMAT;
+        }
+        rc=arch_plan_node(c,d->ns,c->s->root,d->loc.path,0,true,&sk);
+        if(rc!=IMG_OK){
+            img_aw_names_free(d->ns); d->ns=NULL; ac_skip_free(&sk);
+            snprintf(d->aw_err,sizeof d->aw_err,"规划覆盖时失败（源目录读不动？）");
+            return rc;
+        }
+        nskip=sk.n; skv=(const char *const *)sk.v;
+    }
+
+    /* 进度总量：源是文件就它的大小；目录算出全部大小（多走一遍，但进度条才有意义）*/
+    if(d->aw_io_total==0){
+        /* 粗算：源侧逐个 stat 太贵，这里只给"已知文件大小"，目录先给 0（用 item 显示当下文件）*/
+        img_src_meta m; bool isdir=false;
+        if(src_stat(c->s,c->s->root,&isdir,&m)==IMG_OK && !isdir) d->aw_io_total=m.size;
+    }
+
+    int brc=img_aw_begin(d->loc.img,f,5,NULL,true,exists,skv,nskip,false,&d->aw,err,sizeof err);
+    ac_skip_free(&sk);
+    if(brc!=IMG_OK){
+        if(d->ns){ img_aw_names_free(d->ns); d->ns=NULL; }
+        snprintf(d->aw_err,sizeof d->aw_err,"%s",err[0]?err:"建临时包失败");
+        return (brc==IMG_ENOTSUP)?IMG_EREADONLY:brc;
+    }
+    return IMG_OK;
+}
+
+/* 收尾：成功 → rename；失败 → 删临时文件（原包不动）。*/
+static int arch_dst_finish(xep *d, bool ok, uint64_t *out_size){
+    if(d->ns){ img_aw_names_free(d->ns); d->ns=NULL; }
+    if(!d->aw) return IMG_OK;
+    if(!ok){ img_aw_abort(d->aw); d->aw=NULL; return IMG_OK; }
+    char err[256]="";
+    int rc=img_aw_commit(d->aw,out_size,err,sizeof err);
+    d->aw=NULL;
+    if(rc!=IMG_OK && d->aw_err[0]==0) snprintf(d->aw_err,sizeof d->aw_err,"%s",err[0]?err:"写包失败");
+    return rc;
+}
+
 /* 目标名字长度：NTFS/FAT 按字符（255），宿主按字节（255）。超了直接报，不截断。*/
 static size_t u8_chars(const char *s){
     size_t n=0;
@@ -886,6 +1096,16 @@ static int copy_file(xctx *c, const char *spath, const char *dpath, bool top){
     return IMG_OK;
 }
 
+/* REQ-32：递归子项的排除规则。只认 basename；大小写敏感。
+ * 返回 0=要，1=.trashed-*，2=--exclude 命中。*/
+static int x_excluded(const img_xcopy_opts *o, const char *name){
+    if(!o || !name || !*name) return 0;
+    if(o->skip_trashed && !strncmp(name,".trashed-",9)) return 1;
+    for(int i=0;i<o->n_exclude;i++)
+        if(fnmatch(o->exclude[i],name,0)==0) return 2;
+    return 0;
+}
+
 static int copy_dir(xctx *c, const char *spath, const char *dpath, int depth, bool top){
     if(depth>c->max_depth) return IMG_ESTATE;
     char final[4096]; bool existed=false, ed=false;
@@ -914,6 +1134,8 @@ static int copy_dir(xctx *c, const char *spath, const char *dpath, int depth, bo
     if(rc!=IMG_OK){ c->st->side=1; return rc; }
     for(int i=0;i<l.n && rc==IMG_OK;i++){
         if(l.v[i].skip){ c->st->skipped++; continue; }
+        int ex=x_excluded(c->o,l.v[i].name);        /* REQ-32：顶层目录本身不参与（这里只滤子项）*/
+        if(ex){ if(ex==1) c->st->skipped_trashed++; else c->st->skipped_excluded++; continue; }
         char cs[4096], cd[4096];
         if(join_path(spath,l.v[i].name,cs,sizeof cs)!=IMG_OK ||
            join_path(target,l.v[i].name,cd,sizeof cd)!=IMG_OK){ rc=IMG_EINVAL; break; }
@@ -1009,7 +1231,7 @@ int img_xcopy_run(const img_xloc *src, const img_xloc *dst,
     memset(st,0,sizeof *st);
     if(!src||!dst) return IMG_EINVAL;
 
-    img_xcopy_opts o = { IMG_COPY_FAIL, true, true, true, false, XC_MAX_DEPTH };
+    img_xcopy_opts o = { IMG_COPY_FAIL, true, true, true, false, XC_MAX_DEPTH, false, {{0}}, 0 };
     if(opt) o=*opt;
     if(o.max_depth<=0 || o.max_depth>256) o.max_depth=XC_MAX_DEPTH;
 
@@ -1055,11 +1277,29 @@ int img_xcopy_run(const img_xloc *src, const img_xloc *dst,
     {
         xctx c; memset(&c,0,sizeof c);
         c.s=&se; c.d=&de; c.o=&o; c.prog=prog; c.st=st; c.max_depth=o.max_depth;
-        rc=copy_node(&c,se.root,de.loc.path,0,true);
-        if(rc==IMG_OK && st->final_path[0]){
+        /* ★ REQ-41：目标是压缩包 → 先开临时包（可能已把旧条目搬进来），复制走同一套
+         *   copy_node；成功才 rename，失败/取消临时文件删掉、原包字节不变。*/
+        if(de.loc.kind==IMG_XK_ARCHIVE){
+            rc=arch_dst_prepare(&c);
+            if(rc!=IMG_OK){
+                st->side=2;
+                if(de.aw_err[0]) xstrlcpy(st->first_error,de.aw_err,sizeof st->first_error);
+            }
+        }
+        if(rc==IMG_OK) rc=copy_node(&c,se.root,de.loc.path,0,true);
+        if(rc==IMG_OK && st->final_path[0]){       /* 必须在收尾之前数（收尾后句柄没了）*/
             char par[2048]; xstrlcpy(par,st->final_path,sizeof par);
             char *sl=strrchr(par,'/');
             if(sl){ if(sl==par) par[1]=0; else *sl=0; st->parent_total=dst_count(&de,par); }
+        }
+        if(de.loc.kind==IMG_XK_ARCHIVE){
+            uint64_t wsz=0;
+            int frc=arch_dst_finish(&de, rc==IMG_OK, &wsz);
+            if(rc==IMG_OK && frc!=IMG_OK){
+                rc=frc; st->side=2;
+                if(de.aw_err[0]) xstrlcpy(st->first_error,de.aw_err,sizeof st->first_error);
+            }
+            if(rc==IMG_OK) st->archive_bytes=wsz;
         }
     }
     if(rc==IMG_OK && prog) img_prog_done(prog,"复制完成");
@@ -1191,7 +1431,8 @@ int img_xmove_run(const img_xloc *src, const img_xloc *dst,
     if(opt) o=*opt;
     if(o.max_depth<=0 || o.max_depth>256) o.max_depth=XC_MAX_DEPTH;
 
-    if(src->kind==IMG_XK_ISO || src->kind==IMG_XK_WIM) return IMG_EREADONLY;
+    if(src->kind==IMG_XK_ISO || src->kind==IMG_XK_WIM || src->kind==IMG_XK_ARCHIVE)
+        return IMG_EREADONLY;      /* 压缩包只能"复制出来"，不能 move（删不了包内条目）*/
     if(dst->kind==IMG_XK_ISO || dst->kind==IMG_XK_WIM) return IMG_EREADONLY;
 
     if(loc_same_volume(src,dst)){
@@ -1214,7 +1455,7 @@ int img_xmove_run(const img_xloc *src, const img_xloc *dst,
         rc=ep_open(&se,src,shared,true,&de);
         if(rc!=IMG_OK){ ep_close(&de); if(shared) img_ctx_close(shared); return rc; }
 
-        img_xcopy_opts co={ o.conflict, o.recursive, o.preserve_times, o.create_parents, false, o.max_depth };
+        img_xcopy_opts co={ o.conflict, o.recursive, o.preserve_times, o.create_parents, false, o.max_depth, false, {{0}}, 0 };
         xctx c; memset(&c,0,sizeof c);
         c.s=&se; c.d=&de; c.o=&co; c.prog=prog; c.max_depth=o.max_depth;
         img_xcopy_stats tmp; memset(&tmp,0,sizeof tmp); c.st=&tmp;
@@ -1348,7 +1589,7 @@ mv_done:
     if(rc!=IMG_OK) return rc;
     if(sdir && !o.recursive) return IMG_ENOTSUP;
 
-    img_xcopy_opts co={ o.conflict, o.recursive, o.preserve_times, o.create_parents, false, o.max_depth };
+    img_xcopy_opts co={ o.conflict, o.recursive, o.preserve_times, o.create_parents, false, o.max_depth, false, {{0}}, 0 };
     img_xcopy_stats cs; memset(&cs,0,sizeof cs);
     rc=img_xcopy_run(src,dst,&co,prog,&cs);
     if(rc!=IMG_OK) return rc;
@@ -1385,6 +1626,34 @@ int img_xrm_run(const img_xloc *loc, bool recursive, bool allow_host_delete,
         } else if(host_dangerous(loc->path)) return IMG_EREFUSED;
         if(host_dangerous(loc->path)) return IMG_EREFUSED;
         return host_remove_count(loc->path,recursive,removed);
+    }
+    if(loc->kind==IMG_XK_ARCHIVE){
+        /* REQ-41 ①：rm 包内条目 = 重写整包（跳过该路径/子树）。
+         * 先看包的格式：rar/cab/iso → 只读，原包不动。*/
+        char err[256]="";
+        img_aw_fmt f=IMG_AW_NONE;
+        int rc=img_aw_fmt_of_existing(loc->img,&f,err,sizeof err);   /* ★ loc->img 才是包文件 */
+        if(rc==IMG_ENOENT) return IMG_ENOENT;
+        if(rc!=IMG_OK || !img_aw_writable(f)) return IMG_EREADONLY;
+        img_aw_names *ns=NULL;
+        rc=img_aw_names_load(loc->img,&ns,err,sizeof err);
+        if(rc==IMG_ENOENT) return IMG_ENOENT;
+        if(rc!=IMG_OK) return rc;
+        bool isdir=false;
+        int ex=img_aw_names_lookup(ns,loc->path,&isdir);
+        uint64_t kids=img_aw_names_count_children(ns,loc->path);
+        img_aw_names_free(ns);
+        if(!ex) return IMG_ENOENT;
+        if(isdir && !recursive && kids>0) return IMG_ESTATE;   /* 非空目录：不许删 */
+        img_aw *w=NULL;
+        const char *skip[1]={loc->path};
+        rc=img_aw_begin(loc->img,f,5,NULL,true,true,skip,1,true,&w,err,sizeof err);
+        if(rc!=IMG_OK) return (rc==IMG_ENOTSUP)?IMG_EREADONLY:rc;
+        uint64_t sz=0;
+        rc=img_aw_commit(w,&sz,err,sizeof err);
+        if(rc!=IMG_OK) return rc;
+        if(removed) *removed = isdir ? (kids+1) : 1;
+        return IMG_OK;
     }
     xep e; memset(&e,0,sizeof e);
     int rc=ep_open(&e,loc,NULL,true,NULL);

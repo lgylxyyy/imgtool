@@ -64,6 +64,10 @@ void img_wim_apply_defaults(img_wim_apply_opts_t *o);
 /* 上一次 img_wim_apply 里 wimlib 的原始错误码（0=成功）。
  * 我们对外统一为 IMG_EIO，但诊断时没这个数字就只能瞎猜（实测中断后重跑就吃过这个亏）。*/
 int img_wim_last_rc(void);
+/* REQ-48 §1：wimlib 原始码 → 官方枚举名 / 中文含义（表在 include/img_wimlib_codes.h）。
+ * 找不到返回 NULL（App 拿 wimlib_code 兜底）。*/
+const char *img_wimlib_err_name(int code);
+const char *img_wimlib_err_zh(int code);
 int img_wim_apply(const char *wim_path, int image_idx,
                   img_qcow2 *q, uint64_t part_lba,
                   const img_wim_apply_opts_t *opts, img_prog *prog);

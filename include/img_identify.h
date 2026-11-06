@@ -18,12 +18,16 @@ typedef struct {
     char     name[128];        /* <NAME>，如 Windows 7 PROFESSIONAL */
     char     display_name[128];/* <DISPLAYNAME>，可能空 */
     char     edition_id[64];   /* <EDITIONID>，如 Professional */
-    char     arch[16];         /* <ARCH>：0=x86 5=arm 9=x64 12=arm64 */
+    char     arch[16];         /* 归一化：x86|x64|arm|arm64；判不出为空串 */
+    char     arch_raw[16];     /* <ARCH> 原值（0/9/12/…，排查用；对微软镜像常是 "0"）*/
     int      major, minor, build;
     char     languages[96];    /* 逗号分隔 */
     uint64_t total_bytes;      /* 展开大小 */
     int      dir_count, file_count;
 } img_wim_image_t;
+
+/* <ARCH> 原值 → 归一化位数（REQ-19）*/
+void img_arch_normalize(const char *raw, char *out, size_t cap);
 
 /* 读 WIM/ESD 的 XML（只读头 + 尾部 XML，不解析数据块，几毫秒） */
 int img_wim_identify(img_rd_fn rd, void *ud,
@@ -52,6 +56,7 @@ typedef struct {
     /* ③ 版本证据：\Windows\System32\spp\tokens\skus 下的目录名（Professional 等）*/
     char skus[160];
     uint16_t pe_machine;          /* 内核 PE 的 Machine：0x14c=x86 0x8664=x64 0xAA64=arm64 */
+    uint32_t pe_offset;           /* PE 头在文件里的偏移（bootmgr 那种带 16 位引导壳的 >0）*/
     char servicing_version[40];   /* \Windows\servicing\Version\<x.y.build.rev> */
     char skipped[120];            /* 文件存在但无法读取版本（WOF/CompactOS 压缩）的核心文件 */
 

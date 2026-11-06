@@ -46,6 +46,11 @@ void img_log_close  (void);
  *   --log=/别的路径 时卡片会印错，而"卡片里印的路径无法打开"会让用户以为附件漏发。*/
 const char *img_log_path(void);
 void img_log_set_level(img_lv_t lv);
+
+/* 结果/日志的输出 fd（-1 = 没开）。流式导出时要把 fd 1 让给数据，
+ * 这时把日志/进度改到一个 dup 出来的真 stdout 上，免得把字节流冲烂。*/
+int  img_log_out_fd(void);
+void img_log_set_out_fd(int fd);
 img_lv_t img_log_level(void);
 bool img_log_enabled(img_lv_t lv);
 /* 会话头（版本/命令/镜像指纹）：立刻写一行；发生轮转时自动在新文件头补写 */
@@ -164,7 +169,7 @@ void img_error_report(int rc, const char *code, const char *mod, const char *op,
  *   2) 触发取消（协作式检查点退出）
  *   ★ 它不能打断"卡在内核/JNI 里的那一次调用"，但能让【随后的每一次 I/O】立刻失败、
  *     让操作尽快停下来并给出明确错误码 —— 比"静默挂死"强得多。
- * 默认 30 秒（见 FEATURE-CHECKLIST：1MiB 块在 5MB/s 慢卡上只需 ~170ms，
+ * 默认 30 秒（见 DESIGN-OUTPUT.md 第十二节：1MiB 块在 5MB/s 慢卡上只需 ~170ms，
  * 30s 无 I/O = 不是慢是死）；0 = 关闭。
  * 消费方：img_io_read/write 每次完成时 touch；超时后它们在入口 fail-fast。*/
 void img_io_watchdog_start(int timeout_ms);   /* 0=关闭 */

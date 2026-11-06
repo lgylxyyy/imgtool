@@ -104,6 +104,9 @@ typedef void (*img_table_progress)(void *ud, int cur, int total, const char *wha
 int img_parttable_read(img_qcow2 *q, img_parttable_t *out, uint64_t disk_sectors);
 /* 只渲染成 JSON（前端面板直接用） */
 int img_parttable_json(const img_parttable_t *t, char *buf, int cap);
+/* MBR 前 446 字节里有没有非 0 引导码（REQ-14：导出预览要显示"有没有引导码"）。
+ * GPT（保护 MBR 的引导区）也按同一处字节判断。*/
+bool img_parttable_has_bootcode(const img_parttable_t *t);
 
 /* ---------- 找空白区 ---------- */
 typedef struct { uint64_t first_lba, last_lba, sectors; } img_range_t;

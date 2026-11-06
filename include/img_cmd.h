@@ -1,6 +1,6 @@
 /* img_cmd.h — 命令表（"加新功能 = 表里加一行 + 写一个 handler"）
  *
- * 为什么这么设计（见 DESIGN-OUTPUT.md 第七节 / WORKPLAN-HARDEN.md）：
+ * 为什么这么设计（见 DESIGN-OUTPUT.md 第七节 / 第十二节）：
  *   现在每加一个能力要在 5 处各写一遍（库/CLI/JNI/App UI/文档），而且校验规则
  *   写两遍（CLI 一遍、App 一遍）→ 必然分叉。做成表之后：
  *     · 参数规格（类型/必填/默认/约束/帮助）只写一处

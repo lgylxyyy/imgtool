@@ -123,7 +123,7 @@ LBA = 0
 print('════ ntfs-inventory（独立对账 + 幽灵目录必抓）════')
 
 # ─────────────── 建盘 + 正常流程 ───────────────
-d = run('img.create', out=IMG, **{'size-gb': 2, 'table': 'gpt', 'esp-mb': 64, 'msr-mb': 16})
+d = run('img.create', out=IMG, **{'size-gb': 2, 'table': 'gpt', 'esp-mb': 64, 'msr-mb': 16, 'limits': 'off'})
 check('img.create 建 2GiB GPT 盘', d.get('ok'), json.dumps(d)[:200])
 LBA = (d.get('data') or {}).get('pt', {}).get('parts')[-1]['first']
 check('fs.format NTFS（LBA=%d）' % LBA,

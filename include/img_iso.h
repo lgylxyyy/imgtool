@@ -25,7 +25,10 @@ extern "C" {
 typedef struct img_iso img_iso;
 
 /* 回调：列目录用。name 是 MUTF-8（普通 ASCII 名字就是原样）*/
-typedef void (*img_iso_entry_cb)(void *ud, const char *name, bool is_dir, uint64_t size);
+/* mtime：unix 秒 UTC；ISO9660 取自目录记录的 7 字节时间，UDF 取自文件的 FE。
+ * 取不到给 0，**不报错**（REQ-41 ②）。*/
+typedef void (*img_iso_entry_cb)(void *ud, const char *name, bool is_dir,
+                                 uint64_t size, uint64_t mtime);
 
 /* 打开镜像。io 由调用方持有（本模块不关闭它）；path 版内部自己开/关。
  * 失败返回负错误码，err 里放人话（可为 NULL）。*/
@@ -50,6 +53,23 @@ int img_iso_read_range(img_iso *iso, const char *path, uint64_t off, void *buf, 
 
 int img_iso_extract(img_iso *iso, const char *path, const char *dst,
                     uint64_t max_bytes, img_prog *prog, uint64_t *out_bytes);
+
+/* 实际走的是哪条路（REQ-45：崩溃/空目录时 App 能报"崩在 udf 还是 iso9660"）*/
+const char *img_iso_kind(img_iso *iso);   /* "udf" / "joliet" / "iso9660" / "?" */
+
+/* 只做"打开 + 读卷描述符"，不列目录（两段式预检；REQ-45 §3）。
+ * 数据结构和目录列表无关，几个块就够。*/
+typedef struct {
+    bool     udf;          /* 走了 UDF（Windows 安装盘）*/
+    bool     joliet;       /* ISO9660 + Joliet */
+    bool     iso9660;      /* 纯 ISO9660 */
+    uint32_t lb_size;      /* 逻辑块大小（通常 2048）*/
+    uint64_t root_lb;      /* UDF 根目录 FE 的 lb（分区内）*/
+    uint32_t iso_root_lba; /* ISO9660 根目录扇区 */
+    uint32_t iso_root_len;
+    char     volume[128];
+} img_iso_probe_t;
+int img_iso_probe_path(const char *path, img_iso_probe_t *out, char *err, size_t errcap);
 
 #ifdef __cplusplus
 }

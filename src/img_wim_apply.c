@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <wimlib.h>
+#include "img_wimlib_codes.h"
 
 /* wimlib 进度 → img_prog */
 struct cb_ctx { img_prog *p; };
@@ -46,11 +47,14 @@ static enum wimlib_progress_status on_progress(enum wimlib_progress_msg msg,
         img_prog_phase(c->p, IMG_PH_EXTRACT, "解压文件数据");
         img_prog_op(c->p, IMG_OP_DECOMPRESS);
         img_prog_bytes(c->p, info->extract.completed_bytes, info->extract.total_bytes);
+        /* REQ-49 §3：这就是"解压+写入"的总工作量 → 直接当全局进度（单调） */
+        img_prog_overall(c->p, info->extract.completed_bytes, info->extract.total_bytes);
         img_prog_count(c->p, info->extract.completed_streams, info->extract.total_streams);
         break;
     case WIMLIB_PROGRESS_MSG_EXTRACT_IMAGE_END:
         if(info->extract.total_bytes){
             img_prog_bytes(c->p, info->extract.total_bytes, info->extract.total_bytes);
+            img_prog_overall(c->p, info->extract.total_bytes, info->extract.total_bytes);
             img_prog_count(c->p, info->extract.total_streams, info->extract.total_streams);
         }
         break;
@@ -90,11 +94,17 @@ int img_wim_list_images(const char *wim_path, char *buf, int cap){
 /* ★ wimlib 1.14 的头文件声明了 wimlib_get_error_string()，但发行版的 libwim.so
  *   并没有导出这个符号（链接期 undefined reference）。我们只需要一句人话 + 错误码，
  *   自己给一条，避免依赖一个"声明存在但符号缺失"的 API。*/
-static const char *wim_rc_str(int r) __attribute__((unused));
-static const char *wim_rc_str(int r){
-    static char b[64];
-    snprintf(b,sizeof b,"wimlib 错误码 %d",r);
-    return b;
+static const img_wimlib_code_t *wimlib_code_lookup(int code){
+    for(int i=0;i<IMG_WIMLIB_CODES_N;i++) if(IMG_WIMLIB_CODES[i].code==code) return &IMG_WIMLIB_CODES[i];
+    return NULL;
+}
+const char *img_wimlib_err_name(int code){
+    const img_wimlib_code_t *e=wimlib_code_lookup(code);
+    return e? e->name : NULL;
+}
+const char *img_wimlib_err_zh(int code){
+    const img_wimlib_code_t *e=wimlib_code_lookup(code);
+    return (e && e->zh && e->zh[0])? e->zh : NULL;
 }
 
 /* 估算：数据量 + 元数据开销 + 余量 → 建议的目标分区最小可用量 */
@@ -105,6 +115,7 @@ int img_wim_estimate(const char *wim_path, int image_idx, img_wim_size_t *out){
     memset(out,0,sizeof *out);
     if(wimlib_global_init(0)!=0) return IMG_EIO;
     WIMStruct *w=NULL;
+    if(wimlib_global_init(0)!=0) return IMG_EIO;
     if(wimlib_open_wim(wim_path,0,&w)!=0) return IMG_ENOENT;
     struct wimlib_wim_info wi; wimlib_get_wim_info(w,&wi);
     if((unsigned)image_idx > wi.image_count){ wimlib_free(w); return IMG_ERANGE; }
@@ -158,7 +169,7 @@ int img_wim_apply(const char *wim_path, int image_idx,
     if(wimlib_global_init(0)!=0){ img_ntfs_ctx_deactivate(); return IMG_EIO; }
     WIMStruct *w=NULL;
     int r = wimlib_open_wim(wim_path, 0, &w);
-    if(r){ img_ntfs_ctx_deactivate(); return IMG_ENOENT; }
+    if(r){ g_last_wrc=r; img_ntfs_ctx_deactivate(); return IMG_ENOENT; }
 
     /* 里程碑：灌 WIM 是全流程最慢的一步，日志里必须能看到"开始/完成"和耗时，
      *   否则"卡在灌系统这步"和"灌到一半死了"在日志上分不出来。 */

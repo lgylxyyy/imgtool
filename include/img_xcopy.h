@@ -39,7 +39,8 @@ typedef enum {
     IMG_XK_FAT,
     IMG_XK_HOST,
     IMG_XK_ISO,
-    IMG_XK_WIM
+    IMG_XK_WIM,
+    IMG_XK_ARCHIVE      /* 压缩包（只读；REQ-31）*/
 } img_xkind;
 
 typedef struct {
@@ -57,6 +58,12 @@ typedef struct {
     bool create_parents;   /* 目标父目录不存在就建（默认 true） */
     bool follow_symlinks;  /* 宿主源：false=跳过符号链接并计数（默认，最安全） */
     int  max_depth;        /* 递归深度上限；0=默认 32 */
+    /* ---- REQ-32（Android 系统回收站）----
+     * 只作用于【递归进入的子项】的 basename；顶层 --src 自身永远不参与排除
+     * （用户手动选中 .trashed-* 导出时，必须能复制出去）。大小写敏感。*/
+    bool skip_trashed;                 /* .trashed-* 前缀跳过（copy 默认 true；move 恒 false）*/
+    char exclude[16][128];             /* basename 通配（fnmatch：* ? []）*/
+    int  n_exclude;
 } img_xcopy_opts;
 
 typedef struct {
@@ -65,10 +72,13 @@ typedef struct {
     uint64_t bytes;
     uint64_t skipped;      /* 跳过的符号链接/不支持项 */
     uint64_t ads;          /* 复制的命名数据流条数（仅 NTFS→NTFS） */
+    uint64_t skipped_trashed;   /* 被 .trashed-* 规则跳过的条目数（REQ-32）*/
+    uint64_t skipped_excluded;  /* 被 --exclude 规则跳过的条目数 */
     char     final_path[2048];   /* 顶层落点（改名后的真实路径；给 UI 刷新用） */
     uint64_t parent_total;       /* 落点所在目录的条目数（UI 打补丁用） */
     uint64_t top_size;           /* 顶层文件大小（目录为 0） */
     uint64_t top_ino;            /* 顶层文件 ino（NTFS 才有；FAT/宿主为 0） */
+    uint64_t archive_bytes;      /* 目标是压缩包时：重写后的包大小（其余情况 0）*/
     bool     replaced;           /* 顶层文件是否覆盖了旧文件 */
     int      side;               /* 失败发生在哪一侧：0=复制中 / 1=源 / 2=目标 */
     char     first_error[256];

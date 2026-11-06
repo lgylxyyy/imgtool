@@ -200,6 +200,13 @@ typedef struct {
     uint64_t        sys_off, sr_off;  /* BIOS：字节偏移（sr_off=0 时 bootmgr 也用 sys_off）*/
     const char     *sys_guid, *disk_guid, *esp_guid;  /* UEFI */
     bool            keep_recovery; /* true=保留模板里的 WinRE/ramdisk 对象 */
+
+    /* ★ 2026-11-04：模板导入（boot.tpl-apply）。
+     *   非 NULL 时用【这份 BCD】当地座代替内置模板；设备对象照样按当前盘的
+     *   签名/偏移/GUID 现生成 —— 所以导入的模板里就算残留了别人机器的绑定，
+     *   也不会被写进目标盘。NULL = 用内置模板（老行为）。*/
+    const void     *template_bytes;
+    size_t          template_len;
 } img_bcd_create_req_t;
 
 int img_bcd_create_mem (const img_bcd_create_req_t *rq, void **out, size_t *out_len,
@@ -207,6 +214,17 @@ int img_bcd_create_mem (const img_bcd_create_req_t *rq, void **out, size_t *out_
 int img_bcd_create_file(const img_bcd_create_req_t *rq, const char *out_path,
                         char *err, size_t errcap);
 int img_bcd_template_size(int family, bool uefi);   /* 诊断：内置模板字节数 */
+
+/* 把一份 BCD 里【所有分区设备】的本机绑定清零（导出模板用）：
+ *   MBR 设备 → [32..39] 字节偏移、[56..59] 磁盘签名 清零
+ *   GPT 设备 → [32..47] 分区 GUID、[56..71] 磁盘 GUID 清零
+ * 只认 88 字节且 type=6 的二进制元素，别的字节一个不动。
+ * 返回 IMG_OK；*stripped 返回清了多少处。 */
+int img_bcd_strip_devices(img_bcd *b, int *stripped);
+
+/* 结构统计（模板元数据用）：对象数 / 元素总数 / 加载器数（12000002 含 winload）*/
+typedef struct { int objects, elements, loaders, ramdisk; } img_bcd_stats_t;
+int img_bcd_stats(img_bcd *b, img_bcd_stats_t *out);
 
 /* MBR 分区设备（88 字节）。真机布局：type=6@16, len=72@24, 字节偏移@32,
  * flag=1@52, 磁盘签名@56。★ flag 那位漏了会 0xc000000e（设备不存在）。 */

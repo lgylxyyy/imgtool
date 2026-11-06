@@ -68,12 +68,20 @@ void img_boot_plan(const img_boot_plan_in_t *in, img_boot_plan_t *out){
                  img_t("%s 用 NTLDR 引导，没有 BCD/bootmgr，本工具不支持"), out->os_name);
         return;
     }
+    /* ★ 2026-11-05 修正：x86 + UEFI/GPT 不再一概拒绝。
+     *   官方 x86 盘（Win8/8.1/10 的 /efi/boot/bootia32.efi 或 /x86/efi/boot/bootia32.efi）
+     *   明确带 32 位 UEFI 启动器，且系统分区 \Windows\Boot\EFI\bootmgfw.efi 也是 32 位 ——
+     *   实测（OVMF32 + bootia32.efi 引导链）可以正常启动。
+     *   改为 NEEDS_CONFIRM：真实风险是「老固件位数不匹配」与「极老主板没有 32 位 UEFI」，
+     *   由 App 弹框说明后放行。 */
     if(in->arch == IMG_PLAN_ARCH_X86 && in->want_gpt){
-        out->verdict = IMG_PLAN_DENIED;
+        out->verdict = IMG_PLAN_NEEDS_CONFIRM;
         out->secure_boot = 2;
-        snprintf(out->reason, sizeof out->reason, "%s", "BOOT-ARCH-NO-UEFI");
+        snprintf(out->reason, sizeof out->reason, "%s", "BOOT-GPT-X86-NEEDS-CONFIRM");
         snprintf(out->detail, sizeof out->detail,
-                 img_t("32 位 %s 没有 UEFI 启动路径（固件位数必须匹配），只能用 MBR/BIOS"), out->os_name);
+                 img_t("32 位 %s 走 UEFI/GPT 需要 32 位固件（OVMF32/老 Atom 平板等）："
+                       "官方盘自带 bootia32.efi，实测可正常启动；但多数 64 位固件无法引导 32 位系统，"
+                       "老设备也可能没有 32 位 UEFI。是否确认继续？"), out->os_name);
         return;
     }
     if(in->arch == IMG_PLAN_ARCH_ARM64 && !in->want_gpt){

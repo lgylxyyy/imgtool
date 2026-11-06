@@ -35,20 +35,22 @@ if(IMG_WITH_NTFS3G)
 endif()
 
 
-if(IMG_WITH_NTFS)
+# ntfsprogs 的小工具需要那三个带改名的 .o；对象还没编出来时【跳过】而不是让
+# 整个 configure 失败（交叉编译的 stage 目录第一次是空的）。
+if(IMG_WITH_NTFS AND EXISTS "${IMG_MKNTFS_OBJ_DIR}/ntfscp.o")
   add_executable(imgntfscp imgntfscp.c)
   target_link_libraries(imgntfscp PRIVATE imgtool)
-  target_sources(imgntfscp PRIVATE /workspace/build/mkntfs_obj/ntfscp.o)
+  target_sources(imgntfscp PRIVATE "${IMG_MKNTFS_OBJ_DIR}/ntfscp.o")
 endif()
 
 
 add_executable(imgraw imgraw.c)
 target_link_libraries(imgraw PRIVATE imgtool)
 
-if(IMG_WITH_NTFS)
+if(IMG_WITH_NTFS AND EXISTS "${IMG_MKNTFS_OBJ_DIR}/ntfsls.o" AND EXISTS "${IMG_MKNTFS_OBJ_DIR}/ntfscat.o")
   add_executable(imgntfsfs imgntfsfs.c)
   target_link_libraries(imgntfsfs PRIVATE imgtool)
-  target_sources(imgntfsfs PRIVATE /workspace/build/mkntfs_obj/ntfsls.o /workspace/build/mkntfs_obj/ntfscat.o)
+  target_sources(imgntfsfs PRIVATE "${IMG_MKNTFS_OBJ_DIR}/ntfsls.o" "${IMG_MKNTFS_OBJ_DIR}/ntfscat.o")
 endif()
 
 

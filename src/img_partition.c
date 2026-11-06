@@ -396,7 +396,12 @@ static int write_mbr(img_qcow2 *q, img_parttable_t *t){
         if(slot<4) build_mbr_entry(p, s+446+slot*16);
         slot++;
     }
-    if(slot==0) return IMG_ESTATE;
+    if(slot==0){
+        /* ★ 2026-10-26（REQ-13）：0 个主分区是**合法**的 MBR 表（Windows 磁盘管理里
+         *   就是"未分配的新盘"；446 字节保留区全 0 + 签名 + 55AA 就是空表）。
+         *   以前这里 return IMG_ESTATE，于是"建 MBR 空盘"和"删掉最后一块"都是死路。
+         *   GPT 一直没这个判断，所以只有 MBR 会炸。下面照常写 MBR + 55AA 即可。*/
+    }
     /* 主分区（含扩展容器）超过 4 个：MBR 装不下，必须报错，不能静默丢 */
     if(nprim>4) return IMG_EFULL;
     s[510]=0x55; s[511]=0xaa;
@@ -641,8 +646,12 @@ int img_partition_add(img_parttable_t *t, uint64_t first_lba, uint64_t sectors,
     }
     if(first_lba + sectors - 1 >= t->disk_sectors) return IMG_EFULL;
     if(t->table==IMG_TABLE_MBR){
+        /* ★ 只数【主表项】：逻辑分区活在 EBR 里，不占 MBR 的 4 个槽
+         *   （2026-10-25 修：以前把逻辑分区也数进来，导致
+         *   "扩展容器 + 逻辑分区 + 恢复分区" 的表在最后一步误报空间不足）。*/
         int used=0;
-        for(int i=0;i<IMG_MAX_PARTITIONS;i++) if(t->parts[i].used) used++;
+        for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+            if(t->parts[i].used && !t->parts[i].logical) used++;
         if(used>=4) return IMG_EFULL;      /* MBR 最多 4 主分区 */
     }
 
@@ -664,9 +673,11 @@ int img_partition_add(img_parttable_t *t, uint64_t first_lba, uint64_t sectors,
     snprintf(p->type_guid,sizeof p->type_guid,"%s",g);
     img_guid_new(p->part_guid);
     if(name) snprintf(p->name,sizeof p->name,"%s",name);
-    /* 恢复分区 → 默认置"不分配盘符"属性（Windows 靠类型 GUID 识别，属性是双保险） */
-    if(gpt_type_guid && strcmp(p->type_guid, IMG_GUID_RECOVERY)==0)
-        p->attributes = IMG_GPT_ATTR_RECOVERY_DEFAULT;
+    /* 恢复分区 → 默认置微软官方属性 0x8000000000000001（bit0 平台必需 + bit63 不分配盘符）。
+     * ★ REQ-37：以前只给 bit63，真机上 boot.check 直接红（reagentc 可能拒认恢复分区）。
+     *   判断用【算出来的 GUID】，不是入参 —— 走 MBR 类型自动映射过来的恢复分区也要设上。*/
+    if(strcmp(p->type_guid, IMG_GUID_RECOVERY)==0)
+        p->attributes = IMG_GPT_ATTR_RECOVERY_OFFICIAL;
     if(slot >= t->count) t->count = slot+1;
     if(out_index) *out_index = slot;
     return IMG_OK;
@@ -703,13 +714,25 @@ int img_partition_set_active(img_parttable_t *t, int index, bool active){
 /* ------------------------------------------------------------------ */
 /* JSON                                                                */
 /* ------------------------------------------------------------------ */
+bool img_parttable_has_bootcode(const img_parttable_t *t){
+    if(!t) return false;
+    /* ★ 只看 0..439：MBR 布局是 0..439 引导码 / 440..443 磁盘签名 / 444..445 保留 /
+     *   446..509 分区表。把 440 之后算进来会让"有签名"误判成"有引导码"。*/
+    for(int i=0;i<440;i++) if(t->mbr_code[i]) return true;
+    return false;
+}
+
 int img_parttable_json(const img_parttable_t *t, char *buf, int cap){
     if(!t||!buf||cap<16) return 0;
     int k=0;
     k+=snprintf(buf+k,(size_t)(cap-k),
-        "{\"table\":\"%s\",\"diskSectors\":%llu,\"diskGuid\":\"%s\",\"parts\":[",
+        "{\"table\":\"%s\",\"diskSectors\":%llu,\"diskGuid\":\"%s\","
+        "\"diskSignature\":\"0x%08x\",\"hasBootCode\":%s,\"sectorSize\":512,\"parts\":[",
         t->table==IMG_TABLE_GPT?"GPT":(t->table==IMG_TABLE_MBR?"MBR":"NONE"),
-        (unsigned long long)t->disk_sectors, t->disk_guid);
+        (unsigned long long)t->disk_sectors, t->disk_guid,
+        (unsigned)t->disk_signature,
+        /* ★ REQ-14 §3.1：导出/预览要用 —— MBR 的磁盘签名（BCD 记着它）、有没有引导码、扇区大小 */
+        img_parttable_has_bootcode(t) ? "true" : "false");
     bool first=true;
     int emitted=0, wanted=0;
     for(int i=0;i<IMG_MAX_PARTITIONS;i++){

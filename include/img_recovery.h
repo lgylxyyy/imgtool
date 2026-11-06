@@ -51,6 +51,13 @@ int img_recovery_populate(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
                           img_prog *prog, uint64_t *written_bytes,
                           char *err, size_t errcap);
 
+/* 把 WIM/ESD/ISO 里的一个文件直接写进 qcow2 里的 NTFS 分区（REQ-29，0 临时文件）。
+ * dst_abs 是盘内绝对路径（父目录会按需创建）。*/
+int img_put_wim_file(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
+                     const char *wim_path, int index, const char *internal_path,
+                     const char *dst_abs, img_prog *prog, uint64_t *written,
+                     char *err, size_t errcap);
+
 /* 设/清一个 GPT 分区的 attributes（恢复分区官方要求 0x8000000000000001）。
  * 只对 GPT 有效；MBR 返回 IMG_ENOTSUP。*/
 int img_part_set_attributes(img_qcow2 *q, uint64_t part_lba, uint64_t attributes);

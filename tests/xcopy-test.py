@@ -77,7 +77,8 @@ def rd(p):
 def new_img(name, esp_mb=64, msr_mb=16):
     img = os.path.join(W, name)
     d = run('img.create', out=img, **{'size-gb': 2, 'table': 'gpt',
-                                      'esp-mb': esp_mb, 'msr-mb': msr_mb})
+                                      'esp-mb': esp_mb, 'msr-mb': msr_mb,
+                                      'limits': 'off'})
     parts = data(d)['pt']['parts']
     esp = parts[0]['first']
     data_lba = parts[-1]['first']
@@ -336,7 +337,10 @@ else:
     skipped('ISO → NTFS')
 
 # ─────────── 18. WIM/ESD → NTFS ───────────
-esd = os.path.join(os.path.dirname(ROOT), 'sample.esd')
+esd = (os.environ.get('IMG_SAMPLE_ESD')
+       or next((p for p in (os.path.join(os.path.dirname(os.path.dirname(ROOT)), 'sample.esd'),
+                             '/workspace/sample.esd')
+                if os.path.exists(p)), '/workspace/sample.esd'))
 if os.path.exists(esd):
     d = run('file.copy', src='wim:/Windows/System32/config/BBI', src_img=esd, src_index=1,
             dst='ntfs:/FromWim', img=B, dst_lba=BN)
@@ -346,7 +350,7 @@ else:
 
 # ─────────── 18b. 同镜像跨分区 NTFS → NTFS（两个卷同时挂）+ lba 歧义 ───────────
 C = os.path.join(W, 'c.qcow2')
-run('img.create', out=C, **{'size-gb': 2, 'table': 'mbr', 'sys-mb': 800})
+run('img.create', out=C, **{'size-gb': 2, 'table': 'mbr', 'sys-mb': 800, 'limits': 'off'})
 d = run('part.layout', img=C, **{'sr-mb': 100, 'sys-gb': 1, 'extended': 'true', 'logical-name': 'Data'})
 parts = data(run('part.show', img=C)).get('pt', {}).get('parts') or []
 lb = [x['first'] for x in parts]

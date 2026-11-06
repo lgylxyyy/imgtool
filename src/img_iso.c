@@ -22,6 +22,7 @@
 #include <strings.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <time.h>
 
 /* ---- ECMA-167 小工具 ---- */
 static uint16_t g16(const uint8_t *p){ return (uint16_t)(p[0] | (p[1]<<8)); }
@@ -70,7 +71,34 @@ static int rd_abs(img_iso *s, uint64_t lb, void *buf){
 
 /* ---------- 打开：AVDP → VDS → LVD → FSD ---------- */
 /* ---------- ISO9660 / Joliet（回退；纯 ISO9660 的盘也能读） ---------- */
-typedef struct { char name[300]; bool dir; uint32_t lba; uint32_t size; uint8_t flags; } iso_ent;
+typedef struct { char name[300]; bool dir; uint32_t lba; uint32_t size; uint8_t flags;
+                 uint64_t mtime; } iso_ent;   /* REQ-41 ②：目录项里的记录时间（UTC 秒，取不到 0）*/
+
+/* ISO9660 目录记录的 7 字节时间：年(自1900)/月/日/时/分/秒/GMT偏移(15分钟) */
+static uint64_t iso_date7(const uint8_t *p){
+    int year=p[0], mon=p[1], day=p[2], hh=p[3], mm=p[4], ss=p[5];
+    int8_t tz=(int8_t)p[6];
+    if(!year || mon<1 || mon>12 || day<1 || day>31) return 0;
+    struct tm tm; memset(&tm,0,sizeof tm);
+    tm.tm_year=year; tm.tm_mon=mon-1; tm.tm_mday=day;
+    tm.tm_hour=hh; tm.tm_min=mm; tm.tm_sec=ss;
+    time_t t=timegm(&tm);
+    if(t==(time_t)-1) return 0;
+    return (uint64_t)((long long)t - (long long)tz*15*60);
+}
+/* UDF 时间戳（ECMA-167 12 字节）：type/tz/year(LE16)/月/日/时/分/秒/厘秒/百微秒/微秒 */
+static uint64_t udf_ts(const uint8_t *p){
+    int year=(int)(p[2]|((unsigned)p[3]<<8));
+    int mon=p[4], day=p[5], hh=p[6], mm=p[7], ss=p[8];
+    int8_t tz=(int8_t)p[1];
+    if(!year || mon<1 || mon>12 || day<1 || day>31) return 0;
+    struct tm tm; memset(&tm,0,sizeof tm);
+    tm.tm_year=year-1900; tm.tm_mon=mon-1; tm.tm_mday=day;
+    tm.tm_hour=hh; tm.tm_min=mm; tm.tm_sec=ss;
+    time_t t=timegm(&tm);
+    if(t==(time_t)-1) return 0;
+    return (uint64_t)((long long)t - (long long)tz*15*60);
+}
 
 /* 名字规范化：ISO9660 形如 "NAME.EXT;1"；Joliet 是 UCS-2BE */
 static void iso_name_norm(const uint8_t *p, int n, bool joliet, char *out, size_t cap){
@@ -90,10 +118,35 @@ static void iso_name_norm(const uint8_t *p, int n, bool joliet, char *out, size_
     if(L && out[L-1]=='.') out[L-1]=0;                  /* 去尾点（目录）*/
 }
 
+/* PVD 卷标（offset 40：长度 + 名字）。★ UDF 的 Volume Identifier 在微软安装盘上
+ * 是空的（实测 22631.2861 盘），但 ISO9660 PVD 里有 "22631.2861_ARM_P_CN_231219"
+ * —— App 要拿去显示盘名，所以 UDF 分支也顺手读一次 PVD。*/
+/* ★ 卷标字段是【定长 32 字节】（ECMA-119：offset 40..71），不是"长度 + 内容"。
+ *   以前按 blk[40] 当长度解析 → 读到 50（'2' 的 ASCII）→ 越界/丢弃，
+ *   于是 iso.probe / iso.ls 一直没有 volume（REQ-46 §3.2）。*/
+static void iso_label_copy(img_iso *s, const uint8_t *p32){
+    char nm[33];
+    int n=0;
+    for(int i=0;i<32;i++){
+        unsigned char c=p32[i];
+        if(!c) break;
+        nm[n++] = (char)((c<0x20||c==0x7f)?' ':c);
+    }
+    while(n>0 && (nm[n-1]==' ' || nm[n-1]=='.')) n--;
+    nm[n]=0;
+    if(n && !s->vol[0]) snprintf(s->vol,sizeof s->vol,"%s",nm);
+}
+static void iso_label_from_pvd(img_iso *s, const uint8_t *blk){
+    if(!s || s->vol[0]) return;
+    if(memcmp(blk+1,"CD001",5)!=0) return;
+    iso_label_copy(s, blk+40);
+}
+
 /* 遍历一个 ISO9660 目录；每条记录回调 */
 typedef void (*iso_ent_cb)(void *ud, const iso_ent *e);
 static int iso_iter(img_iso *s, uint32_t lba, uint32_t len, iso_ent_cb cb, void *ud){
     if(!len) return IMG_OK;
+    if(len > 64u*1024*1024) return IMG_ERANGE;    /* 一个目录 64 MB 已是上限，离谱值直接拒 */
     uint8_t *buf=malloc(len);
     if(!buf) return IMG_ENOMEM;
     if(img_io_read_full(s->io,(uint64_t)lba*2048,buf,len)!=IMG_OK){ free(buf); return IMG_EIO; }
@@ -108,6 +161,7 @@ static int iso_iter(img_iso *s, uint32_t lba, uint32_t len, iso_ent_cb cb, void 
         e.size= (uint32_t)r[10]| ((uint32_t)r[11]<<8)| ((uint32_t)r[12]<<16)| ((uint32_t)r[13]<<24);
         e.flags=r[25];
         e.dir=(e.flags & 0x02)!=0;
+        e.mtime = (rl>=25) ? iso_date7(r+18) : 0;
         int nl=r[32];
         if(33+nl<=rl) iso_name_norm(r+33,nl,s->iso_joliet,e.name,sizeof e.name);
         /* 跳过 "." / ".."：ISO9660 里它们的名字是 0x00 / 0x01 单字节，不是字面点 */
@@ -142,7 +196,8 @@ static int iso_resolve(img_iso *s, const char *path, uint32_t *lb, uint32_t *len
     uint32_t cur_lb=s->iso_root_lba, cur_len=s->iso_root_len;
     bool d=true; uint64_t sz=0;
     if(path && *path && strcmp(path,"/")){
-        char buf[512]; snprintf(buf,sizeof buf,"%s",path);
+        if(strlen(path) >= 1024) return IMG_ENAMETOOLONG;
+        char buf[1024]; snprintf(buf,sizeof buf,"%s",path);
         char *save=NULL;
         for(char *tok=strtok_r(buf,"/\\",&save); tok; tok=strtok_r(NULL,"/\\",&save)){
             if(!*tok) continue;
@@ -166,11 +221,7 @@ static int open_iso9660(img_iso *s, uint8_t *blk, char *err, size_t errcap){
     s->iso_root_lba = (uint32_t)rr[2] | ((uint32_t)rr[3]<<8) | ((uint32_t)rr[4]<<16) | ((uint32_t)rr[5]<<24);
     s->iso_root_len = (uint32_t)rr[10]| ((uint32_t)rr[11]<<8)| ((uint32_t)rr[12]<<16)| ((uint32_t)rr[13]<<24);
     s->iso_joliet=false;
-    {   int vl=blk[40]; if(vl>0 && vl<33){
-            char nm[64]; iso_name_norm(blk+40+1,vl,false,nm,sizeof nm);
-            snprintf(s->vol,sizeof s->vol,"%s",nm);
-        }
-    }
+    iso_label_copy(s, blk+40);                       /* PVD 卷标（32 字节定长）*/
     /* SVD（type=2）且转义序列以 % 开头 → Joliet，名字是 UCS-2 */
     for(int sec=17; sec<32; sec++){
         if(rd_abs(s,(uint64_t)sec,blk)!=IMG_OK) break;
@@ -181,9 +232,16 @@ static int open_iso9660(img_iso *s, uint8_t *blk, char *err, size_t errcap){
             s->iso_root_lba=(uint32_t)jr[2]|((uint32_t)jr[3]<<8)|((uint32_t)jr[4]<<16)|((uint32_t)jr[5]<<24);
             s->iso_root_len=(uint32_t)jr[10]|((uint32_t)jr[11]<<8)|((uint32_t)jr[12]<<16)|((uint32_t)jr[13]<<24);
             s->iso_joliet=true;
-            /* 卷标 */
-            int vl=blk[80]; if(vl>0 && vl<33){
-                char nm[64]; iso_name_norm(blk+81,vl,true,nm,sizeof nm);
+            /* 卷标：Joliet 的 SVD 与 PVD 同偏移（40..71），只是字符集是 UCS-2 */
+            {
+                char nm[40]; int k=0;
+                for(int i=0;i<32;i+=2){
+                    uint16_t ch=(uint16_t)((blk[40+i]<<8)|blk[40+i+1]);
+                    if(!ch) break;
+                    nm[k++] = (ch<128)?(char)ch:'?';
+                }
+                while(k>0 && (nm[k-1]==' '||nm[k-1]=='.')) k--;
+                nm[k]=0;
                 snprintf(s->vol,sizeof s->vol,"%s",nm);
             }
             break;
@@ -245,6 +303,7 @@ int img_iso_open_io(img_iso **out, img_io *io, char *err, size_t errcap){
                 if(rd_lb(s,s->fsd_lb,blk,1)==IMG_OK && g16(blk)==TAG_FSD){
                     s->root_lb=g32(blk+404);
                     s->mode=0;
+                    if(rd_abs(s,16,blk)==IMG_OK) iso_label_from_pvd(s,blk);   /* 卷标兜底 */
                     free(blk);
                     *out=s;
                     return IMG_OK;
@@ -290,6 +349,29 @@ void img_iso_close(img_iso *s){
     free(s);
 }
 const char *img_iso_volume_id(img_iso *s){ return (s && s->vol[0]) ? s->vol : NULL; }
+const char *img_iso_kind(img_iso *s){
+    if(!s) return "?";
+    if(s->mode==0) return "udf";
+    return s->iso_joliet ? "joliet" : "iso9660";
+}
+int img_iso_probe_path(const char *path, img_iso_probe_t *out, char *err, size_t errcap){
+    if(err && errcap) err[0]=0;
+    if(!out) return IMG_EINVAL;
+    memset(out,0,sizeof *out);
+    img_iso *s=NULL;
+    int rc=img_iso_open_path(&s,path,err,errcap);
+    if(rc!=IMG_OK) return rc;
+    out->udf      = (s->mode==0);
+    out->joliet   = (s->mode==1 && s->iso_joliet);
+    out->iso9660  = (s->mode==1 && !s->iso_joliet);
+    out->lb_size  = s->lb_size;
+    out->root_lb  = s->root_lb;
+    out->iso_root_lba = s->iso_root_lba;
+    out->iso_root_len = s->iso_root_len;
+    snprintf(out->volume,sizeof out->volume,"%s",s->vol);
+    img_iso_close(s);
+    return IMG_OK;
+}
 
 /* ---------- File Entry：解析数据位置 ---------- */
 typedef struct {
@@ -354,22 +436,41 @@ static int read_fe(img_iso *s, uint64_t lb, uint8_t *buf, size_t bufsz, fe_t *ou
 /* 把一个 FE 的数据整体读进内存（目录用；文件走流式）*/
 static int read_fe_data(img_iso *s, const fe_t *fe, uint8_t **out, size_t *outlen){
     if(fe->embedded){ *out=(uint8_t*)fe->emb; *outlen=fe->emb_len; return IMG_OK; }
-    size_t total=0;
-    for(int i=0;i<fe->n_ext;i++) total += (size_t)fe->ext[i].bytes;
-    if(!total){ *out=NULL; *outlen=0; return IMG_OK; }
-    if(total > 16u*1024*1024) return IMG_ERANGE;      /* 目录不该这么大 */
-    /* ★ 按【整块】分配：extent 的字节数通常不是块大小的整数倍，
-     *   直接 malloc(total) 再按块读会越界 1~2047 字节（实测堆被踩烂 → abort）。*/
-    size_t rounded = ((total + s->lb_size - 1) / s->lb_size) * s->lb_size;
-    uint8_t *b=malloc(rounded), *p=b;
-    if(!b) return IMG_ENOMEM;
+    uint64_t total=0, need=0;
     for(int i=0;i<fe->n_ext;i++){
         uint64_t n=fe->ext[i].bytes;
-        uint32_t nlb=(uint32_t)((n+s->lb_size-1)/s->lb_size);
-        if(rd_lb(s,fe->ext[i].lb,p,nlb)!=IMG_OK){ free(b); return IMG_EIO; }
-        p += (size_t)nlb * s->lb_size;
+        if(n > 16u*1024*1024) return IMG_ERANGE;
+        total += n;
+        need  += ((n + s->lb_size - 1) / s->lb_size) * (uint64_t)s->lb_size;
+        if(total > 16u*1024*1024) return IMG_ERANGE;   /* 目录不该这么大 */
     }
-    *out=b; *outlen=total;
+    if(!total){ *out=NULL; *outlen=0; return IMG_OK; }
+    /* ★★ 必须按【每个 extent 各自向上取整后的块数】分配：
+     *   以前的写法是 malloc(ceil(total/lb)*lb) —— 两个 100 字节的 extent 时
+     *   total=200 → 只分配 2048，但两次 rd_lb 各写 2048 → 第二次直接写飞 2 KB
+     *   （真机上就是 SIGSEGV 的一种形态）。宁可多花几 KB，不能越界。*/
+    if(need==0 || need > 64u*1024*1024) return IMG_ERANGE;
+    uint8_t *b=malloc(need), *tmp=malloc(s->lb_size);
+    if(!b || !tmp){ free(b); free(tmp); return IMG_ENOMEM; }
+    /* ★ 必须【紧凑拼接】：每个 extent 只有 bytes 个有效字节，按整块读到缓冲里会在
+     *   两个 extent 之间留下空洞 —— 目录数据是连续的 FID 流，空洞 = 读到 0 就停，
+     *   表现为"少列几条"。所以逐块读进 1 块临时缓冲，只拷有效字节。*/
+    size_t off=0;
+    int rc=IMG_OK;
+    for(int i=0;i<fe->n_ext && rc==IMG_OK;i++){
+        uint64_t n=fe->ext[i].bytes;
+        uint32_t nlb=(uint32_t)((n+s->lb_size-1)/s->lb_size);
+        for(uint32_t k=0;k<nlb && rc==IMG_OK;k++){
+            if(rd_lb(s,fe->ext[i].lb+k,tmp,1)!=IMG_OK){ rc=IMG_EIO; break; }
+            size_t cp=(size_t)((n< s->lb_size)?n:s->lb_size);
+            if(off+cp>need){ rc=IMG_ERANGE; break; }
+            memcpy(b+off,tmp,cp);
+            off+=cp; n-=cp;
+        }
+    }
+    free(tmp);
+    if(rc!=IMG_OK){ free(b); return rc; }
+    *out=b; *outlen=off;
     return IMG_OK;
 }
 
@@ -390,10 +491,16 @@ static int iter_dir(img_iso *s, uint64_t dir_lb,
         const uint8_t *f=data+i;
         if(g16(f)!=TAG_FID) break;
         uint8_t ch=f[18], nlen=f[19];
+        uint16_t iu=g16(f+36);                  /* Length of Implementation Use */
+        size_t ent=38u + (size_t)iu + (size_t)nlen;
+        /* ★ 记录必须完整落在本缓冲里：真机上见过 iu 值离谱的 FID，按老写法
+         *   np=f+38+iu 会读到缓冲外几万字节 → SIGSEGV（43 ms 就死的那种）。
+         *   夹不住就停：宁可少列几条，不读野指针。*/
+        if(ent > len - i) break;
         uint32_t icb_lb=g32(f+24);
-        if(ch & 0x08){ i += 40 + ((nlen+3)&~3u); continue; }      /* parent */
+        if(ch & 0x08){ i += (ent + 3) & ~(size_t)3; continue; }   /* parent：按真实长度跳 */
         char name[300]; int n=0;
-        const uint8_t *np=f+38+g16(f+36);                          /* 跳过 implementation use */
+        const uint8_t *np=f+38+iu;              /* 跳过 implementation use */
         if(nlen && (np[0]==8 || np[0]==16)){
             if(np[0]==8){ for(int k=1;k<nlen && n<255;k++) name[n++]=(char)np[k]; }
             else { for(int k=1;k+1<nlen && n<253;k+=2){
@@ -410,8 +517,9 @@ static int iter_dir(img_iso *s, uint64_t dir_lb,
             }
             if(cb) cb(ud,name,isdir,sz,icb_lb);
         }
-        size_t ent = 38 + g16(f+36) + nlen;
-        i += (ent + 3) & ~(size_t)3;
+        size_t step=(ent + 3) & ~(size_t)3;
+        if(step==0) break;                      /* 防死循环（ent 全零的坏块）*/
+        i += step;
     }
     if(!fe.embedded) free(data);
     return IMG_OK;
@@ -439,7 +547,8 @@ static int resolve(img_iso *s, const char *path, uint64_t *out_lb, bool *is_dir,
     if(!s) return IMG_EINVAL;
     uint64_t cur=s->root_lb; bool d=true; uint64_t sz=0;
     if(path && *path && strcmp(path,"/")){
-        char buf[512]; snprintf(buf,sizeof buf,"%s",path);
+        if(strlen(path) >= 1024) return IMG_ENAMETOOLONG;
+        char buf[1024]; snprintf(buf,sizeof buf,"%s",path);
         char *save=NULL;
         for(char *tok=strtok_r(buf,"/\\",&save); tok; tok=strtok_r(NULL,"/\\",&save)){
             if(!*tok) continue;
@@ -475,12 +584,21 @@ int img_iso_stat(img_iso *s, const char *path, uint64_t *size, bool *is_dir){
 }
 
 /* ---------- 列目录 ---------- */
-typedef struct { img_iso_entry_cb cb; void *ud; int n; } list_ctx;
+typedef struct { img_iso_entry_cb cb; void *ud; img_iso *s; int n; } list_ctx;
 static void list_cb(void *ud, const char *name, bool isdir, uint64_t sz, uint64_t lb){
-    (void)lb;
     list_ctx *c=(list_ctx*)ud;
     c->n++;
-    if(c->cb) c->cb(c->ud,name,isdir,sz);
+    if(!c->cb) return;
+    uint64_t mt=0;
+    /* UDF 的 FID 不带时间戳：时间在文件的 FE 里（一个块，列目录时才付这个钱）*/
+    uint8_t b[2048];
+    /* ★ rd_lb 的第 4 个参数是【块数】不是字节数！以前写成 sizeof b（2048）→
+     *   往 2 KB 的栈缓冲里读 4 MB → 栈被踩烂 → SIGSEGV（REQ-45 的真凶）。*/
+    if(c->s && rd_lb(c->s,lb,b,1)==IMG_OK){
+        uint16_t tag=g16(b);
+        if(tag==TAG_FE || tag==TAG_EFE) mt=udf_ts(b+84);   /* modification time */
+    }
+    c->cb(c->ud,name,isdir,sz,mt);
 }
 /* ISO9660 level 3 里 >4 GiB 的文件会被拆成多条连续记录（除最后一条外都带
  * multi-extent 标志 0x80）。实测一张 4.70 GiB 的假 ISO：
@@ -488,10 +606,10 @@ static void list_cb(void *ud, const char *name, bool isdir, uint64_t sz, uint64_
  *   合并后 → 一条 4,046,796,288… 实际 5,046,796,288 字节，与 extract 一致。
  * 注意：read/extract 早就会按多条 extent 拼（md5 对得上），只有"列目录"漏了。 */
 typedef struct { img_iso_entry_cb cb; void *ud; int n;
-                 char pend[300]; bool pend_dir; uint64_t pend_sz; bool pend_more; } iso_lctx;
+                 char pend[300]; bool pend_dir; uint64_t pend_sz; uint64_t pend_mt; bool pend_more; } iso_lctx;
 static void iso_lctx_flush(iso_lctx *c){
     if(!c->pend[0]) return;
-    c->n++; if(c->cb) c->cb(c->ud, c->pend, c->pend_dir, c->pend_sz);
+    c->n++; if(c->cb) c->cb(c->ud, c->pend, c->pend_dir, c->pend_sz, c->pend_mt);
     c->pend[0]=0; c->pend_more=false;
 }
 static void iso_list_wrap(void *ud, const iso_ent *e){
@@ -505,7 +623,7 @@ static void iso_list_wrap(void *ud, const iso_ent *e){
     }
     iso_lctx_flush(c);
     snprintf(c->pend,sizeof c->pend,"%s",e->name);
-    c->pend_dir=e->dir; c->pend_sz=e->size; c->pend_more=more;
+    c->pend_dir=e->dir; c->pend_sz=e->size; c->pend_mt=e->mtime; c->pend_more=more;
     if(!more) iso_lctx_flush(c);
 }
 int img_iso_list(img_iso *s, const char *path, img_iso_entry_cb cb, void *ud){
@@ -523,7 +641,7 @@ int img_iso_list(img_iso *s, const char *path, img_iso_entry_cb cb, void *ud){
     int rc=resolve(s,(path && *path)?path:"/",&lb,&d,NULL);
     if(rc!=IMG_OK) return rc;
     if(!d) return IMG_ENOTSUP;
-    list_ctx c={cb,ud,0};
+    list_ctx c={cb,ud,s,0};
     rc=iter_dir(s,lb,list_cb,&c);
     if(rc!=IMG_OK) return rc;
     return c.n;

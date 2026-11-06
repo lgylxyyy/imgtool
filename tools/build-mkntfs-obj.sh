@@ -30,6 +30,33 @@ CF="-O2 -fPIC -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -Wno-unused-result -Wno-addre
 
 echo "== 源码 $SRC"
 echo "== 输出 $OD"
+
+# ★ 必需补丁（2026-10-26）：mkntfs 是一次性 CLI，模块级状态靠"进程退出"归零；
+#   我们是【进程内复用】（objcopy 把 main 改名成 mkntfs_main），所以
+#   mkntfs_cleanup() 里 free(g_allocation) 之后必须置 NULL，否则同一进程里
+#   第二次格式化会从野指针走链表 → SIGSEGV（真机 bitmap_allocate+84 崩过）。
+#   幂等：已经有这行就跳过。源码树不进仓库也行 —— 每次编 .o 之前都会补。
+patch_mkntfs() {
+  local f="$SRC/ntfsprogs/mkntfs.c"
+  [ -f "$f" ] || { echo "!! 缺 $f" >&2; return 1; }
+  if grep -q 'g_allocation = NULL;' "$f"; then
+    echo "  [patch] mkntfs g_allocation 已置空，跳过"
+    return 0
+  fi
+  python3 - "$f" <<'PY' || return 1
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8', errors='surrogateescape').read()
+old = "\tp = g_allocation;\n\twhile (p) {\n\t\tq = p->next;\n\t\tfree(p);\n\t\tp = q;\n\t}\n}"
+assert old in s, "cleanup 段没找到（ntfs-3g 版本变了？）"
+new = old[:-1] + "\t/* 2026-10-26: 进程内可重复格式化（img_ntfs_fmt 把 main 前插成 mkntfs_main）*/\n\tg_allocation = NULL;\n}"
+s = s.replace(old, new, 1)
+open(p, 'w', encoding='utf-8', errors='surrogateescape').write(s)
+print("  [patch] 已给 mkntfs.c 补上 g_allocation = NULL")
+PY
+}
+patch_mkntfs || exit 1
+
 for f in attrdef boot sd utils; do
   $CC $CF $INC -c "$SRC/ntfsprogs/$f.c" -o "$OD/mkntfs-$f.o"
 done

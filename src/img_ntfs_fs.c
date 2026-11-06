@@ -637,6 +637,29 @@ int img_ntfs_read_file(img_ntfs_fs *fs, const char *abs_path, void **out, size_t
     return IMG_OK;
 }
 
+int img_ntfs_read_range(img_ntfs_fs *fs, const char *abs_path, uint64_t off,
+                        void *buf, size_t want, size_t *got){
+    if(got) *got=0;
+    if(!fs||!fs->vol||!abs_path||!buf) return IMG_EINVAL;
+    ntfs_inode *ni=lookup(fs->vol,abs_path,NULL);
+    if(!ni) return IMG_ENOENT;
+    ntfs_attr *na=ntfs_attr_open(ni,AT_DATA,NULL,0);
+    if(!na){ ntfs_inode_close(ni); return IMG_EIO; }
+    s64 sz=na->data_size;
+    size_t n=0;
+    if(sz>0 && (uint64_t)sz>off){
+        uint64_t avail=(uint64_t)sz-off;
+        if(avail<(uint64_t)want) want=(size_t)avail;
+        s64 r=ntfs_attr_pread(na,(s64)off,(s64)want,buf);
+        if(r<0){ ntfs_attr_close(na); ntfs_inode_close(ni); return IMG_EIO; }
+        n=(size_t)r;
+    }
+    ntfs_attr_close(na);
+    ntfs_inode_close(ni);
+    if(got) *got=n;
+    return IMG_OK;
+}
+
 /* 流式导出：1 MiB 一块，边读边写（内存峰值恒定）*/
 int img_ntfs_copy_out(img_ntfs_fs *fs, const char *abs_path, const char *dst_path,
                       img_prog *prog, uint64_t *out_bytes){
@@ -1360,33 +1383,129 @@ int img_ntfs_write_reagent(img_ntfs_fs *fs, const char *winre_dir_abs,
 
 /* ---------- 列目录：ntfs_readdir + ntfs_ucstombs → 和 FAT 同一套 cb 契约 ---------- */
 typedef struct { img_ntfs_list_cb cb; void *ud; } ntfs_list_ctx;
-static int ntfs_list_fill(void *dirent, const ntfschar *name, const int name_len,
-                          const int name_type, const s64 pos,
-                          const MFT_REF mref, const unsigned dt_type){
-    ntfs_list_ctx *c=(ntfs_list_ctx*)dirent;
-    (void)name_type; (void)pos;
-    /* ★ 系统元数据文件（$MFT/$Bitmap/$Volume… 记录号 < FILE_first_user=16）
-     *   会被 ntfs_readdir 列出来 —— 但它们不是"用户数据"，
-     *   否则刚格式化的空卷也会被误报成 level2（有数据）。*/
-    if(((uint64_t)le64_to_cpu(mref) & 0xFFFFFFFFFFFFULL) < (uint64_t)FILE_first_user) return 0;
-    if(name_len==1 && name[0]=='.')  return 0;      /* 防御：NTFS 索引里本不该有 . / .. */
-    if(name_len==2 && name[0]=='.' && name[1]=='.') return 0;
-    char *out=NULL;
-    if(ntfs_ucstombs(name, name_len, &out, -1)<0 || !out) return 0;  /* 转不出的名字跳过，不打断列表 */
-    c->cb(c->ud, out, dt_type==NTFS_DT_DIR, 0);
-    free(out);
+
+/* ---------- 列目录：去掉 8.3 短名（FILE_NAME_DOS）----------
+ * 真机上 ntfs.list 会把 "Program Files" 和 "PROGRA~1" 当成两个条目列出来：
+ *   · App 列表重复（点进去是同一份东西）；
+ *   · "全选删除"删两遍（第二遍 NOTFOUND）；
+ *   · du 重复计数。
+ * 规则（与资源管理器一致）：同目录里同 inode 有长名就丢掉 DOS 名；
+ * 只有 DOS 名的文件照旧列出（不能凭空吞掉用户数据）。
+ * 实现要两遍：readdir 顺序不保证长名在前，所以先收集、再过滤、再回调。*/
+typedef struct {
+    char    *name;
+    bool     is_dir;
+    bool     dos;
+    uint64_t size, alloc, ino;
+    uint32_t flags, links;
+    uint64_t times[4];
+} ntfs_item;
+
+typedef struct {
+    ntfs_volume *vol;
+    ntfs_item   *v;
+    int          n, cap;
+    bool         want_sizes;
+    bool         want_full;
+    int          oom;
+} ntfs_items;
+
+static int items_push(ntfs_items *a, ntfs_item *it){
+    if(a->n>=a->cap){
+        int nc=a->cap? a->cap*2 : 64;
+        ntfs_item *nv=(ntfs_item*)realloc(a->v,(size_t)nc*sizeof *nv);
+        if(!nv){ a->oom=1; return -1; }
+        a->v=nv; a->cap=nc;
+    }
+    a->v[a->n++]=*it;
     return 0;
 }
+
+static int ntfs_collect_fill(void *dirent, const ntfschar *name, const int name_len,
+                             const int name_type, const s64 pos,
+                             const MFT_REF mref, const unsigned dt_type){
+    ntfs_items *a=(ntfs_items*)dirent;
+    (void)pos;
+    uint64_t ino=((uint64_t)le64_to_cpu(mref) & 0xFFFFFFFFFFFFULL);
+    if(ino < (uint64_t)FILE_first_user) return 0;
+    if(name_len==1 && name[0]=='.')  return 0;
+    if(name_len==2 && name[0]=='.' && name[1]=='.') return 0;
+    char *out=NULL;
+    if(ntfs_ucstombs(name, name_len, &out, -1)<0 || !out) return 0;
+    ntfs_item it; memset(&it,0,sizeof it);
+    it.name=out;
+    it.dos=(name_type==FILE_NAME_DOS);
+    it.is_dir=(dt_type==NTFS_DT_DIR);
+    it.ino=ino;
+    if(it.is_dir) it.flags|=0x10;
+    if(a->want_full || a->want_sizes){
+        ntfs_inode *ni=ntfs_inode_open(a->vol,mref);
+        if(ni){
+            it.size  =(uint64_t)(ni->data_size>0?ni->data_size:0);
+            it.alloc =(uint64_t)(ni->allocated_size>0?ni->allocated_size:0);
+            it.flags =(uint32_t)ni->flags;
+            it.links =(uint32_t)le16_to_cpu(ni->mrec->link_count);
+            it.times[0]=filetime_to_unix(ni->creation_time);
+            it.times[1]=filetime_to_unix(ni->last_data_change_time);
+            it.times[2]=filetime_to_unix(ni->last_access_time);
+            it.times[3]=filetime_to_unix(ni->last_mft_change_time);
+            ntfs_inode_close(ni);
+        }
+    }
+    if(items_push(a,&it)!=0){ free(out); return 0; }
+    return 0;
+}
+/* 同 inode 有长名 → DOS 名是别名，丢掉 */
+static bool item_is_alias(const ntfs_items *a, int i){
+    if(!a->v[i].dos) return false;
+    for(int j=0;j<a->n;j++)
+        if(j!=i && !a->v[j].dos && a->v[j].ino==a->v[i].ino) return true;
+    return false;
+}
+static void items_free(ntfs_items *a){
+    for(int i=0;i<a->n;i++) free(a->v[i].name);
+    free(a->v); a->v=NULL; a->n=a->cap=0;
+}
+
+static int ntfs_list_common(img_ntfs_fs *fs, const char *abs_path, bool show83,
+                            int mode, void *cb, void *ud){
+    if(!fs||!fs->mounted||!cb) return IMG_EINVAL;
+    ntfs_inode *di=lookup(fs->vol,(abs_path&&abs_path[0])?abs_path:"/",NULL);
+    if(!di) return IMG_ENOENT;
+    ntfs_items a; memset(&a,0,sizeof a);
+    a.vol=fs->vol;
+    a.want_sizes=(mode==1);
+    a.want_full =(mode==2);
+    s64 pos=0;
+    int r=ntfs_readdir(di,&pos,&a,ntfs_collect_fill);
+    ntfs_inode_close(di);
+    if(r<0){ items_free(&a); return IMG_EIO; }
+    if(a.oom){ items_free(&a); return IMG_ENOMEM; }
+    for(int i=0;i<a.n;i++){
+        if(!show83 && item_is_alias(&a,i)) continue;
+        if(mode==2){
+            img_ntfs_ent_t e; memset(&e,0,sizeof e);
+            e.name=a.v[i].name; e.is_dir=a.v[i].is_dir; e.size=a.v[i].size;
+            e.alloc_bytes=a.v[i].alloc; e.ino=a.v[i].ino; e.flags=a.v[i].flags;
+            e.links=a.v[i].links;
+            memcpy(e.times,a.v[i].times,sizeof e.times);
+            ((img_ntfs_full_cb)cb)(ud,&e);
+        } else {
+            ((img_ntfs_list_cb)cb)(ud,a.v[i].name,a.v[i].is_dir,
+                                   mode==1? a.v[i].size : 0);
+        }
+    }
+    items_free(&a);
+    return IMG_OK;
+}
+
 int img_ntfs_list_dir(img_ntfs_fs *fs, const char *abs_path,
                       img_ntfs_list_cb cb, void *ud){
-    if(!fs||!fs->mounted||!cb) return IMG_EINVAL;
-    ntfs_inode *di=lookup(fs->vol, (abs_path&&abs_path[0])?abs_path:"/", NULL);
-    if(!di) return IMG_ENOENT;
-    ntfs_list_ctx c={cb,ud};
-    s64 pos=0;
-    int r=ntfs_readdir(di,&pos,&c,ntfs_list_fill);
-    ntfs_inode_close(di);
-    return r<0?IMG_EIO:IMG_OK;
+    return ntfs_list_common(fs,abs_path,false,0,(void*)cb,ud);
+}
+int img_ntfs_list_dir_show83(img_ntfs_fs *fs, const char *abs_path, bool show83,
+                             img_ntfs_list_cb cb, void *ud){
+    return ntfs_list_common(fs,abs_path,show83,0,(void*)cb,ud);
 }
 
 
@@ -1396,36 +1515,61 @@ int img_ntfs_list_dir(img_ntfs_fs *fs, const char *abs_path,
  * 读 ni->data_size —— System32 那种 4000 项的目录会多出几千次 MFT 记录读取。
  * 所以：默认 size 恒 0（快），显式要才付这个钱。 */
 typedef struct { img_ntfs_list_cb cb; void *ud; ntfs_volume *vol; } ntfs_sizectx;
-static int ntfs_size_fill(void *dirent, const ntfschar *name, const int name_len,
-                          const int name_type, const s64 pos,
-                          const MFT_REF mref, const unsigned dt_type){
-    ntfs_sizectx *c=(ntfs_sizectx*)dirent;
-    (void)name_type; (void)pos;
-    uint64_t ino=((uint64_t)le64_to_cpu(mref) & 0xFFFFFFFFFFFFULL);
-    if(ino < (uint64_t)FILE_first_user) return 0;
-    if(name_len==1 && name[0]=='.')  return 0;
-    if(name_len==2 && name[0]=='.' && name[1]=='.') return 0;
-    char *out=NULL;
-    if(ntfs_ucstombs(name, name_len, &out, -1)<0 || !out) return 0;
-    uint64_t sz=0;
-    if(dt_type!=NTFS_DT_DIR){
-        ntfs_inode *ni=ntfs_inode_open(c->vol, mref);
-        if(ni){ if(ni->data_size>0) sz=(uint64_t)ni->data_size; ntfs_inode_close(ni); }
-    }
-    c->cb(c->ud, out, dt_type==NTFS_DT_DIR, sz);
-    free(out);
-    return 0;
+/* ---------- 一次遍历拿全字段（REQ-30.3/30.4）---------- */
+typedef struct { img_ntfs_full_cb cb; void *ud; ntfs_volume *vol; } ntfs_fullctx;
+static void ent_fill_from_inode(ntfs_inode *ni, img_ntfs_ent_t *e){
+    e->size=(uint64_t)(ni->data_size>0?ni->data_size:0);
+    e->alloc_bytes=(uint64_t)(ni->allocated_size>0?ni->allocated_size:0);
+    e->flags=(uint32_t)ni->flags;
+    e->links=(uint32_t)le16_to_cpu(ni->mrec->link_count);
+    e->times[0]=filetime_to_unix(ni->creation_time);
+    e->times[1]=filetime_to_unix(ni->last_data_change_time);
+    e->times[2]=filetime_to_unix(ni->last_access_time);
+    e->times[3]=filetime_to_unix(ni->last_mft_change_time);
 }
+int img_ntfs_list_dir_full(img_ntfs_fs *fs, const char *abs_path,
+                           img_ntfs_full_cb cb, void *ud){
+    return ntfs_list_common(fs,abs_path,false,2,(void*)cb,ud);
+}
+int img_ntfs_list_dir_full_show83(img_ntfs_fs *fs, const char *abs_path, bool show83,
+                                  img_ntfs_full_cb cb, void *ud){
+    return ntfs_list_common(fs,abs_path,show83,2,(void*)cb,ud);
+}
+int img_ntfs_stat(img_ntfs_fs *fs, const char *abs_path, img_ntfs_ent_t *out){
+    if(!fs||!fs->mounted||!abs_path||!out) return IMG_EINVAL;
+    memset(out,0,sizeof *out);
+    if(!abs_path[0] || !strcmp(abs_path,"/")){          /* 根目录本身 */
+        ntfs_inode *ri=ntfs_inode_open(fs->vol,FILE_root);
+        if(!ri) return IMG_EIO;
+        out->name="/"; out->is_dir=true; out->ino=FILE_root;
+        ent_fill_from_inode(ri,out); out->size=0; out->alloc_bytes=0;
+        ntfs_inode_close(ri);
+        return IMG_OK;
+    }
+    char d[512], n[256];
+    if(split_abs((char*)abs_path,d,sizeof d,n,sizeof n)!=0) return IMG_EINVAL;
+    ntfs_inode *par=lookup(fs->vol,d,NULL);
+    if(!par) return IMG_ENOENT;
+    ntfschar *u=NULL; size_t ul=0;
+    if(!to_ntfs(n,&u,&ul)){ ntfs_inode_close(par); return IMG_EINVAL; }
+    errno=0;
+    MFT_REF ref=ntfs_inode_lookup_by_name(par,u,ul);
+    free(u); ntfs_inode_close(par);
+    if(!mftref_ok(ref)) return IMG_ENOENT;
+    ntfs_inode *ni=ntfs_inode_open(fs->vol,ref);
+    if(!ni) return IMG_EIO;
+    out->name=abs_path;
+    out->ino=((uint64_t)le64_to_cpu(ref) & 0xFFFFFFFFFFFFULL);
+    out->is_dir=(ni->mrec->flags & MFT_RECORD_IS_DIRECTORY)!=0;
+    ent_fill_from_inode(ni,out);
+    if(out->is_dir){ out->size=0; out->flags|=0x10; }   /* FILE_ATTRIBUTE_DIRECTORY 不在 $SI 里，按惯例补上 */
+    ntfs_inode_close(ni);
+    return IMG_OK;
+}
+
 int img_ntfs_list_dir_sizes(img_ntfs_fs *fs, const char *abs_path,
                             img_ntfs_list_cb cb, void *ud){
-    if(!fs||!fs->mounted||!cb) return IMG_EINVAL;
-    ntfs_inode *di=lookup(fs->vol, (abs_path&&abs_path[0])?abs_path:"/", NULL);
-    if(!di) return IMG_ENOENT;
-    ntfs_sizectx c={cb,ud,fs->vol};
-    s64 pos=0;
-    int r=ntfs_readdir(di,&pos,&c,ntfs_size_fill);
-    ntfs_inode_close(di);
-    return r<0?IMG_EIO:IMG_OK;
+    return ntfs_list_common(fs,abs_path,false,1,(void*)cb,ud);
 }
 
 /* ---------- 空闲/已用：直接数 $Bitmap（NTFS 位图：1=已分配 0=空闲）---------- */
@@ -1473,6 +1617,32 @@ int img_ntfs_label(img_ntfs_fs *fs, char *out, size_t cap){
     ntfs_attr_close(na);
     ntfs_inode_close(vi);
     return IMG_OK;
+}
+
+/* ---------- 改卷标（2026-10-25，只动 $Volume 的 AT_VOLUME_NAME）----------
+ * 为什么不用 fs.format：格式化会把整卷清空 —— 用户只想把 "SYSTEM" 改个名。
+ * 做法：删旧属性 → 加新属性（长度任意）→ sync MFT 记录。
+ * 卷标是 $Volume 的常驻属性，长度变了必须走 remove+add（pwrite 只适合等长/可扩）。*/
+int img_ntfs_set_label(img_ntfs_fs *fs, const char *label){
+    if(!fs||!fs->vol) return IMG_EINVAL;
+    ntfs_inode *vi=ntfs_inode_open(fs->vol, FILE_Volume);
+    if(!vi) return IMG_ENOENT;
+    int rc=IMG_OK;
+    ntfs_attr_remove(vi, AT_VOLUME_NAME, AT_UNNAMED, 0);   /* 不存在也无所谓 */
+    if(label && label[0]){
+        ntfschar *u=NULL; size_t ul=0;
+        if(!to_ntfs(label,&u,&ul) || ul==0){
+            if(u) free(u);
+            ntfs_inode_close(vi);
+            return IMG_EINVAL;
+        }
+        if(ntfs_attr_add(vi, AT_VOLUME_NAME, AT_UNNAMED, 0, (const u8*)u, (s64)ul*2)!=0)
+            rc=IMG_EIO;
+        free(u);
+    }
+    if(rc==IMG_OK && ntfs_inode_sync(vi)!=0) rc=IMG_EIO;
+    if(ntfs_inode_close(vi)!=0 && rc==IMG_OK) rc=IMG_EIO;
+    return rc;
 }
 
 /* ---------- 搬移原语：/名字 → /目标目录/名字（同名，只换父目录）----------

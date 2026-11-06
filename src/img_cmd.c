@@ -2,6 +2,7 @@
 /* img_cmd.c — 命令表骨架：参数校验 / 结果信封 / 上下文 / 分发 */
 #include "img_cmd.h"
 #include "img_text.h"
+#include "img_constraints.h"   /* 尺寸口径：cmd.list 导出 min/max/role（REQ-20261025-03） */
 #ifndef IMG_WITH_WIM
 #define IMG_WITH_WIM 0
 #endif
@@ -17,11 +18,14 @@
 #include "img_io.h"
 #include "img_event.h"
 #include "img_lock.h"
+#include "img_tbuf.h"   /* 线程级缓冲 + raw 接力槽（REQ-21） */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>   /* strcasecmp */
 #include <time.h>
+#include <pthread.h>
+#include <stdint.h>
 
 static long long now_ms(void){
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
@@ -95,6 +99,23 @@ int img_args_validate(const img_args *a, const img_arg *spec, int nargs,
         for(int i=0;i<a->n;i++){
             bool known=false;
             for(int j=0;j<nargs;j++) if(!strcmp(a->a[i].k,spec[j].name)){ known=true; break; }
+            /* ★ REQ-36：参数名里的 '-' 和 '_' 视为等价（App 以前按惯例拼 --skip_trashed
+             *   撞了"未知参数"，害得 copy/move 一起挂）。命中后【回写成规范名】，
+             *   这样命令实现里 img_args_get(in,"skip-trashed") 永远拿得到值。*/
+            if(!known){
+                for(int j=0;j<nargs;j++){
+                    const char *x=a->a[i].k, *y=spec[j].name;
+                    while(*x && *y){
+                        char cx=(*x=='-')?'_':*x, cy=(*y=='-')?'_':*y;
+                        if(cx!=cy) break;
+                        x++; y++;
+                    }
+                    if(!*x && !*y){
+                        snprintf(((img_args*)a)->a[i].k,sizeof a->a[i].k,"%s",spec[j].name);
+                        known=true; break;
+                    }
+                }
+            }
             if(!known){
                 if(why) snprintf(why,whycap,"未知参数 --%s（用 --help 看支持的参数）",a->a[i].k);
                 return IMG_EINVAL;
@@ -241,9 +262,29 @@ int img_result_json(const img_result *r, char *buf, int cap){
         wnum(&ew,"rc",r->rc);
         wstr(&ew,"error_code",r->code);
         if(r->at[0]) wstr(&ew,"at",r->at);
-        /* why/suggest 是【文案】，不进信封（库零文案；App 用 error_code 查自己的表）*/
+        /* ★ 2026-10-26：`hint`/`suggest` 进信封。
+         *   以前刻意不放（"库零文案，App 查自己的表"），但前端对**新码**没有文案时
+         *   只能把裸码甩给用户（REQ-11 报的就是这个）。多两个字段不影响老解析器；
+         *   App 仍然是"有表用表、没表用 hint"。*/
+        if(r->why[0])     wstr(&ew,"hint",r->why);
+        if(r->suggest[0]) wstr(&ew,"suggest",r->suggest);
         w.p=ew.p;
         if(w.p<w.end)*w.p++='}';
+        /* ★ 失败也可能带机器可读明细（2026-10-25）：例如 PART-SIZE-BAD 要回
+         *   {role,min,max,unit} 让前端高亮输入框并显示真实范围，而不是把范围写死在前端。
+         *   老 App 只读 err 段，多一个 data 键不会影响它。*/
+        if(r->nf>0){
+            wkey(&w,"data"); if(w.p<w.end)*w.p++='{';
+            char *ds=w.p; W dw={w.p,ds,w.end};
+            for(int i=0;i<r->nf;i++){
+                if(r->f[i].ty==1) wstr(&dw,r->f[i].k,r->f[i].s);
+                else if(r->f[i].ty==2) wnum(&dw,r->f[i].k,r->f[i].n);
+                else if(r->f[i].ty==4) wraw(&dw,r->f[i].k,r->f[i].raw?r->f[i].raw:"null");
+                else wraw(&dw,r->f[i].k,r->f[i].b?"true":"false");
+            }
+            w.p=dw.p;
+            if(w.p<w.end)*w.p++='}';
+        }
     }
     if(w.p<w.end)*w.p++='}';
     if(w.p<w.end)*w.p++='\n';
@@ -344,6 +385,116 @@ const img_cmd *img_cmd_find(const char *name){
     for(int i=0;i<IMG_CMD_COUNT;i++) if(!strcmp(IMG_CMD_TABLE[i].name,name)) return &IMG_CMD_TABLE[i];
     return NULL;
 }
+/* ================= 大栈保护（REQ-20261026-21）=================
+ * 现场：App 的工作线程（ART DefaultDispatch）只有 ~1 MB 栈，
+ *   fs.format → mkntfs（bitmap_allocate）与 recovery.populate → wimlib
+ *   （open_wim_as_WIMStruct）都会吃掉远超 1 MB 的栈 → SIGSEGV，整个进程闪退
+ *   （try/catch 接不住，因为 SIGSEGV 不是异常）。
+ * 做法：命令改为在我们自己开的【大栈线程】里跑。宿主用什么栈都无所谓，
+ *   将来 ntfs-3g / wimlib 内部再加深也不怕。
+ * 只在当前线程栈 < 6 MB 时才开（imgcmd 主线程 8 MB → 零开销，行为不变）。
+ * ★ 进度回调 / 取消标志都是全局的，跨线程可见，不受影响；
+ *   IMG_THREAD_LOCAL 的那些 JSON 缓冲在新线程里各有一份，也不会串。
+ * ★ 逃生门：IMGTOOL_NO_BIGSTACK=1 关掉（自测用来证明这个保护真的在起作用）；
+ *   IMGTOOL_STACK_MB=<n> 改大小。*/
+#ifndef IMG_BIGSTACK_SIZE
+#  define IMG_BIGSTACK_SIZE (16u*1024u*1024u)
+#endif
+#define IMG_BIGSTACK_MIN    (6u*1024u*1024u)
+
+#if defined(__GLIBC__) || (defined(__ANDROID__) && defined(__ANDROID_API__) && __ANDROID_API__ >= 24)
+#  define IMG_HAVE_GETATTR_NP 1
+extern int pthread_getattr_np(pthread_t, pthread_attr_t *);
+#endif
+
+static size_t img_cur_stack_bytes(void){
+#ifdef IMG_HAVE_GETATTR_NP
+    pthread_attr_t a; size_t sz=0; void *addr=NULL;
+    if(pthread_getattr_np(pthread_self(),&a)!=0) return 0;
+    if(pthread_attr_getstack(&a,&addr,&sz)!=0) sz=0;
+    pthread_attr_destroy(&a);
+    return sz;
+#else
+    return 0;                 /* 问不出来 → 当作小栈，走大栈线程 */
+#endif
+}
+
+typedef struct {
+    const img_cmd   *c;
+    img_ctx         *ctx;
+    const img_args  *in;
+    img_result      *out;
+    img_lock_t      *lk;
+    int              rc;
+} img_bstk_job;
+
+static void *img_bstk_main(void *ud){
+    img_bstk_job *j=(img_bstk_job*)ud;
+    img_lock_acquire(j->lk);
+    j->rc=j->c->run(j->ctx,j->in,j->out);
+    img_lock_release(j->lk);
+    return NULL;
+}
+
+/* 把 out 里所有 raw JSON 指针搬到【当前线程】的 relay 槽（见 img_tbuf.h）*/
+static void img_relay_raws(img_result *out){
+    if(!out) return;
+    for(int i=0;i<out->nf;i++){
+        if(out->f[i].ty!=4 || !out->f[i].raw) continue;
+        size_t n=strlen(out->f[i].raw)+1;
+        char *dst = (i<IMG_TB_RELAY_MAX) ? img_tbuf((img_tb_id)(IMG_TB_RELAY0+i), n) : NULL;
+        if(dst) memcpy(dst,out->f[i].raw,n);
+        out->f[i].raw = dst;      /* 拷不动就置空（宁可少一个字段，也不给悬垂指针）*/
+    }
+}
+
+/* 跑 handler：栈够就直接跑，栈小就换一条大栈线程 */
+static int img_dispatch(const img_cmd *c, img_ctx *ctx, const img_args *in,
+                        img_result *out, img_lock_t *lk){
+    static int no_big = -1;
+    if(no_big<0){
+        const char *e=getenv("IMGTOOL_NO_BIGSTACK");
+        no_big = (e && *e && strcmp(e,"0")) ? 1 : 0;
+    }
+    if(no_big){
+        img_lock_acquire(lk);
+        int rc=c->run(ctx,in,out);
+        img_lock_release(lk);
+        return rc;
+    }
+    size_t cur=img_cur_stack_bytes();
+    {   const char *f=getenv("IMGTOOL_FORCE_BIGSTACK");   /* 自测用：强制走大栈线程 */
+        if(f && *f && strcmp(f,"0")) cur=0;
+    }
+    if(cur>=IMG_BIGSTACK_MIN){
+        img_lock_acquire(lk);
+        int rc=c->run(ctx,in,out);
+        img_lock_release(lk);
+        return rc;
+    }
+    size_t want=IMG_BIGSTACK_SIZE;
+    {   const char *e=getenv("IMGTOOL_STACK_MB");
+        if(e && *e){ long mb=strtol(e,NULL,10); if(mb>=2 && mb<=512) want=(size_t)mb*1024u*1024u; }
+    }
+    img_bstk_job job={c,ctx,in,out,lk,IMG_EIO};
+    pthread_attr_t at;
+    pthread_t th;
+    if(pthread_attr_init(&at)!=0) goto fallback;
+    if(pthread_attr_setstacksize(&at,want)!=0){ pthread_attr_destroy(&at); goto fallback; }
+    if(pthread_create(&th,&at,img_bstk_main,&job)!=0){ pthread_attr_destroy(&at); goto fallback; }
+    pthread_attr_destroy(&at);
+    pthread_join(th,NULL);
+    /* ★ 那个线程的 arena 随它退出就没了，而 raw 字段只存指针（约定活到渲染完）。
+     *   所以在【调用方线程】里把内容拷进本地 relay 槽 —— 生命周期回到"和以前一样"。*/
+    img_relay_raws(out);
+    return job.rc;
+fallback:                        /* 开线程都失败：退回原地跑（至少还能出结果）*/
+    img_lock_acquire(lk);
+    int rc=c->run(ctx,in,out);
+    img_lock_release(lk);
+    return rc;
+}
+
 int img_cmd_exec(const char *name, img_ctx *ctx, const img_args *in, img_result *out){
     img_io_timeout_reset();   /* ★ 上一条命令的超时判定不许带进这一条 */
     const img_cmd *c=img_cmd_find(name);
@@ -363,6 +514,33 @@ int img_cmd_exec(const char *name, img_ctx *ctx, const img_args *in, img_result 
         img_args_set(tmp,"img",img_ctx_path(ctx));
         use=tmp;
     }
+    /* ★ REQ-36：有些参数天然只属于某个命令。App 以前把 copy 的参数表共用给 move，
+     *   结果 move 报"未知参数 --skip_trashed"，用户看到的是"复制和移动都坏了"。
+     *   这里给出人话，而不是笼统的"未知参数"。*/
+    static const struct { const char *cmd,*arg,*why,*sug; } NOT_HERE[]={
+        {"move","skip-trashed","move 不过滤回收站文件（整棵搬）","要排除就先 copy 再删源"},
+        {"move","exclude",     "move 不支持 --exclude（整棵搬）","要排除就先 copy 再删源"},
+        {"move","exclude-from","move 不支持 --exclude-from（整棵搬）","要排除就先 copy 再删源"},
+        {"rename","skip-trashed","rename 只是改名，不涉及递归","本命令不适用"},
+    };
+    for(size_t i=0;i<sizeof NOT_HERE/sizeof NOT_HERE[0];i++){
+        if(strcmp(name,NOT_HERE[i].cmd)) continue;
+        if(!img_args_get(use,NOT_HERE[i].arg)) continue;
+        if(tmp) img_args_free(tmp);
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD",NOT_HERE[i].arg,
+                        NOT_HERE[i].why,NOT_HERE[i].sug);
+        return IMG_EINVAL;
+    }
+    /* ★ REQ-35 §4：--sort 与 --after 互斥要在【类型校验之前】判，否则 --after=abc 会
+     *   先报"必须是数字"，用户以为是自己填错，其实是两个参数不能一起用。*/
+    if((!strcmp(name,"ntfs.list") || !strcmp(name,"fat.ls")) &&
+       img_args_get(use,"sort") && img_args_get(use,"sort")[0] &&
+       img_args_get(use,"after")){
+        if(tmp) img_args_free(tmp);
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","after",
+                        "--sort 与 --after 互斥","带 --sort 时用 --offset/--limit 续页");
+        return IMG_EINVAL;
+    }
     char why[256];
     int rc=img_args_validate(use,c->args,c->nargs,why,sizeof why);
     if(rc!=IMG_OK){
@@ -379,9 +557,7 @@ int img_cmd_exec(const char *name, img_ctx *ctx, const img_args *in, img_result 
      *   上锁的代价是并发退化成排队（实测 240 次调用直接超时），
      *   拆 static 的代价是一次 malloc/free —— 后者明显更划算。*/
     img_lock_t *lk = ctx ? &ctx->lk : NULL;
-    img_lock_acquire(lk);
-    rc=c->run(ctx,use,out);
-    img_lock_release(lk);
+    rc=img_dispatch(c,ctx,use,out,lk);
     if(tmp) img_args_free(tmp);
     img_cancel_reset();            /* ★ 本次命令结束 → 清取消标志，避免污染下一个命令 */
     if(rc==IMG_ECANCELLED && out->ok) (void)img_result_fail(out,rc,"CMD-CANCELLED",NULL,NULL,NULL);
@@ -400,6 +576,12 @@ int img_cmd_list_json(char *buf,int cap){
             IMG_WITH_WIM?"true":"false", IMG_WITH_NTFS3G?"true":"false",
             IMG_WITH_ZLIB?"true":"false", IMG_WITH_NTFS?"true":"false");
         wraw(&w,"features",feat);       /* 走 writer：逗号/引号由它管 */
+    }
+    /* ★ 尺寸口径（2026-10-25）：前端据此画范围/默认值，不用再把数字抄一份。
+     *   max=0 表示无上限；zero_ok=true 表示 0 是合法值（0=不建 / 吃满剩余）。 */
+    {   char lim[768];
+        int n=img_arg_limits_json(lim,sizeof lim);
+        if(n>0) wraw(&w,"limits",lim);
     }
     wkey(&w,"cmds"); if(w.p<w.end)*w.p++='[';
     for(int i=0;i<IMG_CMD_COUNT;i++){
@@ -426,6 +608,19 @@ int img_cmd_list_json(char *buf,int cap){
             wraw(&aw,"required",A->required?"true":"false");
             if(A->def) wstr(&aw,"default",A->def);
             if(A->help) wstr(&aw,"help",img_t(A->help));   /* ★ 中英双份 */
+            /* 尺寸类参数带上机器可读范围（REQ-20261025-03 §2.4） */
+            if(!strcmp(A->name,"sys-mb")){
+                wstr(&aw,"role","sys-mb");                 /* gpt/mbr 两套数字见 data.limits.sys-mb */
+            } else {
+                const img_arg_limit_t *L=img_arg_limit_find(c->name,A->name);
+                if(L){
+                    wnum(&aw,"min",(long long)L->min);
+                    wnum(&aw,"max",(long long)L->max);     /* 0 = 无上限 */
+                    wstr(&aw,"unit",L->unit?L->unit:"");
+                    wstr(&aw,"role",L->role?L->role:"");
+                    if(L->zero_ok) wraw(&aw,"zero_ok","true");
+                }
+            }
             cw.p=aw.p;
             if(cw.p<cw.end)*cw.p++='}';
         }

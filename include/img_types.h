@@ -53,6 +53,7 @@ typedef enum {
     IMG_EREFUSED      = -21,  /* 政策拒绝（如未允许删宿主文件、拒绝删根目录） */
     IMG_EREADONLY     = -22,  /* 目标是只读容器（ISO/WIM/ESD） */
     IMG_ENAMEINVALID  = -23,  /* 名字是 Windows 不接受的（非法字符/保留名/尾点；写前拒绝） */
+    IMG_ESTALE        = -24,  /* 句柄/索引过期（压缩包变了、token 超时/被淘汰）*/
 } img_err_t;
 
 const char *img_strerror(int err);
@@ -126,6 +127,16 @@ typedef struct {
     const char *item;           /* ★ 当前处理对象（如文件路径） */
     const char *msg;            /* 【中文备注】开发期日志/CLI 用；App 渲染进度请用 phase/op 枚举 + cur/total/pct/item（语言中立）*/
     int         pct;            /* 0~100，可为 -1（不明确） */
+    /* ★ REQ-49 §3：全局进度（单调不减）。wim.apply 这种"解压+写入"两段的操作，
+     *   App 以前拿每个 op 的 cur/total 自己凑，条会 50%→100% 跳；这里由工具端给。*/
+    int         overall_pct;         /* 0~100；-1=未知 */
+    uint64_t    overall_cur_bytes;
+    uint64_t    overall_total_bytes; /* 0=未知 */
+    /* ★ REQ-51 B：cur_bytes/total_bytes 的【口径】。archive.extract 是"解压后字节"，
+     *   App 拿它显示时要么标"解压后"，要么用下面这一对（压缩包口径）。*/
+    const char *bytes_kind;              /* "extracted" / "raw"（默认 raw）*/
+    uint64_t    archive_cur_bytes;       /* 压缩包口径已处理（不知道就 0）*/
+    uint64_t    archive_total_bytes;     /* 压缩包口径总量（不知道就 0）*/
     int         eta_s;          /* 预计剩余秒，-1=未知 */
     int         elapsed_s;      /* 已用秒 */
 } img_progress_t;

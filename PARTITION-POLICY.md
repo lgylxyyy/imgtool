@@ -2,7 +2,7 @@
 
 > **这份文档是"决策"，不是实现。** 用户逐条勾选 → 才进代码。
 > 原则（已确立三次）：**工具层给事实与能力，App 层定政策与人话。**
-> 关联：`DESIGN-OUTPUT.md`（对外契约/字段名）· `FEATURE-CHECKLIST.md`（16 项基础能力 + 结构类铁律 §九）· `WORKPLAN-HARDEN.md`（缺口与性能）
+> 关联：`DESIGN-OUTPUT.md`（对外契约/字段名）· `DESIGN-OUTPUT.md` 第十二节（16 项基础能力 + 结构类铁律）
 
 ---
 
@@ -63,7 +63,7 @@ X.qcow2  ──① 改名──▶  旧文件 → X.old.qcow2（默认；App 传
 
 ## 四、工具层要补的能力（App 拿这些组合成流程）
 
-> 每个能力都遵守 `FEATURE-CHECKLIST.md` 的 16 项：返回 img_err_t / 里程碑 begin+done / 取消检查点 / 文案零硬编码 / 正反用例。
+> 每个能力都遵守 `DESIGN-OUTPUT.md` 第十二节的 16 项：返回 img_err_t / 里程碑 begin+done / 取消检查点 / 文案零硬编码 / 正反用例。
 
 ### 4.1 `part.scan` —— 分区扫描（新增，App 判断"有没有数据"的依据）
 ```
@@ -135,7 +135,7 @@ C 空间不够
 
 ## 六、风险与铁律（引用，不重复展开）
 
-1. **结构类铁律** → `FEATURE-CHECKLIST.md §九`：GPT 主备双写 / FAT 两份同步 / NTFS 不碰 BPB / hive 走 libhivex / 稀疏不等于占空间
+1. **结构类铁律** → `DESIGN-OUTPUT.md` §12.2：GPT 主备双写 / FAT 两份同步 / NTFS 不碰 BPB / hive 走 libhivex / 稀疏不等于占空间
 2. **克隆保持稀疏**：全零段不写（否则拷空分区会把新文件写大）
 3. **删除旧文件前必须校验通过 + 失败回滚改名**（见 §二 两条硬护栏）
 4. **#11 三级口径必须对拍验证**（用户点名要求）：level1"有卷但空"不能误报成 level2

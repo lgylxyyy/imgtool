@@ -46,7 +46,10 @@ static const img_role_limits_t LIMITS[IMG_ROLE_COUNT] = {
         .note = "GPT 磁盘专用，官方固定 16 MiB，不存用户数据",
     },
     [IMG_ROLE_WINDOWS] = {
-        .min_bytes = 16*GiB, .rec_bytes = 128*GiB, .def_bytes = 128*GiB,
+        /* ★ 2026-10-26（REQ-12）：下限 16 GiB → 128 MiB。
+         *   16 GiB 是"装 Windows 的推荐值"，不是分区表规则；小盘/测试盘需要更小的。
+         *   推荐值仍是 128 GiB，不影响任何政策判断（工具层只拦技术正确性）。*/
+        .min_bytes = 128*MiB, .rec_bytes = 128*GiB, .def_bytes = 128*GiB,
         .max_bytes = 262144ULL*GiB, .must_ntfs = true,
         .note = "必须 NTFS；262144 GiB = 256 TiB (NTFS 上限)",
     },
@@ -70,6 +73,81 @@ static const img_role_limits_t LIMITS[IMG_ROLE_COUNT] = {
 const img_role_limits_t *img_role_limits(img_part_role_t role){
     if(role<=IMG_ROLE_NONE || role>=IMG_ROLE_COUNT) return &LIMITS[IMG_ROLE_DATA];
     return &LIMITS[role];
+}
+
+/* ------------------------------------------------------------------ */
+/* 命令参数口径（2026-10-25，REQ-20261025-03）                         */
+/*                                                                     */
+/* ★ 这里是【强制】的：img.create / part.add 越界直接 PART-SIZE-BAD，  */
+/*   不再"照建一张不合规的表"。上面 LIMITS[] 仍然是【参考数据】。      */
+/*   改口径 = 改这张表 + 同步 LIMITS[]（两处数字必须一致，            */
+/*   tests/limits-test.sh 会比对）。                                    */
+/* ------------------------------------------------------------------ */
+static const img_arg_limit_t ARG_LIMITS[] = {
+    /* cmd           arg         role       min      max     unit   zero_ok */
+    {"img.create",  "size-gb",  "disk",      1,      1024,   "GiB",  false},
+    {"img.create",  "esp-mb",   "esp",     128,      1024,   "MiB",  false},
+    {"img.create",  "msr-mb",   "msr",      16,        16,   "MiB",  false},
+    {"img.create",  "rec-mb",   "recovery",512,      2048,   "MiB",  true },
+    {"img.create",  "sys-mb",   "sys",     128,      1024,   "MiB",  true },
+    /* ★ 2026-10-26（REQ-12）：Windows 分区下限 16384 → 128 MiB。
+     *   16 GiB 是"装 Windows 的推荐值"，不是分区表规则；做小盘/测试盘时它只会挡路。
+     *   MBR 的 win-mb 与 GPT 的 sys-mb 同一个下限，别再分叉。*/
+    {"img.create",  "win-mb",   "win",      128,         0,   "MiB",  true },
+    {"img.create",  "extra-mb", "data",     16,         0,   "MiB",  false},
+    {"part.add",    "size-mb",  "data",     16,         0,   "MiB",  false},
+    /* GPT 的 Windows 分区口径（sys-mb 在 gpt 下走这条） */
+    {"img.create",  "sys-mb-gpt","windows", 128,         0,   "MiB",  true },
+};
+const int IMG_ARG_LIMITS_COUNT = (int)(sizeof ARG_LIMITS/sizeof ARG_LIMITS[0]);
+
+const img_arg_limit_t *img_arg_limit_find(const char *cmd, const char *arg){
+    if(!cmd||!arg) return NULL;
+    for(int i=0;i<IMG_ARG_LIMITS_COUNT;i++)
+        if(!strcmp(ARG_LIMITS[i].cmd,cmd) && !strcmp(ARG_LIMITS[i].arg,arg)) return &ARG_LIMITS[i];
+    return NULL;
+}
+
+const img_arg_limit_t *img_arg_limit_by_role(const char *role){
+    if(!role) return NULL;
+    for(int i=0;i<IMG_ARG_LIMITS_COUNT;i++)
+        if(!strcmp(ARG_LIMITS[i].role,role)) return &ARG_LIMITS[i];
+    return NULL;
+}
+
+int img_arg_limits_json(char *buf, int cap){
+    if(!buf||cap<64) return 0;
+    int k=0;
+    k+=snprintf(buf+k,(size_t)(cap-k),"{");
+    /* 只导出【角色口径】：App 画范围用它，不再自己写死常量 */
+    static const char *roles[]={"disk","esp","msr","recovery","windows","sys","data",NULL};
+    bool first=true;
+    for(int r=0; roles[r]; r++){
+        const img_arg_limit_t *L=img_arg_limit_by_role(roles[r]);
+        if(!L) continue;
+        k+=snprintf(buf+k,(size_t)(cap-k),"%s\"%s\":{\"min\":%llu,\"max\":%llu,\"unit\":\"%s\",\"zero_ok\":%s}",
+            first?"":",", roles[r],
+            (unsigned long long)L->min,(unsigned long long)L->max,L->unit,
+            L->zero_ok?"true":"false");
+        first=false;
+        if(k>=cap-8) return 0;
+    }
+    k+=snprintf(buf+k,(size_t)(cap-k),",\"sys-mb\":{\"gpt\":{\"min\":%llu,\"max\":0,\"unit\":\"MiB\",\"zero_ok\":true},"
+                                      "\"mbr\":{\"min\":%llu,\"max\":%llu,\"unit\":\"MiB\",\"zero_ok\":true}}",
+        (unsigned long long)img_arg_limit_find("img.create","sys-mb-gpt")->min,
+        (unsigned long long)img_arg_limit_find("img.create","sys-mb")->min,
+        (unsigned long long)img_arg_limit_find("img.create","sys-mb")->max);
+    /* ★ MBR 的 Windows 分区大小（REQ-20261025-05）：App 用"这一项在不在"判断 so 支不支持，
+     *   所以键名固定 mbr-win；zero:"fill" 表示 0 = 吃满剩余（老行为）。 */
+    {   const img_arg_limit_t *W=img_arg_limit_by_role("win");
+        if(W)
+            k+=snprintf(buf+k,(size_t)(cap-k),
+                ",\"mbr-win\":{\"min\":%llu,\"max\":%llu,\"unit\":\"%s\",\"zero\":\"fill\",\"zero_ok\":true}",
+                (unsigned long long)W->min,(unsigned long long)W->max,W->unit?W->unit:"MiB");
+    }
+    k+=snprintf(buf+k,(size_t)(cap-k),"}");
+    if(k>=cap) return 0;
+    return k;
 }
 
 /* ------------------------------------------------------------------ */
@@ -284,22 +362,82 @@ int img_layout_build(img_parttable_t *t, uint64_t disk_sectors,
         off += rq.sectors;
     }
 
-    /* 恢复分区（可选，放在 Windows 分区之后）*/
+    /* 恢复分区（可选，放在所有数据分区之后）*/
     uint64_t recovery_sec = (o->recovery_bytes && o->recovery_bytes>=52*MiB) ? o->recovery_bytes/sec : 0;
 
-    /* Windows 分区：占满剩余（扣掉恢复分区+对齐余量） */
+    /* ★ 追加分区（img.create --extra-mb，2026-10-25）：
+     *   Windows/系统分区要给它们让位，自己按"剩余 - 追加总量 - 恢复分区"收窄。
+     *   MiB 天然是 2048 扇区的整数倍 → 每块起点天然 1 MiB 对齐。 */
+    int nextra = (o->extra_bytes && o->extra_count>0) ? o->extra_count : 0;
+    uint64_t extra_sec[64]; uint64_t extra_total=0;
+    if(nextra > (int)(sizeof extra_sec/sizeof extra_sec[0])) return IMG_EFULL;
+    if(nextra){
+        if(!o->extra_bytes) return IMG_EINVAL;
+        for(int i=0;i<nextra;i++){
+            extra_sec[i] = (o->extra_bytes[i] + sec-1)/sec;
+            if(extra_sec[i]==0) return IMG_EINVAL;
+            extra_total += extra_sec[i];
+        }
+    }
+    /* MBR 主分区槽不够（System+Windows(+Recovery)+N 会占满 4 个）→ 追加分区整体塞进
+     * 一个 0x0F 扩展容器里当逻辑分区（Windows 装机盘的 D:/E: 就是这种形态）。
+     * 每块前面留 1 MiB 给它的 EBR。
+     * ★ 提前一格就用扩展：给 part.add 留一个主分区槽（否则建完就加不了任何东西了）。*/
+    /* 追加分区的落位（GLB）：
+     *   n_prim_extra = 放进【主分区】的额外分区个数（前 n_prim_extra 块）；
+     *   剩下的 (nextra - n_prim_extra) 块进 0x0F 容器当逻辑分区。 */
+    int n_prim_extra = nextra;
+    bool mbr_ext=false;
+    if(table==IMG_TABLE_MBR && nextra>0){
+        int prim = 2 + (recovery_sec?1:0);
+        int free_slots = 4 - prim;
+        if(o->mbr_fill == 1){
+            /* primary（REQ-07）：先把主分区槽用满；装不下就失败 ——
+             * 因为"再建容器"也要占一个槽，而槽已经没了。*/
+            if(nextra > free_slots) return IMG_EFULL;
+        } else if(o->mbr_fill == 2){
+            /* auto（REQ-08）：主分区最多只填到 3 个（4 - 1，永远留一个槽给容器），
+             * 剩下的（含第 4 块）全进容器 —— 这样以后还能 part.add --type=logical。*/
+            int max_prim = 3 - prim;
+            if(max_prim < 0) max_prim = 0;
+            if(nextra > max_prim){
+                n_prim_extra = max_prim;
+                mbr_ext = true;
+                extra_total += (uint64_t)align*(uint64_t)(nextra - n_prim_extra);
+            }
+        } else {
+            /* reserve（默认，老行为）：会占满 4 个槽时整批进容器，给 part.add 留一个槽。*/
+            if(nextra >= free_slots){
+                n_prim_extra = 0;
+                mbr_ext=true;
+                extra_total += (uint64_t)align*(uint64_t)nextra;
+            }
+        }
+    }
+
+    /* Windows 分区：占满剩余（扣掉恢复分区 + 追加分区 + 对齐余量） */
     uint64_t win_start = (off + align-1)/align*align;
     uint64_t reserve_tail = recovery_sec ? ((recovery_sec + align-1)/align*align + align) : align;
-    if(disk_sectors <= win_start + reserve_tail + 2048) return IMG_EFULL;
-    uint64_t win_sec = disk_sectors - win_start - reserve_tail;
+    if(disk_sectors <= win_start + reserve_tail + extra_total + 2048) return IMG_EFULL;
+    uint64_t win_sec = disk_sectors - win_start - reserve_tail - extra_total;
 
     /* ★ 修复：原先 GPT 路径【完全忽略 o->sys_bytes】，Windows 分区永远吃满剩余，
      *   导致 imglayout --sys 无效、也没法留出独立数据盘。
-     *   现在：给了 sys_bytes 就按它建系统盘，剩下的留给数据盘。 */
+     *   现在：给了 sys_bytes 就按它建系统盘，剩下的留给数据盘。
+     *   ★ 2026-10-25（REQ-20261025-01 §3.4）：给了就必须是它 —— 放不下直接失败，
+     *     不再静默缩到"能放多少算多少"（用户以为 20 GiB，实际拿到 12 GiB）。*/
     uint64_t want_win = 0;
     if(table==IMG_TABLE_GPT && o->sys_bytes > 0){
         want_win = (o->sys_bytes + sec-1)/sec;
-        if(want_win < win_sec && want_win > 0) win_sec = want_win;
+        if(want_win > win_sec) return IMG_EFULL;
+        win_sec = want_win;
+    }
+    /* ★ MBR 的 Windows 分区大小（REQ-20261025-05）：给了就按它建，剩下的留空。
+     *   0 = 吃满剩余（老行为，默认）。 */
+    if(table==IMG_TABLE_MBR && o->win_bytes > 0){
+        uint64_t want = (o->win_bytes + sec-1)/sec;
+        if(want > win_sec) return IMG_EFULL;
+        win_sec = want;
     }
 
     img_part_request_t rq={0};
@@ -314,22 +452,49 @@ int img_layout_build(img_parttable_t *t, uint64_t disk_sectors,
     if(rc) return rc;
     off = win_start + win_sec;
 
-    /* ★ 数据盘：紧接系统盘，吃满到恢复分区之前（只在给了 --sys 时启用）*/
-    if(table==IMG_TABLE_GPT && want_win > 0){
-        uint64_t d_start = (off + align-1)/align*align;
-        uint64_t d_end   = disk_sectors - reserve_tail && recovery_sec
-                           ? (disk_sectors - ((recovery_sec + align-1)/align*align + align))
-                           : disk_sectors - align;
-        if(d_end > d_start + align){
-            uint64_t d_sec = d_end - d_start;
-            img_part_request_t dq = (img_part_request_t){0};
-            dq.table=table; dq.disk_sectors=disk_sectors; dq.sector_size=sec;
-            dq.role=IMG_ROLE_WINDOWS; dq.sectors=d_sec; dq.first_lba=d_start;
-            dq.existing_count=3; dq.gpt_type_guid=IMG_GUID_BASIC; dq.mbr_type=IMG_MBR_NTFS_EXFAT;
-            if((rc=img_constraints_check_partition(&dq,err))!=IMG_OK) return rc;
-            if((rc=img_partition_add(t,d_start,d_sec,0x07,IMG_GUID_BASIC,
-                                     "Basic data partition",false,&idx))!=IMG_OK) return rc;
-            off = d_start + d_sec;
+    /* ★ 数据盘：紧接系统盘，吃满到恢复分区之前（只在给了 --sys 且有追加分区时启用）
+     *   ★ 2026-10-25 破坏性变更：不再"自动多建一块吃掉剩余空间的数据分区"。
+     *     原因：App 用 --extra-mb 追加的分区就放在这段剩余里，自动数据盘会把位置全占了；
+     *     而且它让 `--sys-mb` 的语义从"Windows 分区大小"变成"顺便再塞一块盘"，
+     *     REQ-20261025-03 的验收用例 E（--sys-mb=16384 期望 4 个分区）也对不上。
+     *     现在剩余空间【留空】，要数据分区请用 --extra-mb / part.add。 */
+    off = win_start + win_sec;
+    if(nextra>0){
+        /* ① 先放主分区那部分（reserve 模式是 0 块，primary 全部，auto 前几块） */
+        for(int i=0;i<n_prim_extra;i++){
+            uint64_t st=(off + align-1)/align*align;
+            if(st + extra_sec[i] > disk_sectors - reserve_tail) return IMG_EFULL;
+            if(table==IMG_TABLE_GPT)
+                rc=img_partition_add(t,st,extra_sec[i],0x07,IMG_GUID_BASIC,"Basic data partition",false,&idx);
+            else
+                rc=img_partition_add(t,st,extra_sec[i],IMG_MBR_NTFS_EXFAT,NULL,"Data",false,&idx);
+            if(rc) return rc;
+            off = st + extra_sec[i];
+        }
+        /* ② 剩下的进扩展容器（只有 MBR 会用到） */
+        if(mbr_ext){
+            int k = n_prim_extra;
+            uint64_t want=0;
+            for(int i=k;i<nextra;i++) want += extra_sec[i];
+            want += (uint64_t)align*(uint64_t)(nextra-k);      /* 每块前面 1 MiB 给 EBR */
+            uint64_t cs = (off + align-1)/align*align;
+            uint64_t clen = want;
+            /* ★ auto（REQ-20261025-08）：容器吃满"剩余全部"（与 part.add --type=extended
+             *   省略 size-mb 一致）——否则剩余空间留在容器外面，之后 part.add --type=logical
+             *   永远撞 PART-NOSPACE，auto 的意义就没了。*/
+            if(o->mbr_fill == 2){
+                if(cs >= disk_sectors - reserve_tail) return IMG_EFULL;
+                clen = (disk_sectors - reserve_tail) - cs;
+            }
+            if(cs + clen > disk_sectors - reserve_tail) return IMG_EFULL;
+            if((rc=img_partition_add(t,cs,clen,IMG_MBR_EXTENDED_L,NULL,"Extended",false,&idx))!=IMG_OK) return rc;
+            uint64_t lstart = cs + align;
+            for(int i=k;i<nextra;i++){
+                int li=img_partition_add_logical(t,lstart,extra_sec[i],IMG_MBR_NTFS_EXFAT,"Data");
+                if(li<0) return li;
+                lstart += extra_sec[i] + align;
+            }
+            off = cs + clen;
         }
     }
 
@@ -377,6 +542,9 @@ int img_convert_mbr_to_gpt(img_parttable_t *t, img_check_result_t *err){
             snprintf(p->type_guid,sizeof p->type_guid,"%s",g);
         }
         if(!p->part_guid[0]) img_guid_new(p->part_guid);
+        /* ★ REQ-37：MBR 没有属性位，转成 GPT 时恢复分区要按官方的 0x8000000000000001 补上 */
+        if(strcmp(p->type_guid, IMG_GUID_RECOVERY)==0)
+            p->attributes = IMG_GPT_ATTR_RECOVERY_OFFICIAL;
     }
     t->table = IMG_TABLE_GPT;
     img_guid_new(t->disk_guid);

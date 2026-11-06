@@ -38,8 +38,24 @@ bool img_fat32_dir_exists(img_fat32_fs *fs, const char *abs_path);
 uint64_t img_fat32_free_bytes(img_fat32_fs *fs);
 int  img_fat32_file_size(img_fat32_fs *fs, const char *abs_path, uint64_t *out);
 
+/* 单条详情（REQ-30.3）。FAT 没有 ino/硬链接/属性位，缺的字段给 0，
+ * 时间按 DOS 时间转 unix（秒，UTC；FAT 只有 2 秒精度）。*/
+typedef struct {
+    bool     is_dir;
+    uint64_t size;          /* 字节 */
+    uint64_t alloc_bytes;   /* 按簇对齐后的占用 */
+    uint64_t ctime, mtime, atime;
+} img_fat32_stat_t;
+int img_fat32_stat(img_fat32_fs *fs, const char *abs_path, img_fat32_stat_t *out);
+
 /* 递归建目录；已存在则成功 */
 int img_fat32_mkdir_p(img_fat32_fs *fs, const char *abs_path);
+
+/* 改卷标（2026-10-25）：只写 BPB 的 11 字节 + 根目录里那条 attr=0x08 的项，
+ * 不碰任何文件数据、不重建文件系统。
+ * 长度 ≤11，字符只建议 A-Z 0-9 空格 _ -（小写会自动转大写，和 Windows 一致）。
+ * label="" 视为 "NO NAME"。返回 IMG_OK / IMG_E*。 */
+int img_fat32_set_label(img_fat32_fs *fs, const char *label);
 
 /* ---------- 流式读写（跨分区/跨镜像/宿主复制的地基，2026-10-24） ----------
  * 与 NTFS 侧同一套契约：rd 按 off 随机读；write_stream 先写临时名再改名。
@@ -79,6 +95,18 @@ int img_fat32_copy_out(img_fat32_fs *fs, const char *abs_path, const char *dst_p
 typedef void (*img_fat32_list_cb)(void *ud, const char *name, bool is_dir, uint64_t size);
 int img_fat32_list_dir(img_fat32_fs *fs, const char *abs_path,
                        img_fat32_list_cb cb, void *ud);
+
+/* 一次遍历带全字段（REQ-30.4）：以前 --times 是"每条再扫一遍整个目录"（O(n²)），
+ * 现在目录项里的 DOS 时间顺手带出来。img_fat32_list_dir 就是它的简化包装。*/
+typedef struct {
+    const char *name;
+    bool        is_dir;
+    uint64_t    size;
+    uint64_t    ctime, mtime, atime;   /* unix 秒（DOS 时间精度 2 秒）*/
+} img_fat32_ent_t;
+typedef void (*img_fat32_full_cb)(void *ud, const img_fat32_ent_t *e);
+int img_fat32_list_dir_full(img_fat32_fs *fs, const char *abs_path,
+                            img_fat32_full_cb cb, void *ud);
 
 /* 删除文件或（空）目录 */
 int img_fat32_rm(img_fat32_fs *fs, const char *abs_path);

@@ -68,7 +68,8 @@ def exported(path):
         return f.read()
 
 print('════ ntfs.move / ntfs.rm 端到端 ════')
-d = run('img.create', **{'out': IMG, 'size-gb': 2, 'table': 'gpt', 'esp-mb': 64, 'msr-mb': 16})
+d = run('img.create', **{'out': IMG, 'size-gb': 2, 'table': 'gpt', 'esp-mb': 64, 'msr-mb': 16,
+                             'limits': 'off'})
 check('img.create 建 2GiB GPT 盘', d.get('ok'), json.dumps(d)[:200])
 ps = (d.get('data') or {}).get('pt', {}).get('parts') or []
 if not ps:

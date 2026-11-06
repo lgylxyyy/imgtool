@@ -957,6 +957,84 @@ int img_bcd_remap(img_bcd *b, const img_bcd_remap_req_t *req,
     return IMG_OK;
 }
 
+/* ---- 模板导出/统计（2026-11-04）---- */
+int img_bcd_strip_devices(img_bcd *b, int *stripped){
+    if(stripped) *stripped=0;
+    if(!b||!b->h) return IMG_EINVAL;
+    char **guids=NULL; size_t n=0;
+    if(img_bcd_list_objects(b,&guids,&n)!=IMG_OK) return IMG_EIO;
+    int cnt=0;
+    for(size_t i=0;i<n;i++){
+        hive_node_h o=find_object(b,guids[i]);
+        if(!o) continue;
+        hive_node_h els=hivex_node_get_child(b->h,o,"Elements");
+        if(!els) continue;
+        hive_node_h *els_kids=hivex_node_children(b->h,els);
+        if(!els_kids) continue;
+        for(hive_node_h *pe=els_kids; *pe; pe++){
+            hive_node_h el=*pe;
+            hive_value_h *vals=hivex_node_values(b->h,el);
+            if(!vals) continue;
+            for(hive_value_h *pv=vals; *pv; pv++){
+                hive_type t; size_t len=0;
+                void *val=hivex_value_value(b->h,*pv,&t,&len);
+                if(!val || t!=hive_t_binary || len!=88){ free(val); continue; }
+                unsigned char *p=(unsigned char*)val;
+                uint32_t ty=0; memcpy(&ty,p+16,4);
+                if(ty==6){                            /* 分区设备 */
+                    memset(p+32,0,16);                /* 偏移（MBR）/分区 GUID（GPT）*/
+                    memset(p+56,0,16);                /* 签名（MBR）/磁盘 GUID（GPT）*/
+                    hive_set_value sv={ .key=(char*)"element", .t=hive_t_binary, .len=len, .value=val };
+                    if(hivex_node_set_value(b->h,el,&sv,0)==0) cnt++;
+                }
+                free(val);
+            }
+            free(vals);
+        }
+        free(els_kids);
+    }
+    img_bcd_free_object_list(guids,n);
+    if(stripped) *stripped=cnt;
+    return IMG_OK;
+}
+
+int img_bcd_stats(img_bcd *b, img_bcd_stats_t *out){
+    if(!b||!b->h||!out) return IMG_EINVAL;
+    memset(out,0,sizeof *out);
+    char **guids=NULL; size_t n=0;
+    if(img_bcd_list_objects(b,&guids,&n)!=IMG_OK) return IMG_EIO;
+    out->objects=(int)n;
+    for(size_t i=0;i<n;i++){
+        hive_node_h o=find_object(b,guids[i]);
+        if(!o) continue;
+        hive_node_h els=hivex_node_get_child(b->h,o,"Elements");
+        if(!els) continue;
+        hive_node_h *els_kids=hivex_node_children(b->h,els);
+        if(!els_kids) continue;
+        for(hive_node_h *pe=els_kids; *pe; pe++){
+            const char *eid=hivex_node_name(b->h,*pe);
+            if(!eid) continue;
+            out->elements++;
+            if(!strcmp(eid,"12000002")){
+                hive_value_h v=hivex_node_get_value(b->h,*pe,"element");
+                if(v){
+                    hive_type t; size_t len=0;
+                    void *val=hivex_value_value(b->h,v,&t,&len);
+                    if(val && (t==hive_t_string||t==hive_t_expand_string)){
+                        char *s=(char*)val;
+                        for(size_t k=0;k+1<len && s[k];k++) s[k]=(char)tolower((unsigned char)s[k]);
+                        if(strstr(s,"winload")) out->loaders++;
+                    }
+                    free(val);
+                }
+            }
+        }
+        free(els_kids);
+    }
+    img_bcd_free_object_list(guids,n);
+    return IMG_OK;
+}
+
 /* ================================================================== */
 /* 从模板构建 BCD（不依赖"参考盘旧 GUID"）                              */
 /* ================================================================== */
@@ -1221,6 +1299,11 @@ int img_bcd_create_mem(const img_bcd_create_req_t *rq, void **out, size_t *out_l
 
     size_t tlen = 0;
     const unsigned char *tpl = tpl_pick(rq, &tlen);
+    /* ★ 模板导入：外部给的 BCD 当底座（设备照样按本盘现生成）*/
+    if(rq->template_bytes && rq->template_len > 512){
+        tpl=(const unsigned char*)rq->template_bytes;
+        tlen=rq->template_len;
+    }
     img_bcd *b = img_bcd_open_mem(tpl, tlen);
     if(!b){ if(err) snprintf(err, errcap, "内置模板无法打开（内存不足或模板损坏）"); return IMG_EIO; }
 

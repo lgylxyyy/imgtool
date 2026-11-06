@@ -13,8 +13,8 @@ J(){ python3 -c "import json,sys;d=json.load(sys.stdin);print($1)" 2>/dev/null; 
 
 IMG="$W/a.qcow2"
 IMG2="$W/b.qcow2"
-"$T/imgcmd" img.create --out="$IMG" --size-gb=1 --table=gpt --esp-mb=64 --msr-mb=16 >/dev/null 2>&1 || { echo "建盘失败"; exit 1; }
-"$T/imgcmd" img.create --out="$IMG2" --size-gb=1 --table=gpt --esp-mb=32 --msr-mb=16 >/dev/null 2>&1
+"$T/imgcmd" img.create --out="$IMG" --size-gb=1 --table=gpt --esp-mb=64 --msr-mb=16 --limits=off >/dev/null 2>&1 || { echo "建盘失败"; exit 1; }
+"$T/imgcmd" img.create --out="$IMG2" --size-gb=1 --table=gpt --esp-mb=32 --msr-mb=16 --limits=off >/dev/null 2>&1
 LBA2=$("$T/imgcmd" part.show --img="$IMG2" | J "d['data']['pt']['parts'][-1]['first']")
 "$T/imgcmd" fs.format --img="$IMG2" --lba="$LBA2" --fs=ntfs --label=ADS2 >/dev/null 2>&1
 LBA=$("$T/imgcmd" part.show --img="$IMG" | J "d['data']['pt']['parts'][-1]['first']")

@@ -48,6 +48,15 @@ static int tag_value(const char *t, const char *tag, char *out, size_t cap){
     return 0;
 }
 
+/* <ARCH> 原值 → x86|x64|arm|arm64（不认识的一律空串） */
+void img_arch_normalize(const char *raw, char *out, size_t cap){
+    out[0]=0; if(!raw) return;
+    if(!strcasecmp(raw,"9")   || !strcasecmp(raw,"x64")   || !strcasecmp(raw,"amd64")) snprintf(out,cap,"x64");
+    else if(!strcasecmp(raw,"0") || !strcasecmp(raw,"x86") || !strcasecmp(raw,"i386")) snprintf(out,cap,"x86");
+    else if(!strcasecmp(raw,"5") || !strcasecmp(raw,"arm"))                            snprintf(out,cap,"arm");
+    else if(!strcasecmp(raw,"12")|| !strcasecmp(raw,"arm64")|| !strcasecmp(raw,"aarch64")) snprintf(out,cap,"arm64");
+}
+
 int img_wim_identify(img_rd_fn rd, void *ud,
                      img_wim_image_t *out, int max_images, int *out_count,
                      char *err, size_t errcap){
@@ -86,7 +95,13 @@ int img_wim_identify(img_rd_fn rd, void *ud,
         tag_value(b,"DISPLAYNAME",im->display_name,sizeof im->display_name);
         tag_value(b,"EDITIONID",im->edition_id,sizeof im->edition_id);
         char tmp[32]="";
-        if(tag_value(b,"ARCH",tmp,sizeof tmp)==0) snprintf(im->arch,sizeof im->arch,"%s",tmp);
+        /* ★ REQ-19：<ARCH> 原值直接给 App 没用 —— 微软这批镜像 x64 盘里也是 <ARCH>0</ARCH>。
+         *   所以：原值进 arch_raw，arch 归一成可判断的四个值（判不出就是空串，
+         *   App 那边"宁缺勿错"，不显示括号）。*/
+        if(tag_value(b,"ARCH",tmp,sizeof tmp)==0){
+            snprintf(im->arch_raw,sizeof im->arch_raw,"%s",tmp);
+            img_arch_normalize(tmp,im->arch,sizeof im->arch);
+        }
         if(tag_value(b,"TOTALBYTES",tmp,sizeof tmp)==0) im->total_bytes=strtoull(tmp,NULL,10);
         if(tag_value(b,"DIRCOUNT",tmp,sizeof tmp)==0) im->dir_count=atoi(tmp);
         if(tag_value(b,"FILECOUNT",tmp,sizeof tmp)==0) im->file_count=atoi(tmp);
@@ -359,7 +374,30 @@ static void vs_string(const uint8_t *base, size_t len, const char *key, char *ou
 
 int img_pe_version(const uint8_t *buf, size_t len, img_winver_t *out){
     if(!buf || len<0x40 || !out) return IMG_EINVAL;
-    if(buf[0]!='M' || buf[1]!='Z') return IMG_EFORMAT;
+    /* ★ REQ-37：不是所有引导文件都从偏移 0 开始就是 PE。
+     *   实测 Win11 26H1 的 \Windows\Boot\PCAT\bootmgr 前置了 24 KB 的 16 位引导壳
+     *   （首字节 E9 ...，没有 MZ），真正的 PE 在偏移 24456。
+     *   所以：首部不是 MZ 时，在文件里扫"看起来确实是 PE"的 MZ（必须 MZ+e_lfanew 指到
+     *   PE\0\0 + 合法 Machine），找到就用它当基址。扫描有上限，别在大文件上白烧 CPU。*/
+    size_t base=0;
+    if(!(buf[0]=='M' && buf[1]=='Z')){
+        size_t limit = len < (32u<<20) ? len : (32u<<20);
+        size_t found=SIZE_MAX;
+        for(size_t o=0; o+0x40<limit; o++){
+            if(buf[o]!='M' || buf[o+1]!='Z') continue;
+            uint32_t pe2=r32(buf+o+0x3C);
+            if((size_t)pe2+0x18 > limit-o) continue;
+            if(memcmp(buf+o+pe2,"PE\0\0",4)!=0) continue;
+            uint16_t mach=r16(buf+o+pe2+4);
+            if(mach!=0x14c && mach!=0x8664 && mach!=0xaa64 && mach!=0x1c4 && mach!=0x200) continue;
+            found=o; break;
+        }
+        if(found==SIZE_MAX) return IMG_EFORMAT;
+        PEDBG("embedded PE at %zu (len=%zu)\n",found,len);
+        base=found;
+    }
+    buf+=base; len-=base;
+    out->pe_offset=(uint32_t)base;
     uint32_t pe=r32(buf+0x3C);
     if(pe+0x18>len || memcmp(buf+pe,"PE\0\0",4)!=0){ PEDBG("bad PE sig pe=%u len=%zu\n",pe,len); return IMG_EFORMAT; }
     if(out) out->pe_machine = r16(buf+pe+4);   /* ★ 位数最硬的证据：PE 头 Machine 字段 */
@@ -383,31 +421,36 @@ int img_pe_version(const uint8_t *buf, size_t len, img_winver_t *out){
     }
     if(!off || off+16>len){ PEDBG("rsrc not mapped off=%u\n",off); return IMG_ENOENT; }
 
-    /* 资源目录三层：type(16=RT_VERSION) → name(1) → lang */
+    /* 资源目录：type(16=RT_VERSION) → name(1) → lang → 数据项。
+     * ★ 不能硬走三层：实测 Win11 26H1 的 \Windows\Boot\PCAT\bootmgr 里，
+     *   第 1 层的 RT_VERSION 项直接就是数据项（高位没置，没有 name/lang 两层）。
+     *   所以每一层都允许"子目录 or 数据项"两种。*/
     const uint8_t *res=buf+off;
     size_t rlen=len-off;
-    uint32_t nent=r16(res+12), nname=r16(res+14);
+    uint32_t n_name=r16(res+12), n_id=r16(res+14);   /* +12=命名项，+14=ID 项 */
     const uint8_t *ent=res+16;
-    uint32_t ver_off=0;
-    for(uint32_t i=0;i<nent+nname;i++){
+    uint32_t leaf=0;
+    for(uint32_t i=0;i<n_name+n_id;i++){
+        if((size_t)i*8+24>rlen) break;
         uint32_t id=r32(ent+i*8), po=r32(ent+i*8+4);
-        if(!(po & 0x80000000)) continue;
-        if(id==16){ ver_off=po & 0x7FFFFFFF; break; }
+        if(id!=16) continue;
+        if(!(po & 0x80000000)){ leaf=po; break; }    /* 直接是数据项 */
+        const uint8_t *l2=res+(po & 0x7FFFFFFF);
+        if(l2+16>res+rlen) return IMG_ENOENT;
+        if(r16(l2+12)+r16(l2+14)<1) return IMG_ENOENT;
+        uint32_t po2=r32(l2+16+4);
+        if(po2 & 0x80000000){
+            const uint8_t *l3=res+(po2 & 0x7FFFFFFF);
+            if(l3+16>res+rlen) return IMG_ENOENT;
+            if(r16(l3+12)+r16(l3+14)<1) return IMG_ENOENT;
+            uint32_t po3=r32(l3+16+4);
+            if(po3 & 0x80000000) return IMG_ENOENT;
+            leaf=po3;
+        }else leaf=po2;
+        break;
     }
-    if(!ver_off || ver_off+16>rlen){ PEDBG("no RT_VERSION ver_off=%u rlen=%zu\n",ver_off,rlen); return IMG_ENOENT; }
-    const uint8_t *lvl2=res+ver_off;
-    nent=r16(lvl2+12); nname=r16(lvl2+14);
-    if(nent+nname<1) return IMG_ENOENT;
-    uint32_t po=r32(lvl2+16+4);
-    if(!(po & 0x80000000)) return IMG_ENOENT;
-    const uint8_t *lvl3=res+(po & 0x7FFFFFFF);
-    if(lvl3+16>res+rlen) return IMG_ENOENT;
-    uint32_t n3=r16(lvl3+12)+r16(lvl3+14);
-    if(n3<1) return IMG_ENOENT;
-    uint32_t doff=r32(lvl3+16+4);
-    if(doff & 0x80000000) return IMG_ENOENT;      /* 应该是叶子：数据项 */
-    if(doff+16>rlen) return IMG_ENOENT;
-    uint32_t data_rva=r32(res+doff), data_sz=r32(res+doff+4);
+    if(!leaf || (size_t)leaf+16>rlen){ PEDBG("no RT_VERSION leaf=%u rlen=%zu\n",leaf,rlen); return IMG_ENOENT; }
+    uint32_t data_rva=r32(res+leaf), data_sz=r32(res+leaf+4);
     uint32_t d_off=0;
     for(int i=0;i<nsec;i++){
         const uint8_t *s=sec+i*40;

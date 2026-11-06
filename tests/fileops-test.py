@@ -66,7 +66,8 @@ def rd(p):
 def new_img(name, esp_mb=64, msr_mb=16):
     img = os.path.join(W, name)
     d = run('img.create', out=img, **{'size-gb': 1, 'table': 'gpt',
-                                      'esp-mb': esp_mb, 'msr-mb': msr_mb})
+                                      'esp-mb': esp_mb, 'msr-mb': msr_mb,
+                                      'limits': 'off'})
     parts = data(d)['pt']['parts']
     esp, dat = parts[0]['first'], parts[-1]['first']
     assert run('fs.format', img=img, lba=esp, fs='fat32', label='ESP', quick='true').get('ok')

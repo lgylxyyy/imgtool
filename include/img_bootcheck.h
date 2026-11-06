@@ -31,6 +31,9 @@ typedef struct {
     img_ck_level_t level;
     bool           pass;
     char           detail[256];
+    /* ★ REQ-38：可一键修复时给出【能直接跑的命令原文】。
+     *   App 不显示给用户，只在自己的修复流程里取来执行；空串 = 没有自动修复。*/
+    char           suggest[320];
 } img_check_t;
 
 typedef struct {
@@ -39,6 +42,7 @@ typedef struct {
     int         n_required_fail;   /* REQUIRED 未通过数 */
     int         n_warn_fail;
     bool        is_uefi;
+    char        img[1024];        /* 调用方填（JSON 里 suggest 要带 --img=/path）；空则用 <img> */
 } img_bootcheck_result_t;
 
 /* 模式：自动探测 / 强制某一种 */

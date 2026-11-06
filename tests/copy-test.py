@@ -76,7 +76,7 @@ RAW = os.path.join(W, 'd.raw')
 BASE = os.path.join(W, 'base.json')
 print('════ 盘内复制/删除（NTFS + FAT32） ════')
 
-d = run('img.create', out=IMG, **{'size-gb': 2, 'table': 'gpt', 'esp-mb': 64, 'msr-mb': 16})
+d = run('img.create', out=IMG, **{'size-gb': 2, 'table': 'gpt', 'esp-mb': 64, 'msr-mb': 16, 'limits': 'off'})
 LBA = data(d)['pt']['parts'][-1]['first']
 ESP = data(d)['pt']['parts'][0]['first']
 check('建 2 GiB GPT 盘', d.get('ok'), json.dumps(d)[:160])

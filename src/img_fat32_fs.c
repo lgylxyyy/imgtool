@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -195,25 +196,27 @@ static int u16_to_u8(const uint16_t *u, int n, char *out, size_t cap){
     return (int)o;
 }
 
+/* 一个字节 → 合法的 8.3 字符。★ 8.3 里【不允许空格和 " * + , / : ; < = > ? [ ] \ |】，
+ *   以前只处理非 ASCII/控制字符，空格原样留在短名里 → "fb (1).bin" 的短名成了
+ *   "FB (1)  "，而比较用的点号形会在空格处截断成 "FB.BIN"，与已有的 fb.bin 撞车：
+ *   --conflict=rename 找唯一名时永远"已存在" → 报 FAT-ENTRY-EXISTS（真机上是
+ *   "复制第二个文件就失败"）。Windows 的做法就是把这些字符统一换成 '_'。*/
+static char pat83_char(unsigned char c){
+    if(c>=0x80 || c<0x20) return '_';
+    if(c==' '||c=='"'||c=='*'||c=='+'||c==','||c=='/'||c==':'||c==';'||
+       c=='<'||c=='='||c=='>'||c=='?'||c=='['||c==']'||c=='\\'||c=='|') return '_';
+    return (char)((c>='a'&&c<='z')? c-32 : c);
+}
 static void name_to_83(const char *nm, char out[12]){
     memset(out,' ',11); out[11]=0;
     const char *dot = strrchr(nm,'.');
     int base = dot ? (int)(dot-nm) : (int)strlen(nm);
     if(base>8) base=8;
-    /* 8.3 名只能是 ASCII：非 ASCII 字节一律 '_'（Windows 的短名也是这样糊出来的）*/
-    for(int i=0;i<base;i++){
-        unsigned char c=(unsigned char)nm[i];
-        out[i] = (c>=0x80 || c<0x20) ? '_'
-               : (char)((c>='a'&&c<='z')? c-32 : c);
-    }
+    for(int i=0;i<base;i++) out[i]=pat83_char((unsigned char)nm[i]);
     if(dot){
         int e=(int)strlen(dot+1);
         if(e>3) e=3;
-        for(int i=0;i<e;i++){
-            unsigned char c=(unsigned char)dot[1+i];
-            out[8+i] = (c>=0x80 || c<0x20) ? '_'
-                     : (char)((c>='a'&&c<='z')? c-32 : c);
-        }
+        for(int i=0;i<e;i++) out[8+i]=pat83_char((unsigned char)dot[1+i]);
     }
 }
 /* ★ 写盘用的是【补满 11 字节】的 8.3；比较时必须用【去尾空格】版，
@@ -252,11 +255,22 @@ static void ent_fill(dir_ent *o, const uint8_t *e, uint64_t slot_off){
     o->wrt_date = (uint16_t)(e[24] | (e[25] << 8));
 }
 /* 把 8.3 项名字拼成点号形（大写） */
+/* 8.3 名 → 显示串。★ 应用目录项第 12 字节的 NT 小写标志：
+ *   0x08 = 基名小写，0x10 = 扩展名小写（Windows 的 "readme.txt" 就是这么存的）。
+ *   以前一律转大写 → fat.ls 印 README.TXT，和资源管理器/用户输入不一致；
+ *   现在按盘上的真值印，比较一律走 strcasecmp（FAT 本来就大小写不敏感）。*/
 static void ent_83_name(const uint8_t *e, char out[12]){
     int j=0;
-    for(int k=0;k<8 && e[k]!=' ';k++) out[j++]=(char)((e[k]>='a'&&e[k]<='z')?e[k]-32:e[k]);
-    if(e[8]!=' '){ out[j++]='.'; for(int k=8;k<11 && e[k]!=' ';k++)
-        out[j++]=(char)((e[k]>='a'&&e[k]<='z')?e[k]-32:e[k]); }
+    bool lb = (e[12] & 0x08)!=0, le = (e[12] & 0x10)!=0;
+    for(int k=0;k<8 && e[k]!=' ';k++){
+        char c=(char)e[k];
+        if(lb && c>='A' && c<='Z') c=(char)(c+32);
+        out[j++]=c;
+    }
+    if(e[8]!=' '){ out[j++]='.'; for(int k=8;k<11 && e[k]!=' ';k++){
+        char c=(char)e[k];
+        if(le && c>='A' && c<='Z') c=(char)(c+32);
+        out[j++]=c; } }
     out[j]=0;
 }
 
@@ -405,9 +419,14 @@ static int dir_find(img_fat32_fs *fs, uint32_t dirclus, const char *want, dir_en
                     free(buf);
                     return IMG_OK;
                 }
-            } else {
+            }
+            /* ★ 8.3 短名兜底【不管有没有 LFN 都要做】：Windows 允许用短名打开长名文件
+             *   （资源管理器显示 wgl4_boot.ttf，用户/安装脚本却写 WGL4_BOO.TTF）。
+             *   以前"有 LFN 就只比 LFN" → 真机上 rm 8.3 名报 PATH-SRC-NOTFOUND。
+             *   优先级不变：LFN 精确命中已在上面的立即返回；短名只在整目录扫完后兜底。*/
+            {
                 char n[12]; ent_83_name(e, n);
-                if(want_is83 && !strcmp(n, want83) && !have_fb83){   /* 先记账，扫完再定 */
+                if(want_is83 && !have_fb83 && !strcasecmp(n, want83)){
                     ent_fill(&fb83, e, coff+i);
                     have_fb83=true;
                 }
@@ -421,6 +440,48 @@ done:
     free(buf);
     if(have_fb83) *out = fb83;
     return IMG_OK;
+}
+
+/* 取一个已存在项的【显示名】：有 LFN 就是 LFN，否则 8.3（应用小写标志）。
+ * 覆盖写时用它守住长名：用户拿 8.3 名（HELLO_WO.TXT）覆盖 hello_world.txt，
+ * Windows 不会把长名改掉；我们以前按"用户输入的字符串"重建目录项 → 长名丢了。*/
+static int dir_display_name(img_fat32_fs *fs, uint32_t dirclus, const char *want,
+                            char *out, size_t cap){
+    size_t csz=(size_t)fs->L.sectors_per_cluster*512;
+    uint8_t *buf=malloc(csz);
+    if(!buf) return IMG_ENOMEM;
+    char want83[12]; name_to_83_dot(want,want83);
+    char wantu[1024]; snprintf(wantu,sizeof wantu,"%s",want);
+    for(char *p=wantu;*p;p++) if(*p>='a'&&*p<='z') *p-=32;
+    lfn_acc la; lfn_reset(&la);
+    int rc=IMG_ENOENT; uint32_t c=dirclus; uint64_t guard=0;
+    while(c>=2 && c<FAT32_EOC && rc!=IMG_OK){
+        if(FAT32_CHAIN_GUARD(fs,guard)){ rc=IMG_ECORRUPT; break; }
+        if(rd(fs,clus_off(fs,c),buf,csz)){ rc=IMG_EIO; break; }
+        for(size_t i=0;i+ENTRY_SIZE<=csz;i+=ENTRY_SIZE){
+            uint8_t *e=buf+i;
+            if(e[0]==0x00) goto done;
+            if(e[0]==0xE5){ lfn_reset(&la); continue; }
+            if(lfn_feed(&la,e)) continue;
+            if(e[11]&ATTR_VOLUME){ lfn_reset(&la); continue; }
+            const char *lfn=lfn_value(&la);
+            bool had=(la.active && lfn[0]);
+            if(had){
+                char a[1024]; snprintf(a,sizeof a,"%s",lfn);
+                for(char *q=a;*q;q++) if(*q>='a'&&*q<='z') *q-=32;
+                if(!strcmp(a,wantu)){ snprintf(out,cap,"%s",lfn); rc=IMG_OK; goto done; }
+            }
+            {   char n[12]; ent_83_name(e,n);
+                if(!strcasecmp(n,want83)){ snprintf(out,cap,"%s",had?lfn:n); rc=IMG_OK; goto done; }
+            }
+            lfn_reset(&la);
+        }
+        uint32_t nx=0; if(fat_get(fs,c,&nx)){ rc=IMG_EIO; break; }
+        c=nx;
+    }
+done:
+    free(buf);
+    return rc;
 }
 
 /* ---------- 公开 API ---------- */
@@ -488,6 +549,28 @@ int img_fat32_file_size(img_fat32_fs *fs, const char *abs_path, uint64_t *out){
     dir_ent e;
     if(dir_find(fs, dir, name, &e)!=IMG_OK || !e.found) return IMG_ENOENT;
     *out = e.size;
+    return IMG_OK;
+}
+
+int img_fat32_stat(img_fat32_fs *fs, const char *abs_path, img_fat32_stat_t *out){
+    if(!fs||!abs_path||!out) return IMG_EINVAL;
+    memset(out,0,sizeof *out);
+    if(!abs_path[0] || !strcmp(abs_path,"/")){
+        out->is_dir=true;
+        out->alloc_bytes=0;            /* FAT32 根目录是簇链，占用从簇数算不出来就报 0 */
+        return IMG_OK;
+    }
+    uint32_t dir; char nm[1024];
+    if(split_parent(fs, abs_path, &dir, nm, sizeof nm)!=IMG_OK) return IMG_ENOENT;
+    dir_ent e;
+    if(dir_find(fs, dir, nm, &e)!=IMG_OK || !e.found) return IMG_ENOENT;
+    out->is_dir=e.is_dir;
+    out->size=e.size;
+    uint32_t cs=(uint32_t)fs->L.bytes_per_sector*fs->L.sectors_per_cluster; if(!cs) cs=1;
+    out->alloc_bytes=e.is_dir?0:(((uint64_t)e.size+cs-1)/cs)*cs;
+    out->ctime=(uint64_t)img_fat32_dos_to_epoch(e.crt_time,e.crt_date);
+    out->mtime=(uint64_t)img_fat32_dos_to_epoch(e.wrt_time,e.wrt_date);
+    out->atime=(uint64_t)img_fat32_dos_to_epoch(0,e.acc_date);
     return IMG_OK;
 }
 
@@ -884,9 +967,20 @@ int img_fat32_write_stream(img_fat32_fs *fs, const char *dst_abs,
         if(conflict==0) return IMG_EEXISTS;
         if(img_fat32_dir_exists(fs, full)) return IMG_ESTATE;
         if(conflict==2){
-            if(fat_unique_name(fs, ddir, dname, final_name, sizeof final_name)!=0) return IMG_EEXISTS;
+            int urc=fat_unique_name(fs, ddir, dname, final_name, sizeof final_name);
+            if(getenv("IMG_FAT_DEBUG")) fprintf(stderr,"[fat] unique(%s) rc=%d -> %s\n",dname,urc,final_name);
+            if(urc!=0) return IMG_EEXISTS;
             snprintf(full,sizeof full,"%s%s%s",ddir,strcmp(ddir,"/")?"/":"",final_name);
-        } else replaced=true;
+        } else {
+            replaced=true;
+            /* ★ 覆盖时沿用【盘上已有的名字】：用 8.3 短名覆盖长名文件，Windows 不会
+             *   把 wgl4_boot.ttf 改名成 WGL4_BOO.TTF。以前照用户输入重建目录项 →
+             *   LFN 被抹掉（REQ-47 后半段"名字对不上"的另一半原因）。*/
+            char disp[1024]="";
+            if(dir_display_name(fs, dirclus, nm, disp, sizeof disp)==IMG_OK && disp[0])
+                snprintf(final_name,sizeof final_name,"%s",disp);
+            snprintf(full,sizeof full,"%s%s%s",ddir,strcmp(ddir,"/")?"/":"",final_name);
+        }
     }
 
     /* 临时名（探测到确实不存在） */
@@ -1140,7 +1234,17 @@ int img_fat32_copy_out(img_fat32_fs *fs, const char *abs_path, const char *dst_p
     return IMG_OK;
 }
 
+typedef struct { img_fat32_list_cb cb; void *ud; } fatlist_wrap;
+static void fatlist_simplify(void *ud, const img_fat32_ent_t *e){
+    fatlist_wrap *w=(fatlist_wrap*)ud;
+    w->cb(w->ud,e->name,e->is_dir,e->size);
+}
 int img_fat32_list_dir(img_fat32_fs *fs, const char *abs_path, img_fat32_list_cb cb, void *ud){
+    if(!cb) return IMG_EINVAL;
+    fatlist_wrap w={cb,ud};
+    return img_fat32_list_dir_full(fs,abs_path,fatlist_simplify,&w);
+}
+int img_fat32_list_dir_full(img_fat32_fs *fs, const char *abs_path, img_fat32_full_cb cb, void *ud){
     if(!fs||!cb) return IMG_EINVAL;
     uint32_t dir = fs->L.root_cluster;
     if(abs_path && abs_path[0] && strcmp(abs_path,"/")){   /* 任何非根路径都要查 */
@@ -1175,8 +1279,17 @@ int img_fat32_list_dir(img_fat32_fs *fs, const char *abs_path, img_fat32_list_cb
             const char *nm_out=(la.active && lfnv[0])?lfnv:n;
             /* ★ 不把 "." / ".." 抛给上层：与 ntfs.list 保持一致，
              *   否则 App 要给两套目录渲染逻辑（实测 fat.ls 会多出这两行）。*/
-            if(strcmp(nm_out,".") && strcmp(nm_out,".."))
-                cb(ud, nm_out, (e[11]&ATTR_DIR)!=0, sz);
+            if(strcmp(nm_out,".") && strcmp(nm_out,"..")){
+                img_fat32_ent_t ent; memset(&ent,0,sizeof ent);
+                ent.name=nm_out; ent.is_dir=(e[11]&ATTR_DIR)!=0; ent.size=sz;
+                uint16_t wt=(uint16_t)(e[22]|(e[23]<<8)), wd=(uint16_t)(e[24]|(e[25]<<8));
+                uint16_t ct=(uint16_t)(e[14]|(e[15]<<8)), cd=(uint16_t)(e[16]|(e[17]<<8));
+                uint16_t ad=(uint16_t)(e[18]|(e[19]<<8));
+                ent.mtime=(uint64_t)img_fat32_dos_to_epoch(wt,wd);
+                ent.ctime=(uint64_t)img_fat32_dos_to_epoch(ct,cd);
+                ent.atime=(uint64_t)img_fat32_dos_to_epoch(0,ad);
+                cb(ud,&ent);
+            }
             (void)clus;
             lfn_reset(&la);
         }
@@ -1518,4 +1631,50 @@ uint64_t img_fat32_free_bytes(img_fat32_fs *fs){
     fs->free_bytes = free_c*(uint64_t)fs->L.sectors_per_cluster*512;
     fs->free_valid = true;
     return fs->free_bytes;
+}
+
+/* ---------- 改卷标（2026-10-25）：只写 BPB + 根目录的卷标项 ----------
+ * ★ FAT32 的卷标在 BPB 0x47（11 字节），不是 0x2B（那是 FAT12/16 的）；
+ *   Windows 资源管理器读的是【根目录里 attr=0x08 的那一条】，所以两处都要改，
+ *   只改一处会被 chkdsk 报"卷标不一致"。
+ * ★ 只改名字字段，不分配/释放簇、不动任何文件。*/
+int img_fat32_set_label(img_fat32_fs *fs, const char *label){
+    if(!fs) return IMG_EINVAL;
+    if(!fs->writable) return IMG_ENOTSUP;
+    const char *src=(label && label[0]) ? label : "NO NAME";
+    if(strlen(src)>11) return IMG_ERANGE;
+    uint8_t lab[11]; memset(lab,' ',sizeof lab);
+    for(int i=0;i<11 && src[i];i++) lab[i]=(uint8_t)toupper((unsigned char)src[i]);
+
+    int rc=wr(fs,0x47,lab,11);              /* ① 主 VBR */
+    if(rc!=IMG_OK) return rc;
+    if(fs->L.reserved_sectors>6)            /* ② 备份 VBR（尽力而为） */
+        (void)wr(fs,6ull*512+0x47,lab,11);
+
+    /* ③ 根目录：找到 attr=0x08 就换名字；没有就占一个空槽写一条 */
+    uint32_t c=fs->L.root_cluster; uint64_t guard=0;
+    uint64_t free_off=0; bool have_free=false;
+    while(c>=2 && c<0x0FFFFFF8u && !FAT32_CHAIN_GUARD(fs,guard)){
+        uint64_t off=clus_off(fs,c);
+        uint32_t csz=(uint32_t)fs->L.sectors_per_cluster*512u;
+        for(uint32_t i=0;i+ENTRY_SIZE<=csz;i+=ENTRY_SIZE){
+            uint8_t e[ENTRY_SIZE];
+            rc=rd(fs,off+i,e,sizeof e); if(rc!=IMG_OK) return rc;
+            if(e[0]==0x00){                 /* 目录结束标记：后面不可能还有卷标项 */
+                if(!have_free){ free_off=off+i; have_free=true; }
+                goto have_slot;
+            }
+            if(e[0]==0xE5){ if(!have_free){ free_off=off+i; have_free=true; } continue; }
+            if(e[11]==ATTR_VOLUME){
+                uint8_t ne[ENTRY_SIZE]; memcpy(ne,e,sizeof ne); memcpy(ne,lab,11);
+                return wr(fs,off+i,ne,sizeof ne);
+            }
+        }
+        uint32_t nxt=0; rc=fat_get(fs,c,&nxt); if(rc!=IMG_OK) return rc; c=nxt;
+    }
+have_slot:
+    if(!have_free) return IMG_EFULL;        /* 根目录满且没有卷标项（罕见） */
+    uint8_t ne[ENTRY_SIZE]; memset(ne,0,sizeof ne);
+    memcpy(ne,lab,11); ne[11]=ATTR_VOLUME;
+    return wr(fs,free_off,ne,sizeof ne);
 }

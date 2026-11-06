@@ -18,6 +18,12 @@
 #if IMG_WITH_WIM
 #include "img_wim_fs.h"
 #include "img_lock.h"        /* img_tmpdir()：临时目录不许写死 /tmp */
+#include "img_stream.h"
+#include "img_event.h"
+#include <pthread.h>
+#include <unistd.h>
+#include <signal.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,8 +96,9 @@ static int ls_cb(const struct wimlib_dir_entry *de,void *user_ctx){
     /* 大小 = 未命名数据流（wimlib 保证 streams[0] 就是主数据流；
      * 备用数据流从 1 开始，计 num_named_streams 个）*/
     uint64_t sz=de->streams[0].resource.uncompressed_size;
+    uint64_t mt=(de->last_write_time.tv_sec>0)?(uint64_t)de->last_write_time.tv_sec:0;
     c->cb(c->ud, de->filename?(const char*)de->filename:base_name((const char*)de->full_path),
-          (const char*)de->full_path, isdir, sz, de->attributes, de->depth);
+          (const char*)de->full_path, isdir, sz, mt, de->attributes, de->depth);
     return 0;
 }
 int img_wim_list(const char *wim_path,int index,const char *dir,bool recursive,
@@ -127,8 +134,8 @@ int img_wim_list(const char *wim_path,int index,const char *dir,bool recursive,
  * wimlib 没有"stat 单条路径"的 API → 列它的父目录找名字（大小写不敏感，
  * WIM 内部路径本来就是 Windows 语义）。 */
 typedef struct { char want[256]; bool hit,isdir; uint64_t size; uint32_t attrs; } stcx;
-static void st_cb(void *ud,const char *name,const char *full,bool isdir,uint64_t size,uint32_t attrs,size_t depth){
-    (void)full;(void)depth;
+static void st_cb(void *ud,const char *name,const char *full,bool isdir,uint64_t size,uint64_t mt,uint32_t attrs,size_t depth){
+    (void)full;(void)depth;(void)mt;
     stcx *s=(stcx*)ud;
     if(s->hit) return;
     if(name && !strcasecmp(name,s->want)){ s->hit=true; s->isdir=isdir; s->size=size; s->attrs=attrs; }
@@ -163,6 +170,114 @@ int img_wim_extract_tree(const char *wim_path,int index,const char *inner_path,
                                  WIMLIB_EXTRACT_FLAG_NO_ACLS);
     wimlib_free(o.w);
     if(wrc!=0){ if(err) snprintf(err,errcap,"解出失败：%s",wim_rc_str(wrc)); return IMG_EIO; }
+    return IMG_OK;
+}
+
+/* ---------- 递归复制 / 统计（给"抽目录"用）---------- */
+#include <dirent.h>
+static int cp_r(const char *src, const char *dst){
+    struct stat sb;
+    if(lstat(src,&sb)!=0) return -1;
+    if(S_ISDIR(sb.st_mode)){
+        if(mkdir(dst,0755)!=0 && errno!=EEXIST) return -1;
+        DIR *d=opendir(src); if(!d) return -1;
+        struct dirent *e; int rc=0;
+        while((e=readdir(d))!=NULL){
+            if(!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")) continue;
+            char a[1024],b[1024];
+            snprintf(a,sizeof a,"%s/%s",src,e->d_name);
+            snprintf(b,sizeof b,"%s/%s",dst,e->d_name);
+            if(cp_r(a,b)!=0){ rc=-1; break; }
+        }
+        closedir(d);
+        return rc;
+    }
+    FILE *in=fopen(src,"rb"); if(!in) return -1;
+    FILE *out=fopen(dst,"wb"); if(!out){ fclose(in); return -1; }
+    char *buf=(char*)malloc(1<<20);
+    int rc=0;
+    if(!buf) rc=-1;
+    else{
+        size_t n;
+        while((n=fread(buf,1,1<<20,in))>0) if(fwrite(buf,1,n,out)!=n){ rc=-1; break; }
+        free(buf);
+    }
+    fclose(in);
+    if(fclose(out)!=0) rc=-1;
+    return rc;
+}
+static void tree_stats(const char *path, uint64_t *bytes, int *files, int *dirs){
+    struct stat sb;
+    if(lstat(path,&sb)!=0) return;
+    if(S_ISDIR(sb.st_mode)){
+        if(dirs) (*dirs)++;
+        DIR *d=opendir(path); if(!d) return;
+        struct dirent *e;
+        while((e=readdir(d))!=NULL){
+            if(!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")) continue;
+            char a[1024]; snprintf(a,sizeof a,"%s/%s",path,e->d_name);
+            tree_stats(a,bytes,files,dirs);
+        }
+        closedir(d);
+        return;
+    }
+    if(bytes) *bytes += (uint64_t)sb.st_size;
+    if(files) (*files)++;
+}
+
+/* 抽一个【目录子树】到本地（REQ-28 C″）。
+ *   dst_dir 必须不存在（或空目录）：目录合并的语义太容易出人命，宁可让调用方明确。*/
+int img_wim_extract_dir(const char *wim_path,int index,const char *inner_path,
+                        const char *dst_dir,img_prog *prog,uint64_t *out_bytes,
+                        int *out_files,char *err,size_t errcap){
+    (void)prog;
+    if(out_bytes) *out_bytes=0;
+    if(out_files) *out_files=0;
+    if(!wim_path||!inner_path||!dst_dir) return IMG_EINVAL;
+    if(inner_path[0]!='/') return IMG_EINVAL;
+    img_wim_stat_t st; memset(&st,0,sizeof st);
+    int rc=img_wim_stat(wim_path,index,inner_path,&st,err,errcap);
+    if(rc!=IMG_OK) return rc;
+    if(!st.is_dir){ if(err) snprintf(err,errcap,"不是目录：%s",inner_path); return IMG_EINVAL; }
+    struct stat ds;
+    if(stat(dst_dir,&ds)==0){
+        if(!S_ISDIR(ds.st_mode)){ if(err) snprintf(err,errcap,"目标已存在且不是目录：%s",dst_dir); return IMG_ESTATE; }
+        DIR *d=opendir(dst_dir); int n=0;
+        if(d){ struct dirent *e; while((e=readdir(d))){ if(strcmp(e->d_name,".")&&strcmp(e->d_name,"..")) n++; } closedir(d); }
+        if(n>0){ if(err) snprintf(err,errcap,"目标目录非空（本命令不做合并）：%s",dst_dir); return IMG_ESTATE; }
+    }
+    const char *tmp=img_tmpdir();
+    if(!tmp||!tmp[0]){ if(err) snprintf(err,errcap,"找不到可写临时目录（设 IMGTOOL_TMPDIR 或 TMPDIR）"); return IMG_ESTATE; }
+    char tmpl[600]; snprintf(tmpl,sizeof tmpl,"%s/imgtool-wimdir-XXXXXX",tmp);
+    char *dir=mkdtemp(tmpl);
+    if(!dir){ if(err) snprintf(err,errcap,"建临时目录失败：%s",strerror(errno)); return IMG_EIO; }
+
+    openwim o; rc=open_checked(wim_path,index,&o,err,errcap);
+    if(rc!=IMG_OK){ rmdir(dir); return rc; }
+    const wimlib_tchar *paths[1]={ (const wimlib_tchar*)inner_path };
+    int wrc=wimlib_extract_paths(o.w,index,(const wimlib_tchar*)dir,paths,1,
+                                 WIMLIB_EXTRACT_FLAG_NO_ACLS);
+    wimlib_free(o.w);
+    if(wrc!=0){
+        if(err) snprintf(err,errcap,"抽取失败：%s",wim_rc_str(wrc));
+        rm_rf(dir); rmdir(dir); return IMG_EIO;
+    }
+    char got[1100]; snprintf(got,sizeof got,"%s%s",dir,inner_path);
+    struct stat sb;
+    if(stat(got,&sb)!=0 || !S_ISDIR(sb.st_mode)){
+        if(err) snprintf(err,errcap,"抽完了但找不到落地目录：%s",got);
+        rm_rf(dir); rmdir(dir); return IMG_EIO;
+    }
+    /* 先试 rename（同盘几毫秒）；跨盘（/data 临时 → /sdcard 目标）退化成递归复制 */
+    int moved=0;
+    if(rename(got,dst_dir)==0) moved=1;
+    else{
+        if(rmdir(dst_dir)==0 || errno==ENOENT){ /* 空目录先让开 */ }
+        if(cp_r(got,dst_dir)==0) moved=1;
+    }
+    if(moved){ uint64_t b=0; int f=0; tree_stats(dst_dir,&b,&f,NULL); if(out_bytes)*out_bytes=b; if(out_files)*out_files=f; }
+    rm_rf(dir); rmdir(dir);
+    if(!moved){ if(err) snprintf(err,errcap,"移动到目标失败：%s",strerror(errno)); return IMG_EIO; }
     return IMG_OK;
 }
 
@@ -233,4 +348,273 @@ int img_wim_extract_file(const char *wim_path,int index,const char *inner_path,
     if(out_bytes) *out_bytes=done;
     return IMG_OK;
 }
+
+/* ---------- 内容判位数（REQ-19 §B / REQ-22）----------
+ * XML 的 <ARCH> 不可信（微软 x64 盘里也写 0；NTLite 那边同样把这种盘报成
+ * "unknown architecture"）。用盘里的东西判，谁也改不了：
+ *   ① \Windows\SysWOW64 目录 或 \Windows\System32\wow64.dll → 64 位家族
+ *      （SysWOW64 只在 64 位 Windows 存在）；
+ *   ② 读一个小文件的 PE Machine 定死具体位数 —— 顺序按【从小到大】：
+ *      smss.exe(~130 KB) → wininit.exe → ntdll.dll → ntoskrnl.exe(7 MB)，
+ *      0x014c=x86 0x8664=x64 0xAA64=arm64 0x01c4=arm；
+ *   ③ 都判不出 → out 置空串（调用方再试介质级信号 / XML），绝不猜。
+ * ★ PE 头的位置不能按"读前 512 字节"找：真 ntoskrnl 的 e_lfanew=0x280，
+ *   512 字节窗口看不到 PE 签名 → 以前所有 32 位映像都悄悄退回 XML（REQ-22 的根因）。
+ *   现在先读 4 KB，越界就按 e_lfanew 补读。
+ * ★ 写在 reason 里的是"凭什么"，直接透给宿主（arch_source）。*/
+static int pe_machine_of(const char *path, uint16_t *mach, char *why, size_t whycap){
+    unsigned char hdr[4096];
+    FILE *f=fopen(path,"rb");
+    if(!f){ if(why) snprintf(why,whycap,"打不开临时文件"); return IMG_ENOENT; }
+    size_t got=fread(hdr,1,sizeof hdr,f);
+    if(got<0x40 || hdr[0]!='M' || hdr[1]!='Z'){
+        fclose(f); if(why) snprintf(why,whycap,"不是 MZ（%zu 字节）",got); return IMG_EFORMAT;
+    }
+    uint32_t lfanew=(uint32_t)hdr[0x3c]|((uint32_t)hdr[0x3d]<<8)
+                   |((uint32_t)hdr[0x3e]<<16)|((uint32_t)hdr[0x3f]<<24);
+    unsigned char pe[8];
+    if((size_t)lfanew+8 <= got) memcpy(pe,hdr+lfanew,8);
+    else {
+        if(fseeko(f,(off_t)lfanew,SEEK_SET)!=0 || fread(pe,1,8,f)!=8){
+            fclose(f); if(why) snprintf(why,whycap,"PE 头在 0x%x，读不到",lfanew); return IMG_EFORMAT;
+        }
+    }
+    fclose(f);
+    if(memcmp(pe,"PE\0\0",4)!=0){ if(why) snprintf(why,whycap,"PE 签名不对（0x%x 处）",lfanew); return IMG_EFORMAT; }
+    *mach=(uint16_t)((unsigned)pe[4]|((unsigned)pe[5]<<8));
+    return IMG_OK;
+}
+static const char *arch_of_machine(uint16_t m){
+    switch(m){
+        case 0x014c: return "x86";
+        case 0x8664: return "x64";
+        case 0xAA64: return "arm64";
+        case 0x01c4: return "arm";
+        default:     return NULL;
+    }
+}
+static const char *base_of(const char *p){
+    const char *s=strrchr(p,'/');
+    return s?s+1:p;
+}
+
+int img_wim_probe_arch(const char *wim_path, int index, char *out, size_t cap,
+                       char *src, size_t srccap, char *why, size_t whycap){
+    if(out && cap) out[0]=0;
+    if(src && srccap) src[0]=0;
+    if(why && whycap) why[0]=0;
+
+    /* ① 64 位家族（最省事，两次 stat，不抽任何文件）*/
+    img_wim_stat_t st; char e[256]="";
+    bool fam64=false;
+    if(img_wim_stat(wim_path,index,"/Windows/SysWOW64",&st,e,sizeof e)==IMG_OK && st.is_dir){
+        fam64=true; if(src) snprintf(src,srccap,"syswow64");
+    } else if(img_wim_stat(wim_path,index,"/Windows/System32/wow64.dll",&st,e,sizeof e)==IMG_OK && !st.is_dir){
+        fam64=true; if(src) snprintf(src,srccap,"wow64");
+    }
+
+    /* ② 小文件优先定死具体位数 */
+    static const char *cand[]={
+        "/Windows/System32/smss.exe",      /* ~130 KB，最省 */
+        "/Windows/System32/wininit.exe",   /* ~120 KB */
+        "/Windows/System32/ntdll.dll",     /* ~1.9 MB */
+        "/Windows/System32/ntoskrnl.exe",  /* ~7 MB，最后 */
+    };
+    const char *td=img_tmpdir();
+    if(!td){ if(why) snprintf(why,whycap,"没有可写临时目录"); return IMG_ENOTSUP; }
+    int last_rc=IMG_ENOENT;
+    for(size_t i=0;i<sizeof cand/sizeof cand[0];i++){
+        if(img_wim_stat(wim_path,index,cand[i],&st,e,sizeof e)!=IMG_OK || st.is_dir) continue;
+        char tmp[528];
+        snprintf(tmp,sizeof tmp,"%s/imgarchXXXXXX",td);
+        int fd=mkstemp(tmp);
+        if(fd<0){ if(why) snprintf(why,whycap,"建不了临时文件"); return IMG_EIO; }
+        close(fd);
+        uint64_t nb=0;
+        char e2[256]="";
+        int rc=img_wim_extract_file(wim_path,index,cand[i],tmp,NULL,&nb,e2,sizeof e2);
+        if(rc!=IMG_OK){ unlink(tmp); last_rc=rc; continue; }
+        uint16_t m=0; char w2[200]="";
+        int prc=pe_machine_of(tmp,&m,w2,sizeof w2);
+        unlink(tmp);
+        if(prc!=IMG_OK){ last_rc=prc; continue; }
+        const char *a=arch_of_machine(m);
+        if(!a){ last_rc=IMG_EFORMAT; if(why) snprintf(why,whycap,"PE Machine=0x%04x 不认识",m); continue; }
+        if(out) snprintf(out,cap,"%s",a);
+        if(src){ snprintf(src,srccap,"pe:%s",base_of(cand[i])); }
+        if(why) snprintf(why,whycap,"%s 的 PE Machine=0x%04x",base_of(cand[i]),m);
+        return IMG_OK;
+    }
+    /* ③ 只判出"64 位家族"（有 SysWOW64 / wow64.dll），但没有可读的系统文件定死 x64/arm64：
+     *   按 x64 处理（arm64 的 Windows 极罕见，而且它也有 SysWOW64 —— 只是没法再细分）。
+     *   arch_source 会写成 syswow64/wow64，宿主想严格就自己判。*/
+    if(fam64){
+        if(out) snprintf(out,cap,"x64");
+        if(why) snprintf(why,whycap,"%s：64 位家族（未能细分 x64/arm64，按 x64）",
+                         (src&&src[0])?src:"SysWOW64/wow64.dll");
+        return IMG_OK;
+    }
+    if(why) snprintf(why,whycap,"内容判不出（%s）",e[0]?e:"没有可用的系统文件");
+    return last_rc;
+}
+
+/* ---------- 这个 WIM 本身是不是一份 WinRE 映像（REQ-24/25）----------
+ * 判据：映像根下【没有 \Windows 目录】。Windows 安装映像的根一定有 Windows\；
+ *   WinRE 映像的根是 \WindowsRE、\$WinREAgent 之类。
+ * 只看根的一层（不递归），几毫秒。*/
+typedef struct { bool has_windows; } ws_ctx;
+static int ws_cb(const struct wimlib_dir_entry *d, void *ud){
+    ws_ctx *c=(ws_ctx*)ud;
+    if(!d || !d->full_path) return 0;
+    /* 只认【根下的第一层】叫 Windows 的那一项（/Windows、\Windows）：
+     *   \Windows\System32 这种更深的不算（它们是 WinRE 里没有的，但要防构造映像）*/
+    const char *p=d->full_path;
+    while(*p=='\\'||*p=='/') p++;
+    if(!strncasecmp(p,"Windows",7)){
+        const char *q=p+7;
+        if(*q==0 || *q=='\\' || *q=='/') c->has_windows=true;
+    }
+    return 0;
+}
+int img_wim_is_winre_self(const char *wim_path, bool *out_self, char *why, size_t whycap){
+    if(out_self) *out_self=false;
+    if(why && whycap) why[0]=0;
+    if(!wim_path) return IMG_EINVAL;
+    WIMStruct *w=NULL;
+    if(wimlib_open_wim(wim_path,0,&w)!=0){ if(why&&whycap) snprintf(why,whycap,"WIM 打不开"); return IMG_ENOENT; }
+    ws_ctx c={false};
+    /* ★ 必须带 RECURSIVE：flags=0 时 wimlib 只回调根节点本身，看不到子项 ——
+     *   那样任何映像都会被判成"根下没有 Windows"= self（踩过：WinPE 的 boot.wim 被当 payload）。*/
+    wimlib_iterate_dir_tree(w,1,"/",WIMLIB_ITERATE_DIR_TREE_FLAG_RECURSIVE,ws_cb,&c);
+    wimlib_free(w);
+    if(out_self) *out_self=!c.has_windows;
+    if(why && whycap) snprintf(why,whycap,c.has_windows?"根下有 \\Windows（是安装映像）":"根下没有 \\Windows（是 WinRE 映像）");
+    return IMG_OK;
+}
+/* ================= 流式取文件（REQ-29）=================
+ * wimlib 的 WIMLIB_EXTRACT_FLAG_TO_STDOUT：解码（含 LZMS/solid）由它做，字节从 fd 1 出来。
+ * 于是"从 WIM/ESD/ISO 里取一个文件"不必先落临时目录。
+ *
+ * ★★ 三条实测出来的硬约束（别改回去，会死锁/报错）★★
+ *   1. TO_STDOUT 必须配一个【存在的目录】当 target：传 NULL → WIMLIB_ERR_INVALID_PARAM(24)；
+ *   2. wimlib 只能在【调用线程】里跑：放到 pthread 里再让别的线程读 pipe，双方一起卡死
+ *      （单线程 + 外部 `| cat` 正常，线程 + 普通文件也正常 —— 就是"线程 + pipe"死锁）；
+ *   3. 于是消费者（读 pipe 的那一方）放到辅助线程：wimlib 在主调线程写，辅助线程读。
+ *
+ * ★ fd 1 是进程全局的：改道期间把日志/进度切到 dup 出来的真 stdout，
+ *   否则那几行输出会混进字节流，解出来的文件就是坏的。*/
+typedef struct {
+    const char *wim, *inner;
+    int         index;
+    img_wim_consume_fn consume;
+    void       *ud;
+    uint64_t    size;
+    int         rc;
+    char       *err;
+    size_t      errcap;
+} wcons_t;
+
+static enum wimlib_progress_status wcons_prog(enum wimlib_progress_msg msg,
+                                             union wimlib_progress_info *info, void *ctx){
+    img_prog *pg=(img_prog*)ctx;
+    if(msg==WIMLIB_PROGRESS_MSG_EXTRACT_STREAMS && pg && info)
+        img_prog_bytes(pg, info->extract.completed_bytes, info->extract.total_bytes);
+    return img_cancelled()?WIMLIB_PROGRESS_STATUS_ABORT:WIMLIB_PROGRESS_STATUS_CONTINUE;
+}
+
+static void *wcons_thread(void *ud){
+    wcons_t *c=(wcons_t*)ud;
+    int fd=c->index;                      /* 复用字段：管道读端 */
+    c->rc=c->consume(c->ud,fd,c->size,
+                     (c->err && c->errcap && !c->err[0])?c->err:NULL,
+                     (c->err && c->errcap && !c->err[0])?c->errcap:0);
+    if(fd>=0) close(fd);
+    return NULL;
+}
+
+int img_wim_stream_consume(const char *wim_path,int index,const char *inner_path,
+                           img_wim_consume_fn consume, void *ud,
+                           uint64_t *out_size, img_prog *prog,
+                           char *err, size_t errcap){
+    if(err && errcap) err[0]=0;
+    if(out_size) *out_size=0;
+    if(!wim_path||!inner_path||!consume) return IMG_EINVAL;
+    if(inner_path[0]!='/'){ if(err&&errcap) snprintf(err,errcap,"WIM 内路径必须以 / 开头"); return IMG_EINVAL; }
+    img_wim_stat_t st; memset(&st,0,sizeof st);
+    int rc=img_wim_stat(wim_path,index,inner_path,&st,err,errcap);
+    if(rc!=IMG_OK) return rc;
+    if(st.is_dir){ if(err&&errcap) snprintf(err,errcap,"这是目录：%s（流式只支持单个文件）",inner_path); return IMG_ENOTSUP; }
+
+    openwim o; rc=open_checked(wim_path,index,&o,err,errcap);
+    if(rc!=IMG_OK) return rc;
+    wimlib_register_progress_function(o.w,wcons_prog,prog);
+
+    int fds[2];
+    if(pipe(fds)!=0){ wimlib_free(o.w); if(err&&errcap) snprintf(err,errcap,"建管道失败：%s",strerror(errno)); return IMG_EIO; }
+
+#ifdef F_SETPIPE_SZ
+    /* 管道默认 64 KB：1 MB 一块地来回倒，系统调用太多（真机 338 MB 差 ~2 倍）。
+     * 放大到 1 MB 只影响吞吐，不改变语义。*/
+    if(fcntl(fds[1],F_SETPIPE_SZ,1<<20)<0){ /* 不许改就算了 */ }
+#endif
+    wcons_t c; memset(&c,0,sizeof c);
+    c.wim=wim_path; c.inner=inner_path; c.index=fds[0];   /* 复用字段：读端 fd */
+    c.consume=consume; c.ud=ud; c.size=st.size_bytes;
+    c.err=err; c.errcap=errcap; c.rc=IMG_OK;
+    pthread_t th; bool th_on=false;
+    if(pthread_create(&th,NULL,wcons_thread,&c)!=0){
+        close(fds[0]); close(fds[1]); wimlib_free(o.w);
+        if(err&&errcap) snprintf(err,errcap,"建消费线程失败");
+        return IMG_ESTATE;
+    }
+    th_on=true;
+
+    /* 消费侧提前退出（写盘失败/取消）时，wimlib 继续写管道会 EPIPE ——
+     * 不忽略 SIGPIPE 的话整个进程直接被杀（App 里就是"闪退"）。*/
+    struct sigaction sa_new, sa_old;
+    memset(&sa_new,0,sizeof sa_new);
+    sa_new.sa_handler=SIG_IGN;
+    sigaction(SIGPIPE,&sa_new,&sa_old);
+
+    /* 本线程跑 wimlib（约束 ②）；fd 1 临时改成管道写端 */
+    int saved=dup(1);
+    int logfd=img_log_out_fd();
+    if(saved>=0 && logfd==1) img_log_set_out_fd(saved);
+    if(dup2(fds[1],1)<0){
+        rc=IMG_EIO;
+        if(err&&errcap&&!err[0]) snprintf(err,errcap,"管道重定向失败：%s",strerror(errno));
+    } else {
+        close(fds[1]);
+        const char *tdir=img_tmpdir();
+        const wimlib_tchar *paths[1]={ (const wimlib_tchar*)inner_path };
+        int wrc=wimlib_extract_paths(o.w,index,
+                    (const wimlib_tchar*)(tdir&&tdir[0]?tdir:"."),paths,1,
+                    WIMLIB_EXTRACT_FLAG_TO_STDOUT|WIMLIB_EXTRACT_FLAG_NO_ACLS);
+        if(wrc!=0){
+            rc=IMG_EIO;
+            if(err&&errcap&&!err[0]) snprintf(err,errcap,"抽取失败：%s",wim_rc_str(wrc));
+        }
+        dup2(saved,1);                    /* 还原（顺带关掉写端 → 消费线程看到 EOF）*/
+    }
+    if(saved>=0) close(saved);
+    if(logfd==1) img_log_set_out_fd(1);
+    wimlib_free(o.w);
+    if(th_on) pthread_join(th,NULL);
+    sigaction(SIGPIPE,&sa_old,NULL);
+    if(rc==IMG_OK && c.rc!=IMG_OK) rc=c.rc;   /* 消费侧的错误优先报（更像人话）*/
+    if(rc==IMG_OK && out_size) *out_size=st.size_bytes;
+    return rc;
+}
+
 #endif /* IMG_WITH_WIM */
+
+#if !IMG_WITH_WIM
+int img_wim_stream_consume(const char *wim_path,int index,const char *inner_path,
+                           img_wim_consume_fn consume, void *ud, uint64_t *out_size,
+                           img_prog *prog, char *err, size_t errcap){
+    (void)wim_path;(void)index;(void)inner_path;(void)consume;(void)ud;(void)prog;
+    if(out_size) *out_size=0;
+    if(err&&errcap) snprintf(err,errcap,"本构建未启用 WIM/ESD（IMG_WITH_WIM=OFF）");
+    return IMG_ENOTSUP;
+}
+#endif
