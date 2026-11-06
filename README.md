@@ -40,13 +40,19 @@ Windows 引导（MBR 码 / VBR 码 / BCD / bootmgr / bootmgfw.efi / WinRE）。
 | 可选依赖 | 打开的命令 | 关闭方式 |
 |---|---|---|
 | `libntfs-3g` | 全部 NTFS 读写 | `-DIMG_WITH_NTFS3G=OFF` |
-| `ntfsprogs`（mkntfs） | NTFS 格式化 | `-DIMG_WITH_NTFS=OFF`（默认 OFF，GPL 相关，见「许可」） |
+| `ntfsprogs`（mkntfs） | NTFS 格式化 | 默认就是 OFF；要开 `-DIMG_WITH_NTFS=ON`，且先跑 `tools/build-mkntfs-obj.sh` 生成目标文件（GPL 相关，见「许可」） |
 | `wimlib` | `wim.*` | `-DIMG_WITH_WIM=OFF` |
 | `libarchive` | `archive.*`（zip/7z/tar） | `-DIMG_WITH_ARCHIVE=OFF` |
 | `libhivex` | BCD / 注册表 hive | 自动检测 |
 | 内置 unrar | `archive.*` 读 RAR | `-DIMG_WITH_RAR=OFF` |
 
 ```bash
+# 最省事的构建：不带 GPL 的 mkntfs
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
+
+# 需要 NTFS 格式化时：先生成 mkntfs 目标文件，再打开开关
+tools/build-mkntfs-obj.sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DIMG_WITH_NTFS=ON
 cmake --build build -j"$(nproc)"
 ```
@@ -408,15 +414,14 @@ LICENSES/   许可证全文
 
 ## 许可
 
-本仓库自有代码以 **GPL-2.0-or-later** 分发：因为默认构建可以带 `mkntfs`
-（GPL-2.0+），而它是静态链进来的。如果你要 GPL 之外的口径，
-用 `-DIMG_WITH_NTFS=OFF` 构建，只保留 LGPL / BSD / Zlib 部分。
-
+- **默认构建**（`IMG_WITH_NTFS=OFF`）不含 GPL 代码，只含本项目自有代码 +
+  LGPL / BSD / Zlib 组件。
+- **打开 `-DIMG_WITH_NTFS=ON`**（把 GPL-2.0+ 的 `mkntfs` 静态链进来）后，
+  产物整体须按 **GPL-2.0-or-later** 分发，并同时提供完整对应源码。
 - 完整许可证文本：`LICENSES/`
   - `GPL-2.0.txt` / `LGPL-2.1.txt` / `Apache-2.0.txt` / `BSD-3-Clause.txt`
   - `MIT.txt` / `Zlib.txt` / `UnRAR.txt`
 - 逐项版权与修改说明：`THIRD_PARTY.md`
 - 对本仓库内第三方代码的任何修改，都记在对应文件头与提交信息里。
-- **LGPL 组件的义务**：`libntfs-3g` / `wimlib` / `hivex` 是动态链接的
-  （静态构建成 `.so` 时同样遵守 LGPL：需提供重新链接的手段 —— 源码在本仓库，
-  用户可自行重编）。
+- **LGPL 组件的义务**：`libntfs-3g` / `wimlib` / `hivex` 在本仓库以动态链接为主；
+  若静态编进 `.so`，同样须提供"可重新链接"的手段 —— 源码与构建脚本都在本仓库。
