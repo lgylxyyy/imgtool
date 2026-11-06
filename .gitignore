@@ -39,3 +39,7 @@ __pycache__/
 
 # 本地验证现场（不入手）
 .tmp/
+
+# 构建目录（本目录下的 build 是指向本机构建产物的软链，不入库）
+build
+LICENSES/*.txt.bak

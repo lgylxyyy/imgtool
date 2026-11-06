@@ -1,104 +1,101 @@
-# 第三方开源组件清单 / Third-Party Notices
+# 第三方组件与版权声明 / Third-Party Notices
 
-> 本文件列出 Icdqcow2（工具库 + Android 应用）用到的所有开源项目。
-> 按「运行时依赖 / 构建与测试 / 参考实现 / 前端素材」分类。
-> 最后更新：阶段 2b（NTFS 集成规划）
+本文件列出 `imgtool` 使用或链接的第三方代码、对应许可证，以及本项目对其所做的修改。
+许可证全文在 `LICENSES/`。**本项目自身**的许可口径见 `README.md` 末尾「许可」一节。
 
----
-
-## 一、运行时依赖（会打进产物）
-
-### 工具库 `imgtool`
-
-| 组件 | 许可证 | 用途 | 链接 |
-|---|---|---|---|
-| **zlib** | zlib License | qcow2 压缩簇解码（inflate raw） | https://zlib.net / https://github.com/madler/zlib |
-| **libntfs-3g** | **LGPL-2.1+** | NTFS 读写核心（`ntfs_device` 抽象可插拔） | https://github.com/tuxera/ntfs-3g |
-| **ntfsprogs (mkntfs)** | **GPL-2.0-or-later** | NTFS 格式化器（作为**可选模块** `-DIMG_WITH_NTFS=ON/OFF`） | https://github.com/tuxera/ntfs-3g/tree/master/ntfsprogs |
-| **libregf**（规划中） | LGPL-3.0 | Windows BCD（registry hive）读写 | https://github.com/libyal/libregf |
-| **exfatprogs**（规划中） | GPL-2.0 | exFAT 格式化（若自研失败的备选） | https://github.com/exfatprogs/exfatprogs |
-| **libhivex** | **LGPL-2.1+** | BCD（注册表 hive）读写；已处理校验/cell分配/次序号自增 | https://github.com/libguestfs/hivex |
-
-> ⚠️ **许可证提示**：`mkntfs` 为 GPL-2.0+，启用该模块时 `imgtool` 整体须以 GPL-2.0-or-later 发布。
-> 已设计为**可选编译开关**，关闭后其余部分不带 GPL 代码。
-
-### Android 应用（规划）
-
-| 组件 | 许可证 | 用途 | 链接 |
-|---|---|---|---|
-| **miuix** | Apache-2.0 | UI 设计风格参考 / 组件库 | https://github.com/miuix-tech/miuix |
-| **NP 管理器**（参考） | 开源 | 双窗口 / 分栏 / 跨窗拖拽交互参考 | 搜索 "NP Manager" |
-| **Microsoft Fluent UI System Icons** | MIT | 应用与文件图标 | https://github.com/microsoft/fluentui-system-icons |
-| **HaydenReeve/WindowsIcons** | 参见其仓库 | Windows 风格文件图标 | https://github.com/HaydenReeve/WindowsIcons |
-| **MicaUI/WindowsIconCustomization** | 参见其仓库 | Win11 图标风格 | https://github.com/MicaUI/WindowsIconCustomization |
-| **jinghu-moon/win-icon-extractor** | 参见其仓库 | 提取 `.exe` 内嵌图标 | https://github.com/jinghu-moon/win-icon-extractor |
+最后核对：2026-11-06（`imgcmd --list` 报告 features = wimlib / ntfs3g / zlib / mkntfs 全开）
 
 ---
 
-## 二、构建与测试工具（开发期，不进产物）
+## 一、会被链接进产物的组件
+
+### 1. zlib
+
+- 许可证：**Zlib**（`LICENSES/Zlib.txt`）
+- 用途：qcow2 压缩簇的 deflate 解压/压缩
+- 修改：无。使用系统 `libz`，`find_package(ZLIB)` 探测，缺失则 `IMG_WITH_ZLIB=0`。
+- 版权：Copyright (C) 1995-2024 Jean-loup Gailly and Mark Adler
+
+### 2. libntfs-3g
+
+- 许可证：**LGPL-2.1-or-later**（`LICENSES/LGPL-2.1.txt`）
+- 用途：NTFS 卷的读写（目录项、MFT、属性、压缩文件、稀疏文件）
+- 链接方式：动态链接（Android 上静态编入 `libimgtool.so`，源码可自行重编）
+- 修改：无。只通过公开头 `ntfs-3g` API 与 `ntfs_device` 抽象接入；
+  本项目的 `img_ntfs_dev.c` 提供自定义 `ntfs_device`（在 qcow2 扇区上模拟块设备），
+  该文件是本项目自有代码，不属于 ntfs-3g。
+- 版权：Copyright (C) 2001-2024 Anton Altaparmakov, Szabolcs Szakacsits, Tuxera Inc.
+
+### 3. ntfsprogs / mkntfs（可选，默认关闭）
+
+- 许可证：**GPL-2.0-or-later**（`LICENSES/GPL-2.0.txt`）
+- 用途：NTFS 格式化（`fs.format --fs=ntfs`）
+- 开关：`-DIMG_WITH_NTFS=OFF`（默认 OFF）。**打开后整个产物须按 GPL-2.0-or-later 分发。**
+- 构建方式：`tools/build-mkntfs-obj.sh` 把 `mkntfs` 的目标文件重建成一个可重定位对象，
+  再由本项目链接（见该脚本头部注释）。
+- 修改：为可重定位链接做了符号/入口调整，改动记录在该脚本与提交信息中。
+- 版权：Copyright (C) 2002-2024 Anton Altaparmakov, Richard Russon, Szabolcs Szakacsits 等
+
+### 4. wimlib
+
+- 许可证：**LGPL-2.1-or-later**
+- 用途：WIM/ESD 解析与解压（`wim.ls` / `wim.apply` / `wim.extract`）
+- 链接方式：动态链接；缺失则 `wim.*` 全部降级为 `FEATURE-UNAVAILABLE`
+- 修改：无
+- 版权：Copyright (C) 2012-2024 Eric Biggers
+
+### 5. libarchive（可选）
+
+- 许可证：**BSD-2-Clause / BSD-3-Clause**（`LICENSES/BSD-3-Clause.txt`）
+- 用途：zip / 7z / tar 的只读浏览与解压
+- 修改：无
+- 版权：Copyright (C) 2003-2024 Tim Kientzle 等
+
+### 6. hivex（可选）
+
+- 许可证：**LGPL-2.1-or-later**
+- 用途：读写 Windows 注册表 hive —— BCD 就是一个 hive
+- 修改：无
+- 版权：Copyright (C) 2009-2024 Richard W.M. Jones（Red Hat Inc.）
+
+### 7. UnRAR（源码内置于 `third_party/unrar/`）
+
+- 许可证：**UnRAR 自由软件许可**（`LICENSES/UnRAR.txt`，原文随源码在 `third_party/unrar/license.txt`）
+- 用途：只读打开 RAR（含 RAR5 / 固实包 / 中文名）
+- 限制：**不得用其源码开发 RAR 兼容压缩器，也不得重建 RAR 压缩算法**。
+  本项目只做解压，不做压缩。
+- 修改：仅裁剪（去掉命令行/UI 部分），解码逻辑未改。
+- 版权：Copyright (C) 1993-2024 Alexander Roshal
+
+---
+
+## 二、只在开发/验证期使用（不进产物）
 
 | 组件 | 许可证 | 用途 |
 |---|---|---|
-| **CMake** | BSD-3-Clause | 跨平台构建（PC + Android NDK 共用一份配置） |
-| **GCC / clang** | GPL-3.0+（运行时例外） | C11 编译，`-Wall -Wextra -Wpedantic` 零警告 |
-| **QEMU** | GPL-2.0 | `qemu-img check/convert` 校验 + 实机启动验证 |
-| **gptfdisk (sgdisk)** | GPL-2.0 | GPT 独立第三方校验（`--verify` `--cross-check`） |
-| **util-linux (fdisk)** | GPL-2.0+ | MBR 独立校验 |
-| **mtools** | GPL-2.0+ | FAT32 独立读写验证（`mdir`/`mcopy`/`minfo`） |
-| **ntfs-3g (ntfsinfo/ntfsls/ntfscp)** | GPL-2.0+ / LGPL | NTFS 独立校验与读写验证 |
-| **wimlib** | GPL-3.0 | WIM/ESD 解析验证、镜像信息读取 |
-| **p7zip / 7z** | LGPL-2.1 | ISO/Udf 解包 |
-| **libarchive (bsdtar)** | BSD-3-Clause | ISO 读取 |
-| **PyYAML** | MIT | SKILL.md 与配置校验 |
-| **git** | GPL-2.0 | 版本管理 |
-| **GitHub CLI (`gh`)** | MIT | 只读检索 GitHub（配合 Skill 使用） |
-| **jq** | MIT | JSON 处理 |
+| CMake | BSD-3-Clause | 构建 |
+| GCC / clang | GPL-3.0+（含运行时例外） | 编译 |
+| QEMU（`qemu-img check`） | GPL-2.0 | qcow2 结构独立校验 |
+| gptfdisk（`sgdisk -v`） | GPL-2.0 | GPT 独立校验 |
+| util-linux（`fdisk`） | GPL-2.0+ | MBR 独立校验 |
+| mtools（`mdir`/`mcopy`） | GPL-2.0+ | FAT32 独立校验 |
+| ntfs-3g 工具（`ntfsls`/`ntfscp`） | GPL-2.0+ / LGPL-2.1+ | NTFS 独立校验 |
+| 7-Zip CLI | LGPL-2.1 | 归档交叉验证 |
+| Python 3 | PSF-2.0 | 测试脚本 |
 
----
+## 三、规范与参考（未链接代码）
 
-## 三、参考实现 / 规范来源（不链接，仅参考思想）
+| 来源 | 用途 |
+|---|---|
+| QEMU `docs/interop/qcow2.txt` | qcow2 格式权威定义 |
+| Microsoft FAT 规范（fatgen103） | FAT32 BPB / FSInfo / FAT 大小推算 |
+| UEFI Specification | GPT 结构、分区属性位 |
+| Microsoft Learn（分区/BCD 文档） | BIOS/MBR 与 UEFI/GPT 的分区要求、恢复分区 GUID |
 
-| 项目 | 许可证 | 我们从中学到什么 |
-|---|---|---|
-| **`qcow2-viewer`**（本工作区） | 自有 | 经 sha256 交叉验证的 qcow2/NTFS/GPT 读取实现，`imgtool` 的 C 代码由其翻译 |
-| **DiscUtils** | MIT | C# 的完整 NTFS 格式化逻辑（`NtfsFormatter.cs` 18KB），仅作**结构参考** |
-| **QEMU `docs/interop/qcow2.txt`** | Apache-2.0 | qcow2 格式权威规范 |
-| **Microsoft Learn** | MIT（文档） | 分区要求（BIOS/MBR、UEFI/GPT、恢复分区 GUID） |
-| **Microsoft FAT 规范 (fatgen103)** | 公开文档 | FAT32 BPB / FSInfo / 迭代算 FAT 大小 |
-| **UEFI Specification** | Fragment 许可 | GPT 结构、属性位定义 |
+## 四、修改与再分发提示
 
----
-
-## 四、Android 前端设计参考（仅参考，未链接代码）
-
-- **miuix** —— 界面风格与暗色模式
-- **NP 管理器** —— 双窗口布局、分栏、跨窗拖拽
-- **Fluent UI System Icons** —— 图标体系
-- **WindowsIcons / WindowsIconCustomization / win-icon-extractor** —— Windows 风格文件图标与 `.exe` 图标提取
-
----
-
-## 五、技能与工具链（Agent 工作流）
-
-| 组件 | 用途 | 链接 |
-|---|---|---|
-| **SkillHub** | Skill 商店 CLI（本环境安装） | https://skillhub.cn |
-| `@indiv-yaoyao/gh-cli-readonly-agent` | GitHub 只读检索技能 | 经 SkillHub 安装 |
-| `@indiv-seafish/code-review` | 代码审查 | 经 SkillHub 安装 |
-| `@clawhub_sf0799/code-refactor` | 重构 | 经 SkillHub 安装 |
-| `@user_d4c0944b/git-commit` | Conventional Commit | 经 SkillHub 安装 |
-
----
-
-## 许可证汇总
-
-| 许可证 | 涉及组件 | 对本项目的影响 |
-|---|---|---|
-| **GPL-2.0+** | mkntfs / ntfsprogs | ⚠️ 启用 NTFS 格式化模块时，imgtool 须以 GPL-2.0+ 发布（**可选开关关闭则不受影响**） |
-| **LGPL-3.0** | libregf | 动态链接即可 |
-| **MIT** | zlib / PyYAML / jq / gh / Fluent UI 等 | 仅需保留版权声明 |
-| **LGPL-2.1+** | libntfs-3g / **libhivex** | 动态链接即可，需保留版权声明 |
-| **BSD-3-Clause** | CMake / libarchive | 同上 |
-
-> 详细许可证文本与版权声明见各仓库 `LICENSE` / `COPYING` 文件。
-> 本项目对其它开源项目的**修改**会逐项记录在对应文件头与 Git 提交中。
+1. 本仓库对外分发时，`LICENSES/` 必须随附。
+2. 若你打开了 `-DIMG_WITH_NTFS=ON`，产物为 GPL-2.0-or-later，须同时提供源码。
+3. 若你修改了 `third_party/unrar/` 下的任何文件，必须保留原许可声明并注明改动。
+4. `reference/` 里的 `bcd-reference-*.bin`、`mbr-code-*.bin` 是**数据**（微软引导扇区/
+   BCD 二进制片段），不适用上述开源许可证；再分发前请自行确认合规。
