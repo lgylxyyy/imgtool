@@ -43,3 +43,7 @@ __pycache__/
 # 构建目录（本目录下的 build 是指向本机构建产物的软链，不入库）
 build
 LICENSES/*.txt.bak
+
+# ESP 引导件：微软二进制，不入库（见 reference/esp/README.md）
+reference/esp/*.efi
+reference/esp/*.EFI
