@@ -41,6 +41,29 @@ img_qcow2 *img_qcow2_open(img_io *io, const img_qcow2_opts_t *o){
     q->allow_zstd = o ? o->allow_zstd : false;
     q->cb = o ? o->cb : NULL; q->cb_ud = o ? o->cb_ud : NULL;
 
+    /* ★ P3（2026-11-09）：先探测格式。qcow2 / raw / vhd / vmdk 共用本类型。
+     *   raw 只需把 guest 偏移直通给 img_io —— 零额外结构。
+     *   VHD/VMDK 各自有自己的解析器（img_vhd.c / img_vmdk.c）。 */
+    q->fmt = img_diskfmt_probe(io);
+    if(q->fmt == DISK_FMT__COUNT){ free(q); return NULL; }
+
+    if(q->fmt == DISK_FMT_RAW){
+        q->raw_size = img_io_size(io);
+        q->h.magic  = 0;                  /* raw 没有 magic */
+        q->h.size   = q->raw_size;        /* guest 大小 == 文件大小 */
+        q->h.cluster_bits = 0;
+        q->h.cluster_size = 0;
+        q->writable = !q->read_only;
+        return q;                          /* raw 不需要任何解析 */
+    }
+    if(q->fmt == DISK_FMT_VHD || q->fmt == DISK_FMT_VMDK){
+        int vrc = img_fmt_open(q);         /* 见 img_vhd.c / img_vmdk.c */
+        if(vrc != IMG_OK){ free(q); return NULL; }
+        q->writable = !q->read_only;
+        return q;
+    }
+
+    /* ---- 以下是原 qcow2 路径 ---- */
     uint8_t hdr[112];
     memset(hdr,0,sizeof hdr);
     int rc = img_io_read_full(io, 0, hdr, 104);
@@ -124,12 +147,20 @@ void img_qcow2_close(img_qcow2 *q){
     free(q->l1); free(q->l2_cache); free(q);
 }
 const img_qcow2_header_t *img_qcow2_header(const img_qcow2 *q){ return q?&q->h:NULL; }
-uint64_t img_qcow2_size(const img_qcow2 *q){ return q?q->h.size:0; }
-
+uint64_t img_qcow2_size(const img_qcow2 *q){
+    if(!q) return 0;
+    /* ★ P3：raw = 宿主文件大小 */
+    if(q->fmt == DISK_FMT_RAW) return q->raw_size;
+    return q->h.size;
+}
 
 /* ---------- 一致性扫描（qc.verify / 写前自检） ---------- */
 int img_qcow2_scan(img_qcow2 *q, img_qcow2_scan_t *out){
     if(!q || !out || !q->io) return IMG_EINVAL;
+    if(q->fmt == DISK_FMT_RAW){   /* raw: 无 L1/L2 可扫，直接成功 */
+        memset(out,0,sizeof *out);
+        return IMG_OK;
+    }
     memset(out, 0, sizeof *out);
     uint64_t cs = q->h.cluster_size;
     if(!cs) return IMG_EFORMAT;
@@ -259,6 +290,10 @@ static int read_cluster(img_qcow2 *q, uint64_t abs, uint8_t *out){
 
 int img_qcow2_read(img_qcow2 *q, uint64_t off, void *buf, size_t len){
     if(!q||!buf) return IMG_EINVAL;
+    /* ★ P3：非 qcow2 格式走各自后端 */
+    if(q->fmt == DISK_FMT_RAW)  return img_raw_read(q, off, buf, len);
+    if(q->fmt == DISK_FMT_VHD || q->fmt == DISK_FMT_VMDK)
+        return img_fmt_read(q, off, buf, len);
     uint8_t *out = (uint8_t*)buf;
     memset(out, 0, len);                                    /* 稀疏/越界 = 0 */
     uint8_t *scratch = NULL;
@@ -303,6 +338,10 @@ int img_qcow2_read_full(img_qcow2 *q, uint64_t off, void *buf, size_t len){
 
 /* ---------- 紧凑另存用：这段 guest 区间有没有已分配的簇 ---------- */
 int img_qcow2_any_allocated(img_qcow2 *q, uint64_t off, uint64_t len, bool *any){
+    if(q->fmt == DISK_FMT_RAW){   /* raw: 区间在文件内就当已分配（没有稀疏位图） */
+        if(any) *any = (off < q->raw_size);
+        return IMG_OK;
+    }
     if(!q||!any) return IMG_EINVAL;
     *any=false;
     if(!len || off>=q->h.size) return IMG_OK;

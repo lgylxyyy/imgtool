@@ -127,7 +127,22 @@ static int detect_container(const char *path, int *type, char *why, size_t cap){
         close(fd); *type=CT_ISO; return IMG_OK;
     }
     close(fd);
-    setwhy2(why,cap,"不认识的容器（不是 qcow2 / ISO / WIM/ESD）：",path);
+    /* ★ P3（2026-11-09）：raw 磁盘（无魔数、无文件系统签名）。
+     *   判据：扩展名 .img/.raw/.dd/.bin 或 文件大小是 512 的整数倍且 >= 1MiB。
+     *   后者会误判一些随机文件，所以优先看扩展名；扩展名不认识时再看大小。 */
+    {
+        const char *ext = strrchr(path, '.');
+        bool raw_ext = ext && (!strcasecmp(ext,".img") || !strcasecmp(ext,".raw") ||
+                               !strcasecmp(ext,".dd")  || !strcasecmp(ext,".bin"));
+        uint64_t fsz = 0;
+        struct stat st;
+        if(stat(path, &st) == 0) fsz = (uint64_t)st.st_size;
+        if(raw_ext || (fsz >= (1ULL<<20) && fsz % 512 == 0)){
+            *type = CT_QCOW2;    /* 复用 CT_QCOW2：后续按分区处理，img_qcow2_open 内部探测格式 */
+            return IMG_OK;
+        }
+    }
+    setwhy2(why,cap,"不认识的容器（不是 qcow2 / raw / ISO / WIM/ESD）：",path);
     return IMG_EFORMAT;
 }
 

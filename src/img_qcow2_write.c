@@ -254,6 +254,8 @@ int img_qcow2_create(img_io *dest, const img_qcow2_create_opts_t *o){
 /* ------------------------------------------------------------------ */
 int img_qcow2_write_init(img_qcow2 *q){
     if(!q) return IMG_EINVAL;
+    /* ★ P3：raw 无 qcow2 结构（无 L1/L2/refcount），不需要准备 */
+    if(q->fmt == DISK_FMT_RAW) return IMG_OK;
     uint64_t cs = q->h.cluster_size;
     uint32_t rcb = q->refcount_bits ? q->refcount_bits : 16;
     q->refcount_bits = rcb;
@@ -296,6 +298,10 @@ int img_qcow2_write_init(img_qcow2 *q){
 /* 写 guest 空间                                                       */
 /* ------------------------------------------------------------------ */
 int img_qcow2_write(img_qcow2 *q, uint64_t off, const void *buf, size_t len){
+    /* ★ P3：非 qcow2 格式走各自后端 */
+    if(q && q->fmt == DISK_FMT_RAW) return img_raw_write(q, off, buf, len);
+    if(q && (q->fmt == DISK_FMT_VHD || q->fmt == DISK_FMT_VMDK))
+        return img_fmt_write(q, off, buf, len);
     if(!q||(!buf&&len)) return IMG_EINVAL;
     if(!q->writable) return IMG_ESTATE;
     /* ★ 宿主空间底线（默认开、不可关 —— 见 img_host.h）：
@@ -395,6 +401,14 @@ int img_qcow2_write(img_qcow2 *q, uint64_t off, const void *buf, size_t len){
 /* 扩大虚拟磁盘                                                        */
 /* ------------------------------------------------------------------ */
 int img_qcow2_expand(img_qcow2 *q, uint64_t new_size, img_prog *prog){
+    if(q && q->fmt == DISK_FMT_RAW){   /* raw: 扩容 = truncate 宿主文件 */
+        if(new_size < q->raw_size) return IMG_EINVAL;
+        int rc = img_io_truncate(q->io, new_size);
+        if(rc != IMG_OK) return rc;
+        q->raw_size = new_size;
+        q->h.size = new_size;
+        return IMG_OK;
+    }
     if(!q) return IMG_EINVAL;
     if(!q->writable) return IMG_ESTATE;
     if(new_size == q->h.size) return IMG_OK;           /* 同尺寸：幂等成功 */

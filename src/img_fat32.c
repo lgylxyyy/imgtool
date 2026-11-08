@@ -187,9 +187,20 @@ int img_fat32_format(img_qcow2 *q, const img_fat32_opts_t *o,
 
     /* ---- ③ 清零保留区其余部分 ---- */
     {
-        uint8_t z[512]; memset(z,0,512);
-        for(uint32_t s=2; s<L.reserved_sectors && s!=6 && s!=7; s++){
-            if((rc = img_qcow2_write(q, base + s*bps, z, 512)) != IMG_OK) return rc;
+        /* ★ P3（2026-11-09）：改成批量写。
+         *   原来是逐扇区 512 字节循环 —— qcow2 稀疏写很便宜，但 raw 每次都是真写磁盘，
+         *   大分区的 FAT 区几十万个扇区 → 看门狗直接 IO-TIMEOUT（实测踩到）。 */
+        enum { BLK = 64 };                        /* 一次 64 扇区 = 32KB */
+        uint8_t zbuf[512*BLK]; memset(zbuf,0,sizeof zbuf);
+        uint32_t s = 2;
+        while(s < L.reserved_sectors){
+            if(s == 6){ s++; continue; }
+            if(s == 7){ s++; continue; }
+            uint32_t run = 0;
+            while(s + run < L.reserved_sectors && s+run != 6 && s+run != 7 && run < BLK) run++;
+            if(!run) break;
+            if((rc = img_qcow2_write(q, base + (uint64_t)s*bps, zbuf, (size_t)run*bps)) != IMG_OK) return rc;
+            s += run;
         }
     }
 
@@ -206,11 +217,19 @@ int img_fat32_format(img_qcow2 *q, const img_fat32_opts_t *o,
         for(uint8_t f=0; f<L.num_fats; f++){
             uint64_t off = base + fat_off + (uint64_t)f*fat_bytes;
             if((rc = img_qcow2_write(q, off, head, 16)) != IMG_OK) return rc;
-            /* 其余清零（稀疏区域天然为0，这里显式写以免读回不一致）*/
-            uint8_t z[512]; memset(z,0,512);
-            for(uint64_t s=1; s<L.fat_size_sectors; s++){
-                if((rc = img_qcow2_write(q, off + s*bps, z, 512)) != IMG_OK) return rc;
+            /* 其余清零（批量写；理由同 ③：raw 上逐扇区写会超时）*/
+            enum { BLK = 64 };
+            uint8_t *zbuf = (uint8_t*)calloc(1, 512*BLK);
+            if(!zbuf) return IMG_ENOMEM;
+            for(uint64_t s=1; s<L.fat_size_sectors; ){
+                uint64_t run = L.fat_size_sectors - s;
+                if(run > BLK) run = BLK;
+                if((rc = img_qcow2_write(q, off + s*bps, zbuf, (size_t)run*bps)) != IMG_OK){
+                    free(zbuf); return rc;
+                }
+                s += run;
             }
+            free(zbuf);
         }
     }
     if(prog) img_prog_count(prog, 3, 5);
