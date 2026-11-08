@@ -72,6 +72,26 @@ const char *img_op_name(img_op_t o){
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <sys/stat.h>        /* stat/lstat/S_ISDIR（P1-6 统一临时文件） */
+#include <sys/types.h>
+/* ---- P1-6（2026-11-08）：统一临时目录策略 ----
+ * 优先级：IMGTOOL_TMPDIR → TMPDIR → <镜像同目录>/.imgtool-tmp。
+ * ★ 不再回落 "."（以前会把 imgtool-src-* 等撒在手机任意目录）。
+ *   镜像同目录由 img_tmpdir_hint() 提供（命令层打开容器时填），
+ *   好处：同分区 rename 原子（archive 写端依赖），清理就是删一个目录。 */
+static char g_tmp_hint[1024];     /* 镜像同目录（命令层填） */
+static bool g_tmp_hint_done;
+void img_tmpdir_hint(const char *dir){
+    if(dir && *dir){ snprintf(g_tmp_hint,sizeof g_tmp_hint,"%s",dir); g_tmp_hint_done=true; }
+    else { g_tmp_hint[0]=0; g_tmp_hint_done=false; }
+}
+static int mk_ok(const char *d){
+    /* 能写能进；并且真建一下（hint 目录可能还不存在） */
+    if(!d||!*d) return 0;
+    if(access(d,F_OK)!=0){ if(mkdir(d,0755)!=0) return 0; }
+    return access(d,W_OK|X_OK)==0;
+}
+static void host_rm_rf_dir(const char *path);   /* 见文件尾（P1-6） */
 const char *img_tmpdir(void){
     static char cached[512];
     if(cached[0]) return cached;
@@ -79,15 +99,22 @@ const char *img_tmpdir(void){
     const char *e1 = getenv("IMGTOOL_TMPDIR"), *e2 = getenv("TMPDIR");
     if(e1 && *e1) cand[nc++] = e1;
     if(e2 && *e2) cand[nc++] = e2;
+    /* 镜像同目录/.imgtool-tmp：hint 给了才试 */
+    static char hintdir[1152];
+    if(g_tmp_hint_done && g_tmp_hint[0]){
+        size_t L=strlen(g_tmp_hint);
+        while(L && g_tmp_hint[L-1]=='/') L--;
+        snprintf(hintdir,sizeof hintdir,"%.*s/.imgtool-tmp",(int)L,g_tmp_hint);
+        cand[nc++] = hintdir;
+    }
     cand[nc++] = "/tmp";
-    cand[nc++] = ".";
     for(int i = 0; i < nc; i++){
         size_t L = strlen(cand[i]);
-        while(L && cand[i][L-1] == '/') L--;          /* 去掉尾巴上的 /，免得拼出 // */
-        if(!L) L = 1;                                  /* 根目录本身 */
+        while(L && cand[i][L-1] == '/') L--;
+        if(!L) continue;
         if(L >= sizeof cached - 16) continue;
         memcpy(cached, cand[i], L); cached[L] = 0;
-        if(access(cached, W_OK | X_OK) == 0) return cached;
+        if(mk_ok(cached)) return cached;
         cached[0] = 0;
     }
     return NULL;
@@ -142,4 +169,137 @@ const char *img_dev_placeholder(void){
     close(fd);
     if(!g_dev_atexit_done){ atexit(dev_placeholder_cleanup); g_dev_atexit_done=true; }
     return g_devpath;
+}
+
+/* ---- P1-6：统一临时文件命名 + 清理 ------------------------------
+ * 文件：  imgtool-tmp-<用途>-<pid>-<n>
+ * 目录：  imgtool-tmp-<用途>-<pid>-XXXXXX（mkdtemp）
+ * atexit：删自己 pid 的 imgtool-tmp-*（文件与目录都收）。
+ * sweep：  调用方（App 启动 / 每条命令开头）清【已死 pid】的。 */
+/* imgtool-tmp-<purpose>-<pid>-<n> -> extract pid.
+ * Scan backwards for two dashes; the segment between them must be all digits.
+ * Purpose tokens contain dashes (iso-wim / pe-core / win-finish) - handled. */
+static bool tmp_name_pid(const char *name, long *pid){
+    if(strncmp(name,"imgtool-tmp-",12)) return false;
+    int len=(int)strlen(name);
+    int dash1=-1, dash2=-1;
+    for(int i=len-1;i>=12;i--){
+        if(name[i]!='-') continue;
+        if(dash1<0){ dash1=i; continue; }
+        dash2=i; break;
+    }
+    if(dash1<0||dash2<0) return false;
+    if(dash1-dash2<=1) return false;
+    long v=0;
+    for(int i=dash2+1;i<dash1;i++){
+        if(name[i]<'0'||name[i]>'9') return false;
+        v=v*10+(name[i]-'0');
+    }
+    *pid=v;
+    return true;
+}
+
+static int g_tmpseq;
+static bool g_tmp_atexit_done;
+
+static void tmp_atexit_cleanup(void){
+    const char *td = img_tmpdir();
+    if(!td) return;
+    DIR *d=opendir(td);
+    if(!d) return;
+    struct dirent *de;
+    char victim[1200];
+    while((de=readdir(d))){
+        long pid=0;
+        if(!tmp_name_pid(de->d_name,&pid)) continue;
+        if(pid!=(long)getpid()) continue;
+        snprintf(victim,sizeof victim,"%s/%s",td,de->d_name);
+        struct stat st;
+        if(stat(victim,&st)!=0) continue;
+        if(S_ISDIR(st.st_mode)) host_rm_rf_dir(victim);   /* 见下 */
+        else unlink(victim);
+    }
+    closedir(d);
+}
+
+const char *img_tmpfile(const char *purpose, char *out, size_t cap){
+    const char *td = img_tmpdir();
+    if(!td || !purpose || !*purpose || !out) return NULL;
+    for(int i=0;i<4096;i++){
+        snprintf(out,cap,"%s/imgtool-tmp-%s-%ld-%d",td,purpose,(long)getpid(),++g_tmpseq);
+        int fd=open(out,O_CREAT|O_EXCL|O_WRONLY,0600);
+        if(fd>=0){ close(fd); unlink(out);          /* 只是要个名字；调用方自己 open */
+                   if(!g_tmp_atexit_done){ atexit(tmp_atexit_cleanup); g_tmp_atexit_done=true; }
+                   return out; }
+        if(errno!=EEXIST) return NULL;
+    }
+    return NULL;
+}
+int img_tmpfile_dir(const char *purpose, char *out, size_t cap){
+    const char *td = img_tmpdir();
+    if(!td || !purpose || !*purpose || !out) return IMG_EINVAL;
+    char tmpl[1200];
+    snprintf(tmpl,sizeof tmpl,"%s/imgtool-tmp-%s-%ld-XXXXXX",td,purpose,(long)getpid());
+    if(!mkdtemp(tmpl)) return IMG_EIO;
+    snprintf(out,cap,"%s",tmpl);
+    if(!g_tmp_atexit_done){ atexit(tmp_atexit_cleanup); g_tmp_atexit_done=true; }
+    return IMG_OK;
+}
+
+/* 递归删目录（img_types.c 里自己带一份，host_rm_rf 在 xcopy 是 static 的） */
+static void host_rm_rf_dir(const char *path){
+    DIR *d=opendir(path);
+    if(!d){ unlink(path); return; }
+    struct dirent *de;
+    char sub[1200];
+    while((de=readdir(d))){
+        if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue;
+        snprintf(sub,sizeof sub,"%s/%s",path,de->d_name);
+        struct stat st;
+        if(lstat(sub,&st)!=0) continue;
+        if(S_ISDIR(st.st_mode)) host_rm_rf_dir(sub);
+        else unlink(sub);
+    }
+    closedir(d);
+    rmdir(path);
+}
+
+/* sweep 一次目录（内部共用） */
+static void tmp_sweep_one(const char *td){
+    if(!td || !*td) return;
+    DIR *d=opendir(td);
+    if(!d) return;
+    struct dirent *de;
+    char victim[1200];
+    while((de=readdir(d))){
+        long pid=0;
+        if(!tmp_name_pid(de->d_name,&pid)) continue;
+        if(pid==(long)getpid()) continue;
+        if(pid_is_alive(pid)) continue;        /* 别人的活进程不动 */
+        snprintf(victim,sizeof victim,"%s/%s",td,de->d_name);
+        struct stat st;
+        if(lstat(victim,&st)!=0) continue;
+        if(S_ISDIR(st.st_mode)) host_rm_rf_dir(victim);
+        else unlink(victim);
+    }
+    closedir(d);
+}
+/* ★ sweep 遍历【所有候选】而不是 img_tmpdir() 的缓存结果：
+ *   hint 在命令解析时才设置，而 img_tmpdir() 有 static 缓存——
+ *   第一条命令 sweep 时 hint 还没来。直接把每个可能的目录都扫一遍，
+ *   哪个目录里藏着死 pid 的 imgtool-tmp-* 都能收走。 */
+void img_tmpdir_sweep(void){
+    const char *cand[6]; int nc=0;
+    const char *e1=getenv("IMGTOOL_TMPDIR"), *e2=getenv("TMPDIR");
+    if(e1 && *e1) cand[nc++]=e1;
+    if(e2 && *e2) cand[nc++]=e2;
+    static char hintdir[1152];
+    if(g_tmp_hint[0]){
+        size_t L=strlen(g_tmp_hint);
+        while(L && g_tmp_hint[L-1]=='/') L--;
+        snprintf(hintdir,sizeof hintdir,"%.*s/.imgtool-tmp",(int)L,g_tmp_hint);
+        cand[nc++]=hintdir;
+    }
+    cand[nc++]="/tmp";
+    for(int i=0;i<nc;i++) tmp_sweep_one(cand[i]);
 }

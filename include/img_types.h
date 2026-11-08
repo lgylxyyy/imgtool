@@ -162,3 +162,22 @@ const char *img_tmpdir(void);
 const char *img_dev_placeholder(void);
 
 #endif
+
+/* ---- P1-6（2026-11-08）：统一临时文件 API ----------------------------
+ * 所有临时文件/目录一律走这两个入口，命名统一为：
+ *     imgtool-tmp-<用途>-<pid>-<序号>        （文件）
+ *     imgtool-tmp-<用途>-<pid>-XXXXXX       （mkdtemp 目录）
+ * 用途 token 一律 [a-z0-9-]+，由调用方给（"iso-wim"/"pe-core"/"aw"…）。
+ * 清理契约：
+ *   · 正常路径：调用方用完 unlink/rm_rf（img_tmpfile_open 的 fd 关闭即可）；
+ *   · 异常退出：atexit 兜底删自己 pid 的文件；
+ *   · App 启动：img_tmpdir_sweep() 清掉【已死 pid】留下的 imgtool-tmp-*。
+ *   （imgtool-dev-<pid> 占位设备文件保留旧名——它是按 pid 寿命设计的，语义不同。）
+ * 位置解析（img_tmpdir）：
+ *   IMGTOOL_TMPDIR → TMPDIR → <镜像同目录>/.imgtool-tmp → 拒绝 "." 兜底。
+ *   ★ 不再回落 "."（会把临时文件撒在手机任意目录）。镜像同目录由
+ *     img_tmpdir_hint() 设置（命令层在打开第一个容器时填）。 */
+const char *img_tmpfile(const char *purpose, char *out, size_t cap);
+int         img_tmpfile_dir(const char *purpose, char *out, size_t cap);   /* mkdtemp 目录 */
+void        img_tmpdir_hint(const char *dir);     /* 命令层填：镜像所在目录（可 NULL 清除） */
+void        img_tmpdir_sweep(void);               /* 清掉已死 pid 的 imgtool-tmp-* */

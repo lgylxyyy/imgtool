@@ -207,7 +207,7 @@ int img_win_version(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
     const char *tmp=getenv("IMGTOOL_TMPDIR"); if(!tmp||!*tmp) tmp=getenv("TMPDIR");
     if(!tmp||!*tmp){ const char *t2=img_tmpdir(); if(t2) tmp=t2; }
     char tf_sw[600];
-    snprintf(tf_sw,sizeof tf_sw,"%s/imgtool-software-%ld",tmp,(long)getpid());
+    img_tmpfile("pe-software",tf_sw,sizeof tf_sw);   /* P1-6 统一命名 */
 
     /* ★ 只挂载一次：把 SOFTWARE、4 个核心二进制、skus / servicing 目录都在这一次挂载里读完。
      *   分多次挂载会在"卷被标记脏"时第二次失败（实测某张盘就是这样丢掉内核版本的）。*/
@@ -230,7 +230,8 @@ int img_win_version(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
         cf[i][0]=0; csz[i]=0; chave[i]=0; cexist[i]=0;
         if(img_ntfs_path_exists(fs,core[i])!=true) continue;
         cexist[i]=1;
-        snprintf(cf[i],sizeof cf[i],"%s/imgtool-core-%d-%ld.bin",tmp,i,(long)getpid());
+        { char nm[64]; snprintf(nm,sizeof nm,"pe-core-%d",i);
+          img_tmpfile(nm,cf[i],sizeof cf[i]); }   /* P1-6 统一命名 */
         if(img_ntfs_copy_out(fs,core[i],cf[i],NULL,&csz[i])==IMG_OK &&
            csz[i]>0 && csz[i]<=64u*1024*1024) chave[i]=1;
         else { unlink(cf[i]); csz[i]=0; }

@@ -48,7 +48,8 @@ int img_win_finish(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes, bool dr
     /* SYSTEM hive 约 9 MB：先落到临时文件，hivex 只接受文件路径 */
     const char *tdir = img_tmpdir();
     char tmp[600];
-    snprintf(tmp, sizeof tmp, "%s/imgtool-system-XXXXXX", (tdir && tdir[0]) ? tdir : "/tmp");
+    /* P1-6 统一命名 */
+    if(img_tmpfile("win-finish", tmp, sizeof tmp) == NULL) return IMG_ESTATE;
     int fd = mkstemp(tmp);
     if(fd < 0){
         if(err) snprintf(err, errcap, "建临时文件失败: %s", strerror(errno));

@@ -89,7 +89,8 @@ int img_winre_extract_file(const char *wim_path, int index, const char *internal
     /* 先抽到一个临时目录（wimlib 只按目录抽单文件），再搬到 dst */
     const char *tmp=getenv("IMGTOOL_TMPDIR"); if(!tmp||!*tmp) tmp=getenv("TMPDIR");
     if(!tmp||!*tmp){ const char *t2=img_tmpdir(); if(t2) tmp=t2; }
-    char tmpl[512]; snprintf(tmpl,sizeof tmpl,"%s/imgtool-winre-XXXXXX",tmp);
+    char tmpl[512];
+    if(img_tmpfile_dir("winre",tmpl,sizeof tmpl)!=IMG_OK) return IMG_EIO;
     char *dir=mkdtemp(tmpl);
     if(!dir){ wimlib_free(w); if(err) snprintf(err,errcap,"建临时目录失败：%s",tmp); return IMG_EIO; }
 
@@ -248,7 +249,7 @@ int img_recovery_populate(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
             const char *tmp=getenv("IMGTOOL_TMPDIR"); if(!tmp||!*tmp) tmp=getenv("TMPDIR");
             if(!tmp||!*tmp){ const char *t2=img_tmpdir(); if(t2) tmp=t2; }
             char tmpf[600];
-            snprintf(tmpf,sizeof tmpf,"%s/imgtool-winre-%ld.wim",tmp,(long)getpid());
+            img_tmpfile("winre-wim",tmpf,sizeof tmpf);   /* P1-6 统一命名 */
             rc=img_winre_extract_file(winre_src,winre_index,internal,tmpf,err,errcap);
             if(rc==IMG_OK){
                 rc=img_ntfs_put_file(fs,tmpf,dst,prog);

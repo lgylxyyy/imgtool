@@ -230,14 +230,11 @@ static int materialize_iso_wim(const char *iso_path, const char *inner,
     }
     const char *tmp=img_tmpdir();
     if(!tmp || !*tmp){ img_iso_close(iso); setwhy(why,whycap,"没有可写的临时目录"); return IMG_ESTATE; }
+    /* ★ P1-6：统一临时命名（imgtool-tmp-iso-wim-<pid>-<n>） */
     char tmpl[P_CAP];
-    int tn=snprintf(tmpl,sizeof tmpl,"%s/imgtool-isowim-XXXXXX",tmp);
-    if(tn<0 || (size_t)tn>=sizeof tmpl){
-        img_iso_close(iso); setwhy(why,whycap,"临时目录路径过长"); return IMG_ENAMETOOLONG;
+    if(img_tmpfile("iso-wim",tmpl,sizeof tmpl)==NULL){
+        img_iso_close(iso); setwhy(why,whycap,"建临时文件失败（临时目录不可写）"); return IMG_EIO;
     }
-    int fd=mkstemp(tmpl);
-    if(fd<0){ img_iso_close(iso); setwhy(why,whycap,"建临时文件失败"); return IMG_EIO; }
-    close(fd);
     uint64_t got=0;
     rc=img_iso_extract(iso,inner,tmpl,0,NULL,&got);
     img_iso_close(iso);
@@ -280,6 +277,13 @@ int img_path_parse_ex(const char *spec, img_path *out, bool is_dst, char *why, s
         out->kind=IMG_XK_HOST; return IMG_OK;
     }
 
+    /* ★ P1-6：把容器所在目录登记为临时目录 hint（<dir>/.imgtool-tmp），
+     *   同分区 rename 原子，清理只删一个目录。只在还没设过时填。 */
+    {
+        char d[2048]; snprintf(d,sizeof d,"%s",out->host);
+        char *sl=strrchr(d,'/');
+        if(sl && sl!=d){ *sl=0; img_tmpdir_hint(d); }
+    }
     int ct=0;
     int rc=detect_container(out->host,&ct,why,whycap);
     if(rc==IMG_ENOENT && is_dst){

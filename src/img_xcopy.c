@@ -212,6 +212,12 @@ static int ep_open(xep *e, const img_xloc *loc, img_ctx *shared, bool writable,
     e->loc=*loc;
     xstrlcpy(e->root, loc->path, sizeof e->root);
     if(loc->kind==IMG_XK_HOST) return IMG_OK;
+    /* ★ P1-6：容器所在目录 → 临时目录 hint（.imgtool-tmp 同分区原子） */
+    if(loc->img[0]){
+        char d[2048]; snprintf(d,sizeof d,"%s",loc->img);
+        char *sl=strrchr(d,'/');
+        if(sl && sl!=d){ *sl=0; img_tmpdir_hint(d); }
+    }
     if(loc->kind==IMG_XK_ARCHIVE) return IMG_OK;   /* 压缩包不需要持久端点：按需开流 */
 
     if(loc->kind==IMG_XK_ISO){
@@ -229,9 +235,8 @@ static int ep_open(xep *e, const img_xloc *loc, img_ctx *shared, bool writable,
         const char *tmp=img_tmpdir();
         if(!tmp||!*tmp) return IMG_ESTATE;
         char tmpl[600];
-        snprintf(tmpl,sizeof tmpl,"%s/imgtool-xwim-XXXXXX",tmp);
-        char *dir=mkdtemp(tmpl);
-        if(!dir) return IMG_EIO;
+        if(img_tmpfile_dir("xwim",tmpl,sizeof tmpl)!=IMG_OK) return IMG_EIO;
+        char *dir=tmpl;
         xstrlcpy(e->tmp_root, dir, sizeof e->tmp_root);
         rc=img_wim_extract_tree(loc->img, loc->index?loc->index:1, loc->path,
                                 dir, NULL, err, sizeof err);
@@ -698,14 +703,18 @@ static int dst_write_file(xep *d, const char *final, const img_stream *src,
             int rc=host_mkdir_p(dir,0755);
             if(rc!=IMG_OK) return rc;
         }
-        size_t dl=strlen(final);
         char tmp[4096];
         int fd=-1;
-        for(int i=0;i<64;i++){
-            snprintf(tmp,sizeof tmp,"%.*s.imgtmp-%d-%d",(int)((dl<1200)?dl:1200),final,(int)getpid(),i);
-            fd=open(tmp,O_CREAT|O_EXCL|O_WRONLY,0644);
-            if(fd>=0) break;
-            if(errno!=EEXIST) return IMG_EIO;
+        {
+            /* ★ P1-6：统一命名 imgtool-tmp-hw-<pid>-<i>（同目录，保原子 rename） */
+            char dir[2048]; parent_of(final,dir,sizeof dir);
+            for(int i=0;i<64;i++){
+                snprintf(tmp,sizeof tmp,"%s/imgtool-tmp-hw-%ld-%d",
+                         dir[0]?dir:".",(long)getpid(),i);
+                fd=open(tmp,O_CREAT|O_EXCL|O_WRONLY,0644);
+                if(fd>=0) break;
+                if(errno!=EEXIST) return IMG_EIO;
+            }
         }
         if(fd<0) return IMG_EIO;
         enum { CH=1u<<20 };

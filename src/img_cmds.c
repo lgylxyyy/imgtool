@@ -636,8 +636,11 @@ static int wim_resolve_source(const char *wim, const char *inner_opt,
     }
     const char *tmp=img_tmpdir();
     if(!tmp || !tmp[0]){ img_iso_close(iso); return IMG_ESTATE; }
-    snprintf(path,cap,"%s/imgtool-src-%d%s",tmp,(int)getpid(),
-             (strstr(inner,".esd")||strstr(inner,".ESD"))?".esd":".wim");
+    /* ★ P1-6：统一临时命名 */
+    {
+        const char *purpose=(strstr(inner,".esd")||strstr(inner,".ESD"))?"src-esd":"src-wim";
+        if(img_tmpfile(purpose,path,cap)==NULL){ img_iso_close(iso); return IMG_ESTATE; }
+    }
     uint64_t got=0;
     rc=img_iso_extract(iso,inner,path,0,prog,&got);
     img_iso_close(iso);

@@ -248,7 +248,8 @@ int img_wim_extract_dir(const char *wim_path,int index,const char *inner_path,
     }
     const char *tmp=img_tmpdir();
     if(!tmp||!tmp[0]){ if(err) snprintf(err,errcap,"找不到可写临时目录（设 IMGTOOL_TMPDIR 或 TMPDIR）"); return IMG_ESTATE; }
-    char tmpl[600]; snprintf(tmpl,sizeof tmpl,"%s/imgtool-wimdir-XXXXXX",tmp);
+    char tmpl[600];
+    if(img_tmpfile_dir("wimdir",tmpl,sizeof tmpl)!=IMG_OK) return IMG_EIO;
     char *dir=mkdtemp(tmpl);
     if(!dir){ if(err) snprintf(err,errcap,"建临时目录失败：%s",strerror(errno)); return IMG_EIO; }
 
@@ -293,7 +294,8 @@ int img_wim_extract_file(const char *wim_path,int index,const char *inner_path,
 
     const char *tmp=img_tmpdir();
     if(!tmp||!tmp[0]){ if(err) snprintf(err,errcap,"找不到可写临时目录（设 IMGTOOL_TMPDIR 或 TMPDIR）"); return IMG_ESTATE; }
-    char tmpl[600]; snprintf(tmpl,sizeof tmpl,"%s/imgtool-wim-XXXXXX",tmp);
+    char tmpl[600];
+    if(img_tmpfile("wim",tmpl,sizeof tmpl)==NULL) return IMG_EIO;
     char *dir=mkdtemp(tmpl);
     if(!dir){ if(err) snprintf(err,errcap,"建临时目录失败：%s",strerror(errno)); return IMG_EIO; }
 

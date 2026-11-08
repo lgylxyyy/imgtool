@@ -496,6 +496,9 @@ fallback:                        /* 开线程都失败：退回原地跑（至�
 }
 
 int img_cmd_exec(const char *name, img_ctx *ctx, const img_args *in, img_result *out){
+    /* ★ P1-6（2026-11-08）：每条命令开头清掉【已死 pid】的 imgtool-tmp-*。
+     *   活进程的不动；自己 pid 的由 atexit 收。 */
+    img_tmpdir_sweep();
     img_io_timeout_reset();   /* ★ 上一条命令的超时判定不许带进这一条 */
     const img_cmd *c=img_cmd_find(name);
     img_result_begin(out,name);

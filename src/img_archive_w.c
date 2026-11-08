@@ -228,7 +228,16 @@ static int aw_mktmp(img_aw *w, char *err, size_t errcap){
         aw_set_err(err,errcap,"目标路径太长：%s","",NULL);
         return IMG_ENAMETOOLONG;
     }
-    snprintf(w->tmp,sizeof w->tmp,"%s.imgtmp-XXXXXX",w->dst);
+    /* ★ P1-6：统一临时命名 imgtool-tmp-aw-<pid>-<n>（同目录，保 rename 原子性） */
+    {
+        char dir[2048]; snprintf(dir,sizeof dir,"%s",w->dst);
+        char *sl=strrchr(dir,'/');
+        if(!sl) snprintf(w->tmp,sizeof w->tmp,"imgtool-tmp-aw-%ld-XXXXXX",(long)getpid());
+        else {
+            *sl=0;
+            snprintf(w->tmp,sizeof w->tmp,"%s/imgtool-tmp-aw-%ld-XXXXXX",dir,(long)getpid());
+        }
+    }
     w->fd=mkstemp(w->tmp);
     if(w->fd<0){
         if(err&&errcap) snprintf(err,errcap,"建临时文件失败：%s",strerror(errno));
