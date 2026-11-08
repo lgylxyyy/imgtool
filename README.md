@@ -26,6 +26,7 @@ Windows 引导（MBR 码 / VBR 码 / BCD / bootmgr / bootmgfw.efi / WinRE）。
 | **压缩包** | zip / 7z / tar 浏览与解压（只读），**RAR 也能读**（内置 unrar 解码器） |
 | **引导** | 写 MBR/VBR 引导码、铺 `bootmgr` / `bootmgfw.efi` / `boot.sdi` / 字体、生成 BCD（BIOS 与 UEFI 两套）、引导自检、`win.finish` 收尾 |
 | **恢复环境** | 把 `winre.wim` 装进恢复分区或系统分区、写 `ReAgent.xml` / 恢复脚本 |
+| **注册表** | 离线读写 5 个标准 hive（SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT）；事务性：抽出→改→校验→写回 |
 
 **不做的事**：不启动虚拟机、不联网、不做在线挂载。镜像必须处于关机状态 ——
 我们是绕过文件系统驱动直接改元数据，两个写入方同时改必然损坏。
@@ -177,7 +178,7 @@ imgcmd fat.put     --img=/sdcard/a.qcow2 --lba=<ESP> --src=/tmp/b.efi --dst=/EFI
 
 ---
 
-## 命令一览（71 条）
+## 命令一览（75 条）
 
 > 参数太多，这里只列**必填**参数；完整签名用 `imgcmd --list` 或 `imgcmd --help=<命令>`。
 
@@ -281,6 +282,10 @@ imgcmd fat.put     --img=/sdcard/a.qcow2 --lba=<ESP> --src=/tmp/b.efi --dst=/EFI
 | 命令 | 作用 | 必填参数 |
 |---|---|---|
 | `win.finish` | 裸灌后首次启动收尾：离线把 SYSTEM\Setup\Status\ChildCompletion\setup.exe 改成 3（微软官方修复） | img, lba |
+| `reg.get` | 离线读注册表值（返回类型/可读值/原始字节） | img, lba, path |
+| `reg.set` | 离线写注册表值（dword/qword/sz/expand_sz/binary；事务性） | img, lba, path, type, value |
+| `reg.list` | 列注册表键的子键与值 | img, lba, path |
+| `reg.del` | 离线删注册表值或键（删键默认不递归） | img, lba, path, value, recursive |
 | `win.version` | 读已装盘的真实版本：ntoskrnl 的 PE 版本 + 注册表 + SKU 交叉验证 | img, lba |
 
 ### copy.*（1 条）

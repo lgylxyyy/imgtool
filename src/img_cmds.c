@@ -38,6 +38,7 @@
 #include "img_archive_w.h"
 #include "img_du.h"
 #include "img_win_finish.h"
+#include "img_reg.h"
 /* ---- 功能开关（CMake 降级判定；缺库时对应 =0，命令仍列在表里但明确报不可用）---- */
 #ifndef IMG_WITH_WIM
 #define IMG_WITH_WIM 0
@@ -8074,6 +8075,340 @@ static int cmd_wim_file_version(img_ctx *ctx, const img_args *in, img_result *ou
  * an unexpected error》—— 裸灌系统首次启动弹"计算机意外地重新启动或遇到错误"，
  * 官方修复是把 HKLM\SYSTEM\Setup\Status\ChildCompletion\setup.exe 由 1 改成 3。
  * 我们离线改 qcow2 里的 SYSTEM hive（libhivex），因为没有 Windows 运行环境。 */
+/* ================= 注册表通用编辑（P2，REQ-P2）=================
+ * 4 条命令：reg.get / reg.set / reg.list / reg.del
+ *
+ * 共同参数：
+ *   img  qcow2 路径
+ *   lba  Windows 系统分区（NTFS）起始 LBA
+ *   hive SYSTEM | SOFTWARE | SAM | SECURITY | DEFAULT（大小写不敏感）
+ *
+ * 路径统一写成 `hive\子键\...`，由 reg_path_split 解析。
+ * 事务性见 img_reg.h：抽出→改→校验→写回，任一步失败分区字节不变。
+ */
+
+/* 把 "SYSTEM\Setup\Status\ChildCompletion" 拆成 hive + key。
+ * 也接受 "/" 分隔。 */
+static int reg_path_split(const char *full, img_reg_hive *hive,
+                          char *key, size_t keycap, const char **rest_value,
+                          char *err, size_t errcap){
+    if(!full || !*full){
+        if(err) snprintf(err,errcap,"路径为空（形如 SYSTEM\\Setup\\Status）");
+        return IMG_EINVAL;
+    }
+    char buf[1024];
+    snprintf(buf, sizeof buf, "%s", full);
+    for(char *p = buf; *p; p++) if(*p == '/') *p = '\\';
+
+    char *sep = strchr(buf, '\\');
+    char hive_name[32];
+    if(sep){
+        size_t n = (size_t)(sep - buf);
+        if(n >= sizeof hive_name){ if(err) snprintf(err,errcap,"hive 名过长"); return IMG_EINVAL; }
+        memcpy(hive_name, buf, n); hive_name[n] = 0;
+    } else {
+        snprintf(hive_name, sizeof hive_name, "%s", buf);
+        sep = buf + strlen(buf);
+    }
+    if(!img_reg_hive_from_name(hive_name, hive)){
+        if(err) snprintf(err,errcap,
+            "未知 hive「%s」（只能是 SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT）", hive_name);
+        return IMG_EINVAL;
+    }
+    snprintf(key, keycap, "%s", (*sep == '\\') ? sep + 1 : sep);
+    if(rest_value) *rest_value = key;
+    return IMG_OK;
+}
+
+/* ---- reg.get ---- */
+static const img_arg A_REGGET[] = {
+    {"img",   IMG_A_STR,  true,  NULL, "镜像路径（qcow2）", NULL},
+    {"lba",   IMG_A_U64,  true,  NULL, "Windows 系统分区起始 LBA", chk_lba},
+    {"path",  IMG_A_STR,  true,  NULL, "值路径：SYSTEM\\Setup\\Status\\ChildCompletion\\setup.exe", NULL},
+    {"hex",   IMG_A_BOOL, false, "false","REG_BINARY 以十六进制字符串输出（默认 base64）", NULL},
+};
+static int cmd_reg_get(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba = img_args_u64(in,"lba",0);
+    const char *full = img_args_get(in,"path");
+    bool as_hex = img_args_bool(in,"hex",false);
+    img_qcow2 *q = img_ctx_qcow2(ctx);
+    if(!q) return qc_open_fail(out,ctx);
+
+    img_reg_hive hive; char keybuf[900]; char err[256] = "";
+    int rc = reg_path_split(full, &hive, keybuf, sizeof keybuf, NULL, err, sizeof err);
+    if(rc != IMG_OK){
+        img_result_fail(out, rc, "REG-PATH-BAD", full, err, NULL);
+        return rc;
+    }
+    /* 最后一段是值名 */
+    char *last = strrchr(keybuf, '\\');
+    char keypath[900], valname[300];
+    if(last){ *last = 0; snprintf(keypath,sizeof keypath,"%s",keybuf); snprintf(valname,sizeof valname,"%s",last+1); }
+    else    { keypath[0] = 0; snprintf(valname,sizeof valname,"%s",keybuf); }
+
+    img_parttable_t *t=NULL;
+    rc = img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb = 0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){
+            pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在",NULL); return IMG_EINVAL; }
+
+    img_reg *r = img_reg_open(img_ctx_path(ctx), lba, pb, hive, false, err, sizeof err);
+    if(!r){
+        img_result_fail(out, IMG_ESTATE, "REG-OPEN-FAIL", img_ctx_path(ctx), err,
+            "这个分区可能不是 Windows 系统分区，或 LBA 给错");
+        return IMG_ESTATE;
+    }
+    img_reg_value v;
+    rc = img_reg_get(r, keypath, valname, &v, err, sizeof err);
+    img_reg_close(r);
+    if(rc != IMG_OK){
+        const char *code = (rc==IMG_ENOENT)?"REG-NOTFOUND":"REG-GET-FAIL";
+        img_result_fail(out, rc, code, full, err, NULL);
+        return rc;
+    }
+    img_result_str(out, "hive", img_reg_hive_name(hive));
+    img_result_str(out, "key", keypath);
+    img_result_str(out, "name", v.name ? v.name : "");
+    img_result_str(out, "type", img_reg_type_name(v.type));
+    img_result_u64(out, "bytes", (uint64_t)v.len);
+
+    /* 按类型给出可读值 */
+    switch(v.type){
+    case IMG_REG_DWORD:
+        if(v.len >= 4){
+            uint32_t d = (uint32_t)v.data[0] | ((uint32_t)v.data[1]<<8)
+                       | ((uint32_t)v.data[2]<<16) | ((uint32_t)v.data[3]<<24);
+            img_result_u64(out, "value", d);
+            char sx[32]; snprintf(sx,sizeof sx,"0x%08X",d); img_result_str(out,"hex",sx);
+        }
+        break;
+    case IMG_REG_QWORD:
+        if(v.len >= 8){
+            uint64_t d = 0;
+            for(int i=7;i>=0;i--) d = (d<<8) | v.data[i];
+            img_result_u64(out, "value", d);
+        }
+        break;
+    case IMG_REG_SZ:
+    case IMG_REG_EXPAND_SZ:
+    case IMG_REG_MULTI_SZ:
+        img_result_str(out, "value", (const char*)v.data);   /* hivex 已转 UTF-8 */
+        break;
+    default:
+        if(as_hex){
+            size_t cap = v.len*2 + 1;
+            char *hx = (char*)malloc(cap);
+            if(hx){
+                for(size_t i=0;i<v.len;i++) snprintf(hx+i*2,3,"%02X",v.data[i]);
+                hx[cap-1]=0;
+                img_result_str(out,"value_hex",hx);
+                free(hx);
+            }
+        }
+        break;
+    }
+    img_reg_value_free(&v);
+    return IMG_OK;
+}
+
+/* ---- reg.list ---- */
+static const img_arg A_REGLIST[] = {
+    {"img",        IMG_A_STR,  true,  NULL, "镜像路径（qcow2）", NULL},
+    {"lba",        IMG_A_U64,  true,  NULL, "Windows 系统分区起始 LBA", chk_lba},
+    {"path",       IMG_A_STR,  false, NULL, "键路径：SYSTEM\\Setup\\Status（空=根）", NULL},
+    {"subkeys",    IMG_A_BOOL, false, "true","列子键", NULL},
+    {"values",     IMG_A_BOOL, false, "true","列值", NULL},
+};
+typedef struct { img_result *out; int n; } reg_ls_ud;
+static void reg_ls_cb(void *ud, const char *name, bool is_key, img_reg_type type, size_t len){
+    reg_ls_ud *u = (reg_ls_ud*)ud;
+    (void)u; (void)name; (void)is_key; (void)type; (void)len;
+    u->n++;
+}
+static int cmd_reg_list(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba = img_args_u64(in,"lba",0);
+    const char *full = img_args_get(in,"path");
+    bool want_k = img_args_bool(in,"subkeys",true);
+    bool want_v = img_args_bool(in,"values",true);
+    img_qcow2 *q = img_ctx_qcow2(ctx);
+    if(!q) return qc_open_fail(out,ctx);
+
+    img_reg_hive hive; char keypath[900] = ""; char err[256] = "";
+    if(full && *full){
+        int rc = reg_path_split(full, &hive, keypath, sizeof keypath, NULL, err, sizeof err);
+        if(rc != IMG_OK){ img_result_fail(out,rc,"REG-PATH-BAD",full,err,NULL); return rc; }
+    } else {
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","根目录也要写明 hive（如 SYSTEM）",NULL);
+        return IMG_EINVAL;
+    }
+    img_parttable_t *t=NULL;
+    int rc = img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb = 0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){
+            pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在",NULL); return IMG_EINVAL; }
+
+    img_reg *r = img_reg_open(img_ctx_path(ctx), lba, pb, hive, false, err, sizeof err);
+    if(!r){
+        img_result_fail(out,IMG_ESTATE,"REG-OPEN-FAIL",img_ctx_path(ctx),err,
+            "这个分区可能不是 Windows 系统分区");
+        return IMG_ESTATE;
+    }
+    reg_ls_ud u = { out, 0 };
+    rc = img_reg_enum(r, keypath, want_k, want_v, reg_ls_cb, &u, err, sizeof err);
+    img_reg_close(r);
+    if(rc != IMG_OK){
+        img_result_fail(out,rc,(rc==IMG_ENOENT)?"REG-NOTFOUND":"REG-LIST-FAIL",full,err,NULL);
+        return rc;
+    }
+    img_result_str(out,"hive",img_reg_hive_name(hive));
+    img_result_str(out,"key",keypath);
+    img_result_u64(out,"count",(uint64_t)u.n);
+    return IMG_OK;
+}
+
+/* ---- reg.set ---- */
+static const img_arg A_REGSET[] = {
+    {"img",   IMG_A_STR,  true,  NULL, "镜像路径（qcow2）", NULL},
+    {"lba",   IMG_A_U64,  true,  NULL, "Windows 系统分区起始 LBA", chk_lba},
+    {"path",  IMG_A_STR,  true,  NULL, "值路径：SOFTWARE\\...\\CurrentBuild", NULL},
+    {"type",  IMG_A_ENUM, false, "dword","值类型：dword | qword | sz | expand_sz | multi_sz | binary", NULL},
+    {"value", IMG_A_STR,  false, NULL, "值（dword/qword 用十进制；sz 用文本；binary 用十六进制串）", NULL},
+};
+static int cmd_reg_set(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba = img_args_u64(in,"lba",0);
+    const char *full = img_args_get(in,"path");
+    const char *ty = img_args_get(in,"type"); if(!ty) ty = "dword";
+    const char *val = img_args_get(in,"value");
+    img_qcow2 *q = img_ctx_qcow2(ctx);
+    if(!q) return qc_open_fail(out,ctx);
+
+    img_reg_hive hive; char keybuf[900]; char err[256] = "";
+    int rc = reg_path_split(full, &hive, keybuf, sizeof keybuf, NULL, err, sizeof err);
+    if(rc != IMG_OK){ img_result_fail(out,rc,"REG-PATH-BAD",full,err,NULL); return rc; }
+    char *last = strrchr(keybuf, '\\');
+    char keypath[900], valname[300];
+    if(last){ *last = 0; snprintf(keypath,sizeof keypath,"%s",keybuf); snprintf(valname,sizeof valname,"%s",last+1); }
+    else    { keypath[0] = 0; snprintf(valname,sizeof valname,"%s",keybuf); }
+
+    if(!val && strcasecmp(ty,"binary") != 0){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","value","非 binary 类型必须给 --value",NULL);
+        return IMG_EINVAL;
+    }
+
+    img_parttable_t *t=NULL;
+    rc = img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb = 0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){
+            pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在",NULL); return IMG_EINVAL; }
+
+    img_reg *r = img_reg_open(img_ctx_path(ctx), lba, pb, hive, true, err, sizeof err);
+    if(!r){
+        img_result_fail(out,IMG_ESTATE,"REG-OPEN-FAIL",img_ctx_path(ctx),err,
+            "这个分区可能不是 Windows 系统分区");
+        return IMG_ESTATE;
+    }
+
+    if(!strcasecmp(ty,"dword")){
+        uint32_t d = (uint32_t)strtoul(val?val:"0", NULL, 0);
+        rc = img_reg_set_dword(r, keypath, valname, d, err, sizeof err);
+    } else if(!strcasecmp(ty,"qword")){
+        uint64_t d = (uint64_t)strtoull(val?val:"0", NULL, 0);
+        rc = img_reg_set_qword(r, keypath, valname, d, err, sizeof err);
+    } else if(!strcasecmp(ty,"sz") || !strcasecmp(ty,"expand_sz")){
+        img_reg_type tt = (!strcasecmp(ty,"sz")) ? IMG_REG_SZ : IMG_REG_EXPAND_SZ;
+        rc = img_reg_set(r, keypath, valname, tt, val, strlen(val?val:"")+1, err, sizeof err);
+    } else if(!strcasecmp(ty,"binary")){
+        /* 十六进制串 → 字节 */
+        size_t n = val ? strlen(val) : 0;
+        if(n % 2){ img_reg_close(r); img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","value","十六进制串长度必须是偶数",NULL); return IMG_EINVAL; }
+        uint8_t *b = (uint8_t*)malloc(n/2 + 1);
+        if(!b){ img_reg_close(r); return IMG_ENOMEM; }
+        for(size_t i=0;i<n/2;i++){
+            char hx[3] = { val[i*2], val[i*2+1], 0 };
+            b[i] = (uint8_t)strtoul(hx, NULL, 16);
+        }
+        rc = img_reg_set(r, keypath, valname, IMG_REG_BINARY, b, n/2, err, sizeof err);
+        free(b);
+    } else {
+        img_reg_close(r);
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","type","只支持 dword/qword/sz/expand_sz/binary",NULL);
+        return IMG_EINVAL;
+    }
+    bool changed = img_reg_changed(r);
+    img_reg_close(r);
+    if(rc != IMG_OK){
+        img_result_fail(out,rc,"REG-SET-FAIL",full,err,"检查 hive 是否可写（SAM/SECURITY 有额外保护）");
+        return rc;
+    }
+    img_result_str(out,"hive",img_reg_hive_name(hive));
+    img_result_str(out,"key",keypath);
+    img_result_str(out,"name",valname);
+    img_result_str(out,"type",ty);
+    img_result_bool(out,"changed",changed);
+    return IMG_OK;
+}
+
+/* ---- reg.del ---- */
+static const img_arg A_REGDEL[] = {
+    {"img",       IMG_A_STR,  true,  NULL, "镜像路径（qcow2）", NULL},
+    {"lba",       IMG_A_U64,  true,  NULL, "Windows 系统分区起始 LBA", chk_lba},
+    {"path",      IMG_A_STR,  true,  NULL, "键路径（SETUP=删整个值；填 --value= 则只删该值）", NULL},
+    {"value",     IMG_A_STR,  false, NULL, "只删这个值名（给了就删值，不给就删键）", NULL},
+    {"recursive", IMG_A_BOOL, false, "false","删键时递归（默认false：非空键报 REG-KEY-NOT-EMPTY）", NULL},
+};
+static int cmd_reg_del(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba = img_args_u64(in,"lba",0);
+    const char *full = img_args_get(in,"path");
+    const char *val = img_args_get(in,"value");
+    bool rec = img_args_bool(in,"recursive",false);
+    img_qcow2 *q = img_ctx_qcow2(ctx);
+    if(!q) return qc_open_fail(out,ctx);
+
+    img_reg_hive hive; char keypath[900]; char err[256] = "";
+    int rc = reg_path_split(full, &hive, keypath, sizeof keypath, NULL, err, sizeof err);
+    if(rc != IMG_OK){ img_result_fail(out,rc,"REG-PATH-BAD",full,err,NULL); return rc; }
+
+    img_parttable_t *t=NULL;
+    rc = img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb = 0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){
+            pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在",NULL); return IMG_EINVAL; }
+
+    img_reg *r = img_reg_open(img_ctx_path(ctx), lba, pb, hive, true, err, sizeof err);
+    if(!r){
+        img_result_fail(out,IMG_ESTATE,"REG-OPEN-FAIL",img_ctx_path(ctx),err,
+            "这个分区可能不是 Windows 系统分区");
+        return IMG_ESTATE;
+    }
+    if(val && *val) rc = img_reg_del_value(r, keypath, val, err, sizeof err);
+    else            rc = img_reg_del_key(r, keypath, rec, err, sizeof err);
+    bool changed = img_reg_changed(r);
+    img_reg_close(r);
+    if(rc != IMG_OK){
+        const char *code = (rc==IMG_ENOENT) ? "REG-NOTFOUND"
+                         : (rc==IMG_ESTATE) ? "REG-KEY-NOT-EMPTY" : "REG-DEL-FAIL";
+        img_result_fail(out,rc,code,full,err,NULL);
+        return rc;
+    }
+    img_result_str(out,"hive",img_reg_hive_name(hive));
+    img_result_str(out,"path",keypath);
+    if(val && *val) img_result_str(out,"value",val);
+    img_result_bool(out,"changed",changed);
+    return IMG_OK;
+}
+
 static const img_arg A_WINFINISH[] = {
     {"img",     IMG_A_STR,  true,  NULL,   "镜像路径（qcow2）", NULL},
     {"lba",     IMG_A_U64,  true,  NULL,   "Windows 系统分区起始 LBA", chk_lba},
@@ -8837,6 +9172,14 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_NTFSEXPORT,(int)(sizeof A_NTFSEXPORT/sizeof A_NTFSEXPORT[0]), cmd_ntfs_export, NULL, 0},
     {"win.finish", "1.0", "裸灌后首次启动收尾：离线把 SYSTEM\\Setup\\Status\\ChildCompletion\\setup.exe 改成 3（微软官方修复）",
         A_WINFINISH,(int)(sizeof A_WINFINISH/sizeof A_WINFINISH[0]), cmd_win_finish, NULL, 0},
+    {"reg.get", "1.0", "离线读注册表值（SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT；镜像必须关机）",
+        A_REGGET,(int)(sizeof A_REGGET/sizeof A_REGGET[0]), cmd_reg_get, NULL, 0},
+    {"reg.set", "1.0", "离线写注册表值（事务性：抽出→改→校验→写回，失败分区不变）",
+        A_REGSET,(int)(sizeof A_REGSET/sizeof A_REGSET[0]), cmd_reg_set, NULL, 0},
+    {"reg.list","1.0", "列注册表键的子键与值",
+        A_REGLIST,(int)(sizeof A_REGLIST/sizeof A_REGLIST[0]), cmd_reg_list, NULL, 0},
+    {"reg.del", "1.0", "离线删除注册表值或键（删键默认不递归）",
+        A_REGDEL,(int)(sizeof A_REGDEL/sizeof A_REGDEL[0]), cmd_reg_del, NULL, 0},
     {"copy", "1.0", "统一复制：同卷/跨分区/跨镜像/宿主/ISO/WIM；路径用 !p3: 语法",
         A_COPY,(int)(sizeof A_COPY/sizeof A_COPY[0]), cmd_copy,
         "copy \"<源路径>\" \"<目标路径>\" [--conflict=fail|overwrite|rename]", 2},
