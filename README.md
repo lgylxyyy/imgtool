@@ -9,8 +9,7 @@ Windows 引导（MBR 码 / VBR 码 / BCD / bootmgr / bootmgfw.efi / WinRE）。
 典型场景是**手机上给虚拟机装系统**：没有 root、没有 loop 设备、没有 KVM、
 没法把镜像挂载出来，只能在用户态按扇区改字节。改完的镜像直接丢给 QEMU / Vectras 启动。
 
-> 相关仓库：[imgtool-android](https://github.com/lgylxyyy/imgtool-android)（NDK 交叉编译成 `libimgtool.so`）、
-> [Icdqcow2](https://github.com/lgylxyyy/Icdqcow2)（调用本库的 Android App）。
+> 相关仓库：[Icdqcow2](https://github.com/lgylxyyy/Icdqcow2)（调用本库的 Android App）。
 
 ---
 
@@ -73,6 +72,41 @@ build/libimgtool.a        静态库
 build/tools/imgcmd --list | head -c 200
 # {"version":1,"features":{"wimlib":true,"ntfs3g":true,"zlib":true,"mkntfs":true},...}
 ```
+
+### Android（NDK 交叉编译，产出 `libimgtool.so` 给 App `dlopen`）
+
+同一份源码，换 toolchain 文件即可；构建入口在仓库根：
+
+```bash
+export NDK=/path/to/android-ndk-r28c
+
+# 一次性：交叉编译第三方依赖（ntfs-3g / wimlib / zlib / libarchive / unrar 的 .a）
+./android-deps.sh
+
+# 每次改完 C 代码：编库
+./android-cross.sh                 # 默认 arm64-v8a armeabi-v7a x86_64
+./android-cross.sh arm64-v8a       # 只编一个 ABI（日常最快）
+TOOLS=1 TESTS=1 ./android-cross.sh # 连 imgcmd 与单元测试一起编（推真机排查用）
+NTFS=OFF ./android-cross.sh        # 不带 GPL 的 mkntfs
+```
+
+产物：`build/android/<abi>/libimgtool.so`（+ `TOOLS=1` 时的 `imgcmd`）。
+
+App 侧落点与核对方法见 `docs/ANDROID-BUILD.md`；真机跑命令：
+
+```bash
+adb push build/android/arm64-v8a/imgcmd /data/local/tmp/imgcmd
+adb shell chmod +x /data/local/tmp/imgcmd
+adb shell /data/local/tmp/imgcmd img.info --img=/sdcard/Download/test.qcow2
+```
+
+Android 上的已知限制（同一份代码里已适配，无需改源码）：
+
+- 长任务只能靠**进度回调 + 取消标志**（没有信号、没有多进程可杀）；
+- `content://` 路径由 App 先落缓存再传绝对路径进来；
+- 写盘前 App 要查宿主剩余空间（`statvfs`），否则写到一半 `ENOSPC` 会把镜像搞脏。
+
+32 位 ARM（armeabi-v7a / armhf）详见 `docs/ARMHF-BUILD.md`。
 
 ---
 
@@ -398,6 +432,10 @@ reference/  引导参考件：bcd-reference-*.bin、mbr-code-*.bin、boot 模板
 legacy/     早期实现，留档、不参与构建
 third_party/unrar/   内置 RAR 解码器（见下方许可）
 LICENSES/   许可证全文
+cmake/      Android NDK toolchain 文件（android-arm64host.cmake）
+docs/       ANDROID-BUILD.md / ARMHF-BUILD.md / WORKPLAN-HARDEN.md
+android-cross.sh   Android 交叉编译入口（libimgtool.so / imgcmd / 测试）
+android-deps.sh    Android 第三方依赖交叉编译（一次性）
 ```
 
 ## 用到的开源项目

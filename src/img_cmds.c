@@ -1037,6 +1037,18 @@ static uint64_t ntfs_part_bytes(img_parttable_t *t,uint64_t lba){
     return 0;
 }
 
+/* JSON 字符串转义（压缩包 archive.ls 与 NTFS 目录枚举共用，故放在 #if 外） */
+static int json_esc(char *dst, size_t cap, const char *src){
+    int k=0;
+    for(const unsigned char *p=(const unsigned char*)src; *p && k<(int)cap-8; p++){
+        if(*p=='"'||*p=='\\'){ dst[k++]='\\'; dst[k++]=(char)*p; }
+        else if(*p<0x20) k+=snprintf(dst+k,cap-(size_t)k,"\\u%04x",*p);
+        else dst[k++]=(char)*p;
+    }
+    dst[k]=0;
+    return k;
+}
+
 #if IMG_WITH_NTFS3G
 /* 单页硬上限：条目 JSON 约 70~90 字节，2000 项 ≈ 180KB，仍在 256KB 缓冲内。
  * 真正的上限是【输出信封】的大小（CLI 128KB / JNI 侧同样有上限），
@@ -1094,23 +1106,12 @@ static void list_json_cb(void *ud, const char *name, bool is_dir, uint64_t size)
     if(a->len+(size_t)k+2 < a->cap){ memcpy(a->b+a->len,item,(size_t)k); a->len+=(size_t)k; a->n++; }
     else a->truncated=true;
 }
-#endif /* IMG_WITH_NTFS3G */
 /* ---------- REQ-30.3/30.4：一次遍历的发射器（times/ino/sort 共用） ---------- */
 typedef struct {
     list_buf_t *a;
     bool        want_sort_key;
     const char *sort_key_field;
 } ent_emit_t;
-static int json_esc(char *dst, size_t cap, const char *src){
-    int k=0;
-    for(const unsigned char *p=(const unsigned char*)src; *p && k<(int)cap-8; p++){
-        if(*p=='"'||*p=='\\'){ dst[k++]='\\'; dst[k++]=(char)*p; }
-        else if(*p<0x20) k+=snprintf(dst+k,cap-(size_t)k,"\\u%04x",*p);
-        else dst[k++]=(char)*p;
-    }
-    dst[k]=0;
-    return k;
-}
 static void ent_emit(ent_emit_t *em, const img_ntfs_ent_t *e){
     list_buf_t *a=em->a;
     if(a->after && !a->after_seen){
@@ -1203,6 +1204,8 @@ static void free_entvec(entvec *v){
     free(v->names); free(v->v);
     v->v=NULL; v->names=NULL; v->n=v->cap=0;
 }
+
+#endif /* IMG_WITH_NTFS3G —— 上面是 NTFS 目录枚举辅助族（list_buf_t/ent_emit/entvec），NTFS=OFF 时全跳过 */
 
 static int cmd_ntfs_list(img_ctx *ctx, const img_args *in, img_result *out){
     if(!IMG_WITH_NTFS3G) return feat_unavail(out,"libntfs-3g（NTFS 目录枚举）","重新编译时开启该功能并安装对应系统库");

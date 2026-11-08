@@ -6,9 +6,11 @@ if(NOT DEFINED IMG_WITH_NTFS3G)
 endif()
 
 # NTFS 设备后端验证（需要系统 libntfs-3g-dev；缺失时自动跳过）
+# ★ 2026-11-09：还要看 IMG_WITH_NTFS3G 开关 —— 以前只查库在不在，
+#   于是 -DIMG_WITH_NTFS3G=OFF 时仍去编这个测试 → 链接失败（整棵构建都挂）。
 find_path(NTFS_INC ntfs-3g/volume.h)
 find_library(NTFS_LIB ntfs-3g)
-if(NTFS_INC AND NTFS_LIB)
+if(IMG_WITH_NTFS3G AND NTFS_INC AND NTFS_LIB)
   add_executable(ntfs_dev_test ntfs_dev_test.c)
   target_include_directories(ntfs_dev_test PRIVATE ${NTFS_INC})
   target_link_libraries(ntfs_dev_test PRIVATE imgtool ${NTFS_LIB})

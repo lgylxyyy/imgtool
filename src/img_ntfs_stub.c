@@ -14,6 +14,7 @@
  * 本文件只在 NTFS 关闭时参与编译（见 CMakeLists.txt）。
  */
 #include "img_ntfs_fs.h"
+#include "img_wim_fs.h"   /* img_wim_consume_fn（NTFS=OFF 时 WIM 也要占位）*/
 
 #define NA ((int)IMG_ENOTSUP)
 
@@ -155,5 +156,35 @@ int img_ntfs_copy_xattrs(img_ntfs_fs *src_fs, const char *src_abs,
 int img_ntfs_rm_tree(img_ntfs_fs *fs, const char *abs_path, int *removed){
     (void)fs;(void)abs_path;
     if(removed) *removed=0;
+    return NA;
+}
+
+/* ---- 2026-11-09 补：NTFS=OFF 构建漏掉的 3 个符号 ---- */
+int img_ntfs_set_label(img_ntfs_fs *fs, const char *label){
+    (void)fs; (void)label; return NA;
+}
+int img_ntfs_read_range(img_ntfs_fs *fs, const char *abs_path, uint64_t off,
+                        void *buf, size_t want, size_t *got){
+    (void)fs; (void)abs_path; (void)off; (void)buf; (void)want;
+    if(got) *got=0;
+    return NA;
+}
+/* WIM 侧：CMakeLists 在 NTFS=OFF 时会把 IMG_WITH_WIM 也关掉，但 img_wim_fs.c
+ * 仍参与编译（源码列表没移除），于是需要占位。—— 与上面同源，一律 ENOTSUP。 */
+int img_wim_probe_arch(const char *wim_path, int index, char *out, size_t cap,
+                       char *src, size_t srccap, char *why, size_t whycap){
+    (void)wim_path; (void)index;
+    if(out && cap) out[0]=0;
+    if(src && srccap) src[0]=0;
+    if(why && whycap) snprintf(why,whycap,"本构建未启用 NTFS/WIM");
+    return NA;
+}
+int img_wim_stream_consume(const char *wim_path,int index,const char *inner_path,
+                           img_wim_consume_fn consume, void *ud,
+                           uint64_t *out_size, img_prog *prog,
+                           char *err, size_t errcap){
+    (void)wim_path; (void)index; (void)inner_path; (void)consume; (void)ud; (void)prog;
+    if(out_size) *out_size=0;
+    if(err && errcap) snprintf(err,errcap,"本构建未启用 NTFS/WIM");
     return NA;
 }
