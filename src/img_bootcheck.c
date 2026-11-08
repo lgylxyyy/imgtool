@@ -7,6 +7,8 @@
 #include "img_fat32.h"
 #include "img_ntfs_fmt.h"
 #include "img_ntfs_dev.h"
+#include "img_ntfs_fs.h"      /* ★ REQ-54：img_ntfs_read_file */
+#include "img_identify.h"     /* ★ REQ-54：img_pe_version() 读 PE machine 判位数 */
 #include "ntfs_bridge.h"
 #include <stdio.h>
 #include <stdarg.h>
@@ -149,8 +151,15 @@ static fat_ent fat32_in_dir(img_qcow2 *q, uint64_t base, const img_fat32_layout_
             if(fat32_name_match(e, want, &lfn)){
                 r.found=true;
                 r.is_dir=(e[11]&0x10)!=0;
-                r.cluster=(uint32_t)e[26]|((uint32_t)e[27]<<8)|((uint32_t)e[28]<<16)|((uint32_t)e[29]<<24);
-                r.size=(uint32_t)e[28]|((uint32_t)e[29]<<8)|((uint32_t)e[30]<<16)|((uint32_t)e[31]<<24);
+                /* FAT32 目录项（32 字节）字段偏移：
+                 *   26..27 = 起始簇号【低 16 位】
+                 *   20..21 = 起始簇号【高 16 位】  ← 原实现漏了，簇号被读成垃圾
+                 *   28..31 = 文件大小
+                 * 原代码把 28..29 当成簇号高位 → clus=2480930822 这种天文数字。 */
+                r.cluster = ((uint32_t)e[26] | ((uint32_t)e[27]<<8))
+                          | (((uint32_t)e[20] | ((uint32_t)e[21]<<8))<<16);
+                r.size = (uint32_t)e[28] | ((uint32_t)e[29]<<8)
+                       | ((uint32_t)e[30]<<16) | ((uint32_t)e[31]<<24);
                 free(buf);
                 return r;
             }
@@ -179,9 +188,102 @@ static fat_ent fat32_find(img_qcow2 *q, uint64_t lba, uint64_t bytes, const char
     return r;
 }
 
+/* ★ REQ-54：从 FAT32 读文件头若干字节（只为判 PE machine，读 4KB 足够）。
+ *   返回实际读到的字节数；失败返回 0。
+ *   实现：沿 cluster 链读，最多读 want 字节。 */
+static size_t fat32_read_head(img_qcow2 *q, uint64_t lba, uint32_t start_clus,
+                              uint32_t file_size, uint8_t *out, size_t want){
+    img_fat32_layout_t L;
+    if(img_fat32_check(q,lba,&L)!=IMG_OK) return 0;
+    uint64_t base = lba*512;
+    size_t clen = (size_t)L.sectors_per_cluster*512;
+    uint64_t data_start = ((uint64_t)L.reserved_sectors + (uint64_t)L.num_fats*L.fat_size_sectors)*512;
+    size_t need = file_size < want ? (size_t)file_size : want;
+    size_t got = 0;
+    uint32_t clus = start_clus;
+    uint8_t *cb = malloc(clen);
+    if(!cb) return 0;
+    while(got < need && clus >= 2 && clus < 0x0FFFFFF8u){
+        uint64_t off = base + data_start + (uint64_t)(clus-2)*clen;
+        if(img_qcow2_read_full(q,off,cb,clen)!=IMG_OK) break;
+        size_t n = need-got; if(n > clen) n = clen;
+        memcpy(out+got, cb, n); got += n;
+        if(got >= need) break;
+        clus = fat32_next(q,base,&L,clus);
+    }
+    free(cb);
+    return got;
+}
+/* ★ REQ-54：只读 PE machine 字段（不解析版本资源、不要求可选头完整）。
+ *   支持"前面有引导壳"的情况（Win11 的 bootmgr 前置 24KB 16 位壳），
+ *   在前 64KB 里找第一个合法的 MZ+PE\0\0。返回 0 = 判不出。 */
+static uint16_t pe_machine_from_buf(const uint8_t *buf, size_t len){
+    if(!buf || len < 0x40) return 0;
+    #define R16(p) ((uint16_t)((p)[0] | ((uint16_t)(p)[1]<<8)))
+    #define R32(p) ((uint32_t)(p)[0] | ((uint32_t)(p)[1]<<8) | ((uint32_t)(p)[2]<<16) | ((uint32_t)(p)[3]<<24))
+    size_t limit = len < 65536 ? len : 65536;
+    /* 快路径：MZ 在偏移 0 */
+    if(buf[0]=='M' && buf[1]=='Z'){
+        uint32_t pe = R32(buf+0x3C);
+        if((size_t)pe+6 <= limit && memcmp(buf+pe,"PE\0\0",4)==0) return R16(buf+pe+4);
+    }
+    /* 慢路径：扫前置壳 */
+    for(size_t o=0; o+0x40 < limit; o++){
+        if(buf[o]!='M' || buf[o+1]!='Z') continue;
+        uint32_t pe = R32(buf+o+0x3C);
+        if((size_t)o+pe+6 > limit) continue;
+        if(memcmp(buf+o+pe,"PE\0\0",4)!=0) continue;
+        uint16_t m = R16(buf+o+pe+4);
+        if(m==0x14c||m==0x8664||m==0xAA64||m==0x1C4||m==0x200) return m;
+    }
+    #undef R16
+    #undef R32
+    return 0;
+}
+/* ★ REQ-54：PE machine → 架构名。读不出返回 NULL（不出结论，不猜）。 */
+static const char *pe_arch_name(uint16_t mach){
+    switch(mach){
+        case 0x014c: return "x86";
+        case 0x8664: return "x64";
+        case 0xAA64: return "arm64";
+        case 0x01c4: return "arm32";
+        default:     return NULL;
+    }
+}
+/* ★ REQ-54：读 FAT32 上某文件的 PE machine（只读头 4KB，不加载整文件）。 */
+static const char *fat32_file_arch(img_qcow2 *q, uint64_t lba, const char *path){
+    fat_ent fe = fat32_find(q, lba, 0, path);
+    if(!fe.found || fe.is_dir || fe.size < 0x40) return NULL;
+    size_t want = fe.size < 8192 ? (size_t)fe.size : 8192;
+    uint8_t *buf = malloc(want);
+    if(!buf) return NULL;
+    size_t got = fat32_read_head(q, lba, fe.cluster, fe.size, buf, want);
+    if(getenv("IMG_BC_DEBUG"))
+        fprintf(stderr,"[dbg arch] path=%s found=%d clus=%u size=%u got=%zu first=%02x%02x\n",
+                path, fe.found, fe.cluster, fe.size, got,
+                got>0?buf[0]:0, got>1?buf[1]:0);
+    const char *res = NULL;
+    if(got >= 0x40) res = pe_arch_name(pe_machine_from_buf(buf, got));
+    free(buf);
+    return res;
+}
+/* ★ REQ-54：读 NTFS 上某文件的 PE machine（同源逻辑，只读头）。 */
+static const char *ntfs_file_arch(img_qcow2 *q, uint64_t lba, uint64_t bytes, const char *path){
+    img_ntfs_fs *fs = img_ntfs_mount_rw(q, lba, bytes);
+    if(!fs) return NULL;
+    void *data=NULL; size_t n=0;
+    const char *res = NULL;
+    if(img_ntfs_read_file(fs, path, &data, &n)==IMG_OK && n>=0x40){
+        size_t use = n < 8192 ? n : 8192;
+        res = pe_arch_name(pe_machine_from_buf((const uint8_t*)data, use));
+        free(data);
+    }
+    img_ntfs_umount(fs);
+    return res;
+}
+
 /* ---------- 工具：找到各分区 ---------- */
-typedef struct { int esp, bootp, os, rec; } parts_t;
-static bool is_esp(const img_partition_t *p){
+typedef struct { int esp, bootp, os, rec; } parts_t;static bool is_esp(const img_partition_t *p){
     if(p->type_guid[0]) return strncmp(p->type_guid, IMG_GUID_ESP, 8)==0;
     return p->type == IMG_MBR_ESP;
 }
@@ -369,10 +471,13 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
             IMG_CK_REQUIRED,
             ntfs_path_exists(q,lba,sz,"/Windows/System32/winload.exe"),
             "winload.exe 是否存在（.efi 分支未在此查）");
-        add(out,"ntfs.winload_efi","系统文件 winload.efi",
-            IMG_CK_INFO,
-            ntfs_path_exists(q,lba,sz,"/Windows/System32/winload.efi"),
-            "UEFI 分支需要（不存在则只支持 BIOS）");
+        {
+            bool has = ntfs_path_exists(q,lba,sz,"/Windows/System32/winload.efi");
+            const char *wa = has ? ntfs_file_arch(q,lba,sz,"/Windows/System32/winload.efi") : NULL;
+            img_check_t *ck = add(out,"ntfs.winload_efi","系统文件 winload.efi",
+                IMG_CK_INFO, has, "UEFI 分支需要（不存在则只支持 BIOS）");
+            ck->arch = wa ? strdup(wa) : NULL;   /* ★ REQ-54 */
+        }
     }
 
     /* ── ③ ESP/FAT 层 ── */
@@ -384,10 +489,15 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
             img_fat32_probe(q,lba,&FL)==IMG_OK,
             "spc=%u 簇数=%u",(unsigned)FL.sectors_per_cluster,(unsigned)FL.cluster_count);
         fat_ent e1 = fat32_find(q,lba,sz,"EFI/Microsoft/Boot/bootmgfw.efi");
-        add(out,"esp.bootmgfw","\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
-            IMG_CK_REQUIRED, e1.found,
-            e1.found? "存在，%u 字节": "不存在 — UEFI 未找到 Windows 启动管理器",
-            e1.size);
+        {
+            const char *ba = e1.found ? fat32_file_arch(q,lba,"EFI/Microsoft/Boot/bootmgfw.efi") : NULL;
+            img_check_t *ck = add(out,"esp.bootmgfw","\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
+                IMG_CK_REQUIRED, e1.found,
+                e1.found? "存在，%u 字节": "不存在 — UEFI 未找到 Windows 启动管理器",
+                e1.size);
+            ck->arch = ba ? strdup(ba) : NULL;    /* ★ REQ-54 */
+            ck->size = e1.found ? e1.size : 0;
+        }
         /* ★ 2026-11-05：兜底启动器按系统位数自适应（以前写死 bootx64.efi，
          *   x86 盘实际写的是 bootia32.efi，检查项误报"不存在"）。
          *   位数从 esp.bootmgfw 同源的 \Windows\Boot\EFI\bootmgfw.efi 判不出，
@@ -397,11 +507,20 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
         fat_ent e2  = fat32_find(q,lba,sz,"EFI/Boot/bootx64.efi");
         fat_ent e2a = fat32_find(q,lba,sz,"EFI/Boot/bootia32.efi");
         fat_ent e2r = e2.found ? e2 : e2a;
-        add(out,"esp.fallback", e2.found? "\\EFI\\Boot\\bootx64.efi": "\\EFI\\Boot\\bootia32.efi",
-            IMG_CK_WARN,e2r.found,
-            e2r.found? "存在（通用回退入口，%s）"
-                     : "不存在（x64 查 bootx64.efi / x86 查 bootia32.efi 都没有）— 只能从固件菜单选 Windows Boot Manager",
-            e2.found? "x64":"x86");
+        {
+            /* ★ REQ-54：hint 里不再猜 x64/x86（曾误导），位数结论由 arch 字段给。
+             *   两个名字都查；命中的那个读 PE machine 得真实位数。 */
+            const char *fbpath = e2.found ? "EFI/Boot/bootx64.efi" : "EFI/Boot/bootia32.efi";
+            const char *fa = e2r.found ? fat32_file_arch(q,lba,fbpath) : NULL;
+            img_check_t *ck = add(out,"esp.fallback",
+                e2.found? "\\EFI\\Boot\\bootx64.efi": "\\EFI\\Boot\\bootia32.efi",
+                IMG_CK_WARN,e2r.found,
+                e2r.found? "存在（通用回退入口，%u 字节）"
+                         : "不存在（bootx64.efi / bootia32.efi 都没有）— 只能从固件菜单选 Windows Boot Manager",
+                e2r.found? e2r.size : 0);
+            ck->arch = fa ? strdup(fa) : NULL;    /* ★ REQ-54：真实 PE 位数 */
+            ck->size = e2r.found ? e2r.size : 0;
+        }
         fat_ent e3 = fat32_find(q,lba,sz,"EFI/Microsoft/Boot/BCD");
         add(out,"esp.bcd","\\EFI\\Microsoft\\Boot\\BCD",IMG_CK_REQUIRED,e3.found,
             e3.found ? "存在，%u 字节" : "ESP 上没有 BCD", e3.size);
@@ -508,14 +627,19 @@ int img_bootcheck_json_array(const img_bootcheck_result_t *r, char *buf, int cap
         #define ESC2(dst,src) do{ int j=0; for(const char *p=(src); *p && j<(int)sizeof(dst)-2; p++){ \
             if(*p=='"'||*p=='\\'){ (dst)[j++]='\\'; } (dst)[j++]=*p; } (dst)[j]=0; }while(0)
         ESC2(id, c->id); ESC2(nm, label); ESC2(det, c->detail);
+        /* ★ REQ-54：UEFI 分支输出 arch / size（x86|x64|arm64，字节数） */
+        char arch_buf[24] = "", size_buf[40] = "";
+        if(c->arch && c->arch[0]) snprintf(arch_buf,sizeof arch_buf,",\"arch\":\"%s\"", c->arch);
+        if(c->size > 0) snprintf(size_buf,sizeof size_buf,",\"size\":%llu", (unsigned long long)c->size);
         if(c->suggest[0]){ char raw[sizeof c->suggest*2]; bc_fill_img(raw,sizeof raw,c->suggest,r->img); ESC2(sg, raw); }
         #undef ESC2
         int m=snprintf(line,sizeof line,
-            "%s{\"id\":\"%s\",\"name\":\"%s\",\"level\":\"%s\",\"pass\":%s,\"detail\":\"%s\"%s%s%s}",
+            "%s{\"id\":\"%s\",\"name\":\"%s\",\"level\":\"%s\",\"pass\":%s,\"detail\":\"%s\"%s%s%s%s%s}",
             i?",":"", id, nm, lvl, c->pass?"true":"false", det,
             c->suggest[0]?",\"suggest\":\"":"",
             c->suggest[0]?sg:"",
-            c->suggest[0]?"\"":"");
+            c->suggest[0]?"\"":"",
+            arch_buf, size_buf);
         if(m<0) break;
         if(n+m >= cap-2) break;
         memcpy(buf+n,line,(size_t)m); n+=m;

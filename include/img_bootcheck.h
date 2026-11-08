@@ -34,6 +34,11 @@ typedef struct {
     /* ★ REQ-38：可一键修复时给出【能直接跑的命令原文】。
      *   App 不显示给用户，只在自己的修复流程里取来执行；空串 = 没有自动修复。*/
     char           suggest[320];
+    /* ★ REQ-54：UEFI 引导文件按 PE machine 给出位数结论（只读头即可判定，
+     *   不需加载）。x86|x64|arm64|unknown；非 PE 文件（如 BCD/bootmgr 段）为 NULL。
+     *   size 是该文件字节数（fat32_find 已带；BIOS 分区项为 0）。 */
+    const char    *arch;
+    uint64_t       size;
 } img_check_t;
 
 typedef struct {

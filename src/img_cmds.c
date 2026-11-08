@@ -6207,6 +6207,43 @@ static int plan_probe_src(const char *src, int want_index,
 }
 
 static int cmd_boot_plan_repair(img_ctx *ctx, const img_args *in, img_result *out);
+/* ★ REQ-54 §2：读 NTFS 上某 PE 文件的 machine → 架构名（x86/x64/arm64）。
+ *   只读头 64KB，不解析版本资源。读不出返回 NULL（不猜）。 */
+static const char *ntfs_pe_arch_of(img_ntfs_fs *fs, const char *path){
+    if(!fs || !path) return NULL;
+    void *data=NULL; size_t n=0;
+    if(img_ntfs_read_file(fs, path, &data, &n)!=IMG_OK || n<0x40){ free(data); return NULL; }
+    size_t limit = n < 65536 ? n : 65536;
+    const uint8_t *b = (const uint8_t*)data;
+    uint16_t mach = 0;
+    #define R16x(p) ((uint16_t)((p)[0] | ((uint16_t)(p)[1]<<8)))
+    #define R32x(p) ((uint32_t)(p)[0] | ((uint32_t)(p)[1]<<8) | ((uint32_t)(p)[2]<<16) | ((uint32_t)(p)[3]<<24))
+    if(b[0]=='M' && b[1]=='Z'){
+        uint32_t pe=R32x(b+0x3C);
+        if((size_t)pe+6<=limit && !memcmp(b+pe,"PE\0\0",4)) mach=R16x(b+pe+4);
+    }
+    if(!mach){
+        for(size_t o=0;o+0x40<limit;o++){
+            if(b[o]!='M'||b[o+1]!='Z') continue;
+            uint32_t pe=R32x(b+o+0x3C);
+            if((size_t)o+pe+6>limit) continue;
+            if(memcmp(b+o+pe,"PE\0\0",4)) continue;
+            uint16_t m=R16x(b+o+pe+4);
+            if(m==0x14c||m==0x8664||m==0xAA64||m==0x1C4||m==0x200){ mach=m; break; }
+        }
+    }
+    #undef R16x
+    #undef R32x
+    free(data);
+    switch(mach){
+        case 0x14c:  return "x86";
+        case 0x8664: return "x64";
+        case 0xAA64: return "arm64";
+        case 0x1c4:  return "arm32";
+        default:     return NULL;
+    }
+}
+
 static int cmd_boot_plan(img_ctx *ctx, const img_args *in, img_result *out){
     const char *wp=img_args_get(in,"what");
     if(wp && !strcasecmp(wp,"repair")) return cmd_boot_plan_repair(ctx,in,out);
@@ -6874,11 +6911,26 @@ static int plan_repair_run(img_ctx *ctx, const img_args *in, img_result *out){
     img_ntfs_fs *sfs=img_ntfs_mount_rw(q,sys_lba,sys_b);
 
     /* ---- 物件事项表 ---- */
+    /* ★ REQ-54 §2：兜底启动器名字必须按【本盘真实位数】定，不能只看 --arch。
+     *   优先读 \Windows\Boot\EFI\bootmgfw.efi 的 PE machine（与 boot.populate
+     *   写文件时用的同一个 arch 判定源），读不出才退回 --arch，再退回 x64。 */
     const char *fbname = "/EFI/Boot/bootx64.efi";
-    {   /* 名字随架构：arch 参数（x86/x64/arm64），缺省 x64 */
-        const char *a=img_args_get(in,"arch");
-        if(a && !strcasecmp(a,"arm64")) fbname="/EFI/Boot/bootaa64.efi";
-        else if(a && (!strcasecmp(a,"x86")||!strcasecmp(a,"ia32"))) fbname="/EFI/Boot/bootia32.efi";
+    const char *arch_basis = "arg-default";
+    {
+        const char *a = img_args_get(in,"arch");
+        const char *disk_arch = NULL;
+        if(sfs){
+            disk_arch = ntfs_pe_arch_of(sfs, "/Windows/Boot/EFI/bootmgfw.efi");
+            if(!disk_arch) disk_arch = ntfs_pe_arch_of(sfs, "/Windows/system32/winload.efi");
+        }
+        const char *eff = disk_arch ? disk_arch : a;
+        if(eff){
+            if(!strcasecmp(eff,"arm64"))       fbname="/EFI/Boot/bootaa64.efi";
+            else if(!strcasecmp(eff,"x86")||!strcasecmp(eff,"ia32")) fbname="/EFI/Boot/bootia32.efi";
+            arch_basis = disk_arch ? "disk-pe" : "arg";
+        }
+        img_result_str(out,"fallback_name", fbname+10);   /* 去掉 "/EFI/Boot/" */
+        img_result_str(out,"fallback_arch_basis", arch_basis);
     }
     struct { const char *id,*what,*from,*src,*dst; bool avail,present; const char *note; } it[8];
     int ni=0;

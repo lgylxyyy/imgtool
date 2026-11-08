@@ -68,6 +68,18 @@ void img_boot_plan(const img_boot_plan_in_t *in, img_boot_plan_t *out){
                  img_t("%s 用 NTLDR 引导，没有 BCD/bootmgr，本工具不支持"), out->os_name);
         return;
     }
+    /* ★ REQ-54：Vista/Win7 的 x86 版本【物理上】没有 UEFI 启动路径 ——
+     *   实测其 install.wim 里根本没有 \Windows\Boot\EFI\ 目录，也没有 winload.efi，
+     *   不是"风险"而是"不存在"。必须先于下面的 NEEDS_CONFIRM 拦死。*/
+    if(in->arch == IMG_PLAN_ARCH_X86 && in->want_gpt && b < 9200){
+        out->verdict = IMG_PLAN_DENIED;
+        snprintf(out->reason, sizeof out->reason, "%s", "BOOT-ARCH-NO-UEFI");
+        snprintf(out->detail, sizeof out->detail,
+                 img_t("%s 的 x86 版本没有 EFI 引导文件（镜像里无 \\Windows\\Boot\\EFI\\ 与 winload.efi），"
+                       "物理上无法 UEFI 启动；32 位 UEFI 最低需要 Windows 8 x86。请改用 MBR/BIOS 或换 x64 版本。"),
+                 out->os_name);
+        return;
+    }
     /* ★ 2026-11-05 修正：x86 + UEFI/GPT 不再一概拒绝。
      *   官方 x86 盘（Win8/8.1/10 的 /efi/boot/bootia32.efi 或 /x86/efi/boot/bootia32.efi）
      *   明确带 32 位 UEFI 启动器，且系统分区 \Windows\Boot\EFI\bootmgfw.efi 也是 32 位 ——

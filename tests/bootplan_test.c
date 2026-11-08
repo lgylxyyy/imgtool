@@ -29,7 +29,9 @@ int main(void){
     printf("bootplan_test — 分区表/固件兼容判定\n");
 
     /* --- 硬事实：做不到 --- */
-    OK(plan(6,1,7601,IMG_PLAN_ARCH_X86,1).verdict == IMG_PLAN_DENIED, "Win7 x86 + GPT → 拒（32 位没有 UEFI 启动路径）");
+    /* ★ REQ-54：x86+GPT 实测（OVMF32）能启动 Win8/8.1/10，改为 NEEDS_CONFIRM。
+     *   Win7 x86 无 bootia32.efi/EFI 引导文件（物理不可能）→ 仍拒。 */
+    OK(plan(6,1,7601,IMG_PLAN_ARCH_X86,1).verdict == IMG_PLAN_DENIED, "Win7 x86 + GPT → 拒（无 EFI 引导文件，物理不可能）");
     OK(!strcmp(plan(6,1,7601,IMG_PLAN_ARCH_X86,1).reason, "BOOT-ARCH-NO-UEFI"), "  原因码 BOOT-ARCH-NO-UEFI");
     OK(plan(6,0,6000,IMG_PLAN_ARCH_X86,1).verdict == IMG_PLAN_DENIED, "Vista x86 + GPT → 拒");
     OK(plan(10,0,26100,IMG_PLAN_ARCH_ARM64,0).verdict == IMG_PLAN_DENIED, "ARM64 + MBR/BIOS → 拒（只能 UEFI）");
@@ -53,7 +55,9 @@ int main(void){
     { img_boot_plan_t p = plan(10,0,26100,IMG_PLAN_ARCH_X64,1);
       OK(p.verdict == IMG_PLAN_YES && p.recommend_gpt, "Win11 x64 + GPT → 放行且推荐 GPT"); }
     OK(plan(6,2,9200,IMG_PLAN_ARCH_X86,0).verdict == IMG_PLAN_YES, "Win8 x86 + MBR → 放行");
-    OK(plan(6,2,9200,IMG_PLAN_ARCH_X86,1).verdict == IMG_PLAN_DENIED, "Win8 x86 + GPT → 仍拒（32 位就是不行）");
+    /* ★ REQ-54：Win8 x86 + GPT → NEEDS_CONFIRM（OVMF32 实测能启动） */
+    OK(plan(6,2,9200,IMG_PLAN_ARCH_X86,1).verdict == IMG_PLAN_NEEDS_CONFIRM, "Win8 x86 + GPT → NEEDS_CONFIRM（OVMF32 实测可启动）");
+    OK(!strcmp(plan(6,2,9200,IMG_PLAN_ARCH_X86,1).reason, "BOOT-GPT-X86-NEEDS-CONFIRM"), "  原因码 BOOT-GPT-X86-NEEDS-CONFIRM");
 
     /* --- 信息不足：不拦 --- */
     OK(plan(0,0,0,IMG_PLAN_ARCH_UNKNOWN,1).verdict == IMG_PLAN_UNKNOWN, "读不出版本 → 不判定、不拦（新盘还没灌系统）");
