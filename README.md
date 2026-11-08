@@ -92,7 +92,7 @@ NTFS=OFF ./android-cross.sh        # 不带 GPL 的 mkntfs
 
 产物：`build/android/<abi>/libimgtool.so`（+ `TOOLS=1` 时的 `imgcmd`）。
 
-App 侧落点与核对方法见 `docs/ANDROID-BUILD.md`；真机跑命令：
+App 侧落点与核对方法见 `ANDROID-BUILD.md`；真机跑命令：
 
 ```bash
 adb push build/android/arm64-v8a/imgcmd /data/local/tmp/imgcmd
@@ -106,7 +106,7 @@ Android 上的已知限制（同一份代码里已适配，无需改源码）：
 - `content://` 路径由 App 先落缓存再传绝对路径进来；
 - 写盘前 App 要查宿主剩余空间（`statvfs`），否则写到一半 `ENOSPC` 会把镜像搞脏。
 
-32 位 ARM（armeabi-v7a / armhf）详见 `docs/ARMHF-BUILD.md`。
+32 位 ARM（armeabi-v7a / armhf）详见 `ARMHF-BUILD.md`。
 
 ---
 
@@ -433,7 +433,7 @@ legacy/     早期实现，留档、不参与构建
 third_party/unrar/   内置 RAR 解码器（见下方许可）
 LICENSES/   许可证全文
 cmake/      Android NDK toolchain 文件（android-arm64host.cmake）
-docs/       ANDROID-BUILD.md / ARMHF-BUILD.md / WORKPLAN-HARDEN.md
+ANDROID-BUILD.md / ARMHF-BUILD.md / WORKPLAN-HARDEN.md
 android-cross.sh   Android 交叉编译入口（libimgtool.so / imgcmd / 测试）
 android-deps.sh    Android 第三方依赖交叉编译（一次性）
 ```
