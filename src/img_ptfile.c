@@ -350,6 +350,9 @@ int img_ptfile_load(const char *path, img_ptfile_t *out,
                             return bad(code,codecap,at,atcap,why,whycap,"parts.name","name 不是字符串"); }
                     } else if(!strcmp(k2,"attributes")){
                         uint8_t b[8];
+                        /* ★ 先跳过冒号+空格再判断（json.dump 会输出 "attr": "0x..."）。
+                           jhex_bytes 内部也有 jws，但判断在前 —— 判断时还停在空格上。 */
+                        jws(&j);
                         if(*j.p=='"'||isdigit((unsigned char)*j.p)){
                             int n=jhex_bytes(&j,b,sizeof b);
                             if(n<0){ free(txt); return bad(code,codecap,at,atcap,why,whycap,"parts.attributes","attributes 不是十六进制"); }
