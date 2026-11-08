@@ -47,7 +47,7 @@ typedef struct img_arg {
     int       (*check)(const char *val, char *why, size_t whycap);   /* 可选：值级校验 */
 } img_arg;
 
-/* 按规格校验：缺必填 / 类型不符 / check 不通过 → 返回错误码并填 why（给人话用） */
+/* 按规格校验：缺必填 / 类型不符 / check 不通过 → 返回错误码并填 why（供说明文本使用） */
 int img_args_validate(const img_args *a, const img_arg *spec, int nargs,
                       char *why, size_t whycap);
 

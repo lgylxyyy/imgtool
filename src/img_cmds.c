@@ -27,7 +27,7 @@
 #include "img_winre.h"
 #include "img_identify.h"      /* boot.check 用 */
 #include "img_bootplan.h"      /* boot.plan / bcd.create 的分区表判定 */
-#include "img_text.h"        /* 进信封的人话：中英双份 */
+#include "img_text.h"        /* 进信封的说明：中英双份 */
 #include "img_io.h"
 #include "img_fat32.h"
 #include "img_fat32_fs.h"
@@ -6836,7 +6836,7 @@ static int cmd_boot_tpl_apply(img_ctx *ctx, const img_args *in, img_result *out)
  *     是别人的（GRUB 等）→ 不覆盖，efi_fallback_conflict=true 报给 App 问用户。 */
 typedef struct {
     const char *id;        /* bootmgr / bootmgfw / fonts / boot_sdi / bcd / mbr_code / vbr_code / efi_fallback */
-    const char *what;      /* 人话名字 */
+    const char *what;      /* 显示名 */
     const char *from;      /* disk | template | image | none */
     const char *src_path;  /* 来源路径（disk=image 内路径；template=内置）*/
     const char *dst_path;  /* 落点（分区内路径）*/
@@ -8683,7 +8683,7 @@ static void rm_sib_cb(void *ud, const char *name, bool is_dir, uint64_t size){
     int w=0; for(int i=1;i<3;i++) if(s->score[i]<s->score[w]) w=i;
     if(sc>s->score[w]){ snprintf(s->best[w],sizeof s->best[0],"%s",name); s->score[w]=sc; }
 }
-/* 成功返回 true，out 里写一句人话（逗号分隔的名字）*/
+/* 成功返回 true，out 里写一句说明（逗号分隔的名字）*/
 static bool rm_try_siblings(const char *host, uint64_t lba, const char *inner,
                             const char *want, char *out, size_t cap){
     if(!host || !*host || !inner || inner[0]!='/' ) return false;

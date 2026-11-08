@@ -202,7 +202,7 @@ static void pump(const char *line,size_t n,img_lv_t lv,bool force){
         img_lock_acquire(lk);
         write_all(G.fd,line,n);
         if(G.fd>=0){ G.written+=n; rotate_if_needed(); }
-        /* 屏幕：json 模式原样吐 JSON；human 模式由 human_emit() 渲染人话行
+        /* 屏幕：json 模式原样吐 JSON；human 模式由 human_emit() 渲染说明行
          * （这里只负责日志文件，避免两边重复渲染）*/
         if(G.out_fd>=0 && !G.out_human) write_all(G.out_fd,line,n);
         img_lock_release(lk);
@@ -277,7 +277,7 @@ bool img_cancelled(void){ return g_cancel!=0; }
  *   error_code=FAT-ENOSPC + 全部数值。App 拿这些就能渲染成自己的语言。
  *   下面这张表只给两个"兜底消费方"用：
  *     ① CLI（--lang=en|zh，默认 zh）
- *     ② 库自己的人话行（屏幕消费者）
+ *     ② 库自己的说明行（屏幕消费者）
  *   App 想完全自己 i18n 时，用 img_error_info() 拿结构化字段即可，不必查表。
  * ============================================================ */
 

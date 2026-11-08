@@ -121,7 +121,7 @@ typedef struct {
     bool     case_only;       /* 只改大小写 */
     char     final_path[2048];
     int      side;
-    char     first_error[256];   /* 失败原因的人话（如非法名字具体哪个字符） */
+    char     first_error[256];   /* 失败原因的说明（如非法名字具体哪个字符） */
     char     bad_name[1024];     /* 被拒绝的目标名字（NAME-INVALID 时给 err.at 用）*/
 } img_xmove_stats;
 

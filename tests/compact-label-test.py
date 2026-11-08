@@ -191,7 +191,7 @@ d = run('fs.format', img=p, lba=ESP, fs='fat32', quick='true', label='启动盘'
 e = d.get('err') or {}
 check('FAT32 中文卷标 → CMD-ARG-BAD@label（不再谎报成功）',
       e.get('error_code') == 'CMD-ARG-BAD' and e.get('at') == 'label', json.dumps(d)[:240])
-check('错误信封带 hint（App 没有文案时也能给人话）', bool(e.get('hint')),
+check('错误信封带 hint（App 没有文案时也能给说明）', bool(e.get('hint')),
       json.dumps(e)[:200])
 scan = data(run('part.scan', img=p, lba=ESP))
 check('被拒之后盘上是干净空分区（不许 unknown/-1）',

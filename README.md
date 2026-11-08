@@ -121,7 +121,7 @@ imgcmd --help=<命令>          # 单条命令的用法
 - **参数一律字符串**，形如 `--img=/sdcard/a.qcow2`、`--recursive=true`。
 - **结果走 stdout（一行 JSON）**，日志走 stderr。所以 `imgcmd ... | jq .` 永远干净。
 - **成功**：`{"ok":true,"cmd":"img.info","version":1,"duration_ms":12,"data":{...}}`
-- **失败**：`{"ok":false,...,"err":{"rc":-4,"error_code":"IMG-OPEN-FAIL","at":"img.info","hint":"人话","suggest":"怎么办"}}`
+- **失败**：`{"ok":false,...,"err":{"rc":-4,"error_code":"IMG-OPEN-FAIL","at":"img.info","hint":"说明","suggest":"怎么办"}}`
 
 `error_code` 是稳定契约（App 按它判分支），`hint` 是给人看的，**不要解析 hint**。
 
@@ -370,7 +370,7 @@ Windows 版，走的都是同一个入口 —— 所以参数校验只写了一�
 char err[256];
 img_ctx *ctx = img_ctx_open("/sdcard/a.qcow2", /*writable=*/false,
                             /*check_size=*/false, err, sizeof err);
-if (!ctx) { /* 打不开，err 里是人话 */ }
+if (!ctx) { /* 打不开，err 为说明文本 */ }
 
 img_args *a = img_args_new();
 img_args_set(a, "img", "/sdcard/a.qcow2");

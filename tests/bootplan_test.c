@@ -70,7 +70,7 @@ int main(void){
     { img_boot_plan_t p = plan(10,0,22631,IMG_PLAN_ARCH_X64,1);
       OK(p.os_name && strstr(p.os_name, "11") != NULL, "os_name 认得 22631 是 Windows 11"); }
 
-    /* --- 语言开关：进信封的人话必须能双语 --- */
+    /* --- 语言开关：进信封的说明必须能双语 --- */
     { img_lang_set("en");
       img_boot_plan_t p1 = plan(6,1,7601,IMG_PLAN_ARCH_X64,1);
       OK(strstr(p1.detail,"Secure Boot") != NULL, "img_lang_set(\"en\") → detail 变英文");

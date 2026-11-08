@@ -42,7 +42,7 @@ typedef struct {
     bool      is_new_container; /* ★ dst 模式：容器不存在，按扩展名新建（zip/7z/tar/tgz） */
 } img_path;
 
-/* 解析。失败返回 IMG_E*，why 里放人话。
+/* 解析。失败返回 IMG_E*，why 里填写说明。
  *
  * ★ 2026-11-08（P1 统一 copy）：新增 dst 模式。
  *   dst=true 时，容器文件【不存在】不报错 —— 按扩展名判格式。

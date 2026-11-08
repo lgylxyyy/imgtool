@@ -166,7 +166,7 @@ int img_bcd_remap(img_bcd *b, const img_bcd_remap_req_t *req,
  * 入参：template_path 模板 hive；out_path 输出；uefi=1 用 bootmgfw.efi/winload.efi，
  *       否则 bootmgr/winload.exe。MBR 需要 mbr_sig + sys_off + sr_off（字节偏移）；
  *       GPT 需要 sys_guid + disk_guid（esp_guid 可选）。
- * 出参：err 里放人话。*/
+ * 出参：err 里填写说明。*/
 typedef struct {
     const char *template_path;
     const char *out_path;

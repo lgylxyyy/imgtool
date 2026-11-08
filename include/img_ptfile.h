@@ -31,7 +31,7 @@ typedef struct {
 
 /* 读文件 → 解析 → **结构类校验**（不含"装不装得下目标盘"，那要看目标盘）。
  * 失败时：*code 填错误码（PT-FILE-BAD / PT-OVERLAP / PT-TOO-MANY / PT-DUP-GUID），
- *         at = 出问题的字段名，why = 人话；返回非 IMG_OK。
+ *         at = 出问题的字段名，why = 说明；返回非 IMG_OK。
  * 成功返回 IMG_OK，out 可直接喂给 img_parttable_write()。 */
 int img_ptfile_load(const char *path, img_ptfile_t *out,
                     char *code, size_t codecap,

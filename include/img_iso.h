@@ -31,7 +31,7 @@ typedef void (*img_iso_entry_cb)(void *ud, const char *name, bool is_dir,
                                  uint64_t size, uint64_t mtime);
 
 /* 打开镜像。io 由调用方持有（本模块不关闭它）；path 版内部自己开/关。
- * 失败返回负错误码，err 里放人话（可为 NULL）。*/
+ * 失败返回负错误码，err 里填写说明（可为 NULL）。*/
 int  img_iso_open_io(img_iso **out, img_io *io, char *err, size_t errcap);
 int  img_iso_open_path(img_iso **out, const char *path, char *err, size_t errcap);
 void img_iso_close(img_iso *iso);

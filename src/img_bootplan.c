@@ -21,7 +21,7 @@ img_plan_arch img_boot_plan_arch_from_wim(const char *t){
     return IMG_PLAN_ARCH_UNKNOWN;
 }
 
-/* 版本号 → 人话系统名（只用于 detail/os_name，App 想自己显示也可以） */
+/* 版本号 → 系统名（只用于 detail/os_name，App 想自己显示也可以） */
 /* 版本号(Version) 与 内部版本号(Build) 是两件事：Win10/11 的 Version 都是 10.0，
  * 只能靠 Build 分。对照表（微软官方 / winver 一致）：
  *   6.0 = Vista   6000 RTM / 6001 SP1 / 6002 SP2      32+64 位

@@ -56,7 +56,7 @@ typedef struct {
     char     os_version[32];        /* 10.0.22621（读得到才有）*/
 
     /* ---- 诊断 ---- */
-    char     note[200];             /* 一句人话（给日志，不给 UI 文案）*/
+    char     note[200];             /* 一句说明（给日志，不给 UI 文案）*/
 } img_winre_status_t;
 
 /* 只读检测。返回 IMG_OK（结果看 out 的 bool 字段）/ IMG_E*。

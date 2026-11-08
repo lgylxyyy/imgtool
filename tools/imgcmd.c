@@ -10,7 +10,7 @@
  *   App 用同一份码 + 自己的语言表渲染 —— 库里没有中文，加语言不用改库。
  *
  * 结果：stdout 一行 JSON 信封（App/脚本解析）
- *       stderr 人话行 + 失败卡片（人看；--progress=bar 或 tty 时）
+ *       stderr 说明行 + 失败卡片（人看；--progress=bar 或 tty 时）
  */
 #include "img_cmd.h"
 #include "img_text.h"
@@ -176,12 +176,12 @@ static long long ev_num_fld(const img_ev *e,const char *k,long long def){
     return def;
 }
 typedef struct { bool human; } ui_t;
-static void wr_all(int fd, const char *b, size_t n){   /* 忽略写失败（卡片/人话行丢了也不能拖垮命令本身）*/
+static void wr_all(int fd, const char *b, size_t n){   /* 忽略写失败（卡片/说明行丢了也不能拖垮命令本身）*/
     size_t off=0;
     while(off<n){ ssize_t w=write(fd,b+off,n-off); if(w<=0) return; off+=(size_t)w; }
 }
 
-/* ================= 人话行（Linux 风格） ================= */
+/* ================= 说明行（Linux 风格） ================= */
 static void on_event(const img_ev *e, void *ud){
     ui_t *ui=(ui_t*)ud;
     if(!ui||!ui->human) return;
@@ -450,15 +450,15 @@ int main(int argc, char **argv){
       else tmo=atoi(iot);
       img_io_watchdog_start(tmo);
       atexit(img_io_watchdog_stop); }
-    /* 屏幕形态：tty → 人话行；非 tty → JSON；--progress=bar|json|none 强制 */
+    /* 屏幕形态：tty → 说明行；非 tty → JSON；--progress=bar|json|none 强制 */
     ui.human = progress ? (!strcmp(progress,"bar")) : (isatty(2)!=0);
     if(progress && !strcmp(progress,"none")) ui.human=false;
-    /* ★ 人话模式 → 百分比行；--progress=json → 每条一行 {"ev":"progress",…}；
+    /* ★ 说明模式 → 百分比行；--progress=json → 每条一行 {"ev":"progress",…}；
      *   --progress=none / 默认非 tty → 不注册（零开销，只有一行信封）。*/
     if(progress && !strcmp(progress,"json")) img_cmd_set_progress(on_progress_json, NULL);
     else if(ui.human) img_cmd_set_progress(on_progress, &ui);
     img_out_open_fd(2, ui.human);      /* human=true → 库不再往 stderr 吐机器行 */
-    img_out_set_text(on_event, &ui);   /* ★ 库发码 → 这里出中文/英文人话行 */
+    img_out_set_text(on_event, &ui);   /* ★ 库发码 → 这里出中文/英文说明行 */
 
     if(!lvl) lvl=getenv("IMGTOOL_LOG_LEVEL");      /* 环境变量同样适用 */
     if(lvl){

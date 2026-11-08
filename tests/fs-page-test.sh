@@ -94,7 +94,7 @@ echo "════ ④ 参数名别名 / 命令专属参数（REQ-36）═══
 out=$($T copy --src="host:$W/src" --dst="host:$W/o5" --recursive=true --skip_trashed=true 2>/dev/null)
 echo "$out" | grep -q '"skipped_trashed":2' && ok "--skip_trashed（下划线）与中划线等价" || no "下划线别名" "$out"
 out=$($T move --src="host:$W/src" --dst="host:$W/m2" --recursive=true --skip-trashed=true 2>/dev/null)
-echo "$out" | grep -q 'move 不过滤回收站文件' && ok "move 传 --skip-trashed → 人话提示（不是\"未知参数\"）" || no "move 提示" "$out"
+echo "$out" | grep -q 'move 不过滤回收站文件' && ok "move 传 --skip-trashed → 说明提示（不是\"未知参数\"）" || no "move 提示" "$out"
 out=$($T ntfs.list --img="$Q" --lba="$SYS" --path=/ --sort=name --after=abc 2>/dev/null)
 echo "$out" | grep -q -- '--sort 与 --after 互斥' && ok "互斥判断先于类型校验" || no "互斥顺序" "$out"
 out=$($T ntfs.list --img="$Q" --lba="$SYS" --path=/ --sort=name --sort_max=1 2>/dev/null)

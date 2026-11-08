@@ -38,7 +38,7 @@ typedef enum {
 const char  *img_aw_fmt_name(img_aw_fmt f);
 /* 按扩展名定格式（.zip/.7z/.tar/.tgz/.tar.gz/.iso）；认不出返回 IMG_AW_NONE。 */
 img_aw_fmt   img_aw_fmt_by_name(const char *path);
-/* 已存在的包：按【魔数】定格式（扩展名会骗人）。rar/cab 返回 IMG_ENOTSUP + 人话。 */
+/* 已存在的包：按【魔数】定格式（扩展名会骗人）。rar/cab 返回 IMG_ENOTSUP + 说明。 */
 int          img_aw_fmt_of_existing(const char *path, img_aw_fmt *out,
                                     char *err, size_t errcap);
 /* 这个格式能不能写。rar/cab 不能。 */

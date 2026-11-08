@@ -20,7 +20,7 @@ int img_lang_en(void){
     return g_en;
 }
 
-/* zh → en。只收录【会进 JSON 信封 / 日志】的人话；注释和 CLI 专属文案不在这里。 */
+/* zh → en。只收录【会进 JSON 信封 / 日志】的说明；注释和 CLI 专属文案不在这里。 */
 static const char *const T[][2] = {
     {"重跑一次命令即可（新命令会清掉超时判定）",
      "Just run the command again (each command clears the previous timeout verdict)"},

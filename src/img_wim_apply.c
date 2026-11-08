@@ -92,7 +92,7 @@ int img_wim_list_images(const char *wim_path, char *buf, int cap){
 }
 
 /* ★ wimlib 1.14 的头文件声明了 wimlib_get_error_string()，但发行版的 libwim.so
- *   并没有导出这个符号（链接期 undefined reference）。我们只需要一句人话 + 错误码，
+ *   并没有导出这个符号（链接期 undefined reference）。我们只需要一句说明 + 错误码，
  *   自己给一条，避免依赖一个"声明存在但符号缺失"的 API。*/
 static const img_wimlib_code_t *wimlib_code_lookup(int code){
     for(int i=0;i<IMG_WIMLIB_CODES_N;i++) if(IMG_WIMLIB_CODES[i].code==code) return &IMG_WIMLIB_CODES[i];

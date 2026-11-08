@@ -185,7 +185,7 @@ static void hdr_to_ent(const struct RARHeaderDataEx *hd, img_rar_ent *e){
     e->mtime    = dos_to_unix(hd->FileTime);
     if(e->is_dir) e->size=0;
 }
-/* 统一的"读头 → 失败就翻成人话" */
+/* 统一的"读头 → 失败就转为可读文本" */
 static int rar_next_header(HANDLE h, struct RARHeaderDataEx *hd, img_rar_ent *e,
                            char *err, size_t cap, bool *pw){
     memset(hd,0,sizeof *hd);

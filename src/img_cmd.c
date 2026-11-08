@@ -202,9 +202,9 @@ void img_result_fail(img_result *r,int rc,const char *code,const char *at,
         if(r->at[0]) img_ev_str(&e,"at",r->at);
         img_ev_emit(&e);
     }
-    /* ★ 人话失败卡片（屏幕 + <镜像>.error.txt）：用户能整段复制发给我们 */
+    /* ★ 说明性失败卡片（屏幕 + <镜像>.error.txt）：用户能整段复制发给我们 */
     img_error_record(r->cmd, r->code, rc, r->at, NULL, r->why);   /* 结构化快照；
-                                                                   * 卡片/人话行由消费端（CLI/App）用各自的文案表渲染 */
+                                                                   * 卡片/说明行由消费端（CLI/App）用各自的文案表渲染 */
 }
 
 /* ---------- JSON 渲染（栈上，无 malloc） ---------- */
@@ -519,7 +519,7 @@ int img_cmd_exec(const char *name, img_ctx *ctx, const img_args *in, img_result 
     }
     /* ★ REQ-36：有些参数天然只属于某个命令。App 以前把 copy 的参数表共用给 move，
      *   结果 move 报"未知参数 --skip_trashed"，用户看到的是"复制和移动都坏了"。
-     *   这里给出人话，而不是笼统的"未知参数"。*/
+     *   这里给出说明，而不是笼统的"未知参数"。*/
     static const struct { const char *cmd,*arg,*why,*sug; } NOT_HERE[]={
         {"move","skip-trashed","move 不过滤回收站文件（整棵搬）","要排除就先 copy 再删源"},
         {"move","exclude",     "move 不支持 --exclude（整棵搬）","要排除就先 copy 再删源"},

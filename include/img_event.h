@@ -80,7 +80,7 @@ typedef struct img_ev {
 } img_ev;
 
 /* ★ 文案渲染回调：库只发【语义码 + 数值】，文案（中文/英文/图标）由消费端决定。
- *   CLI 传一个渲染中文/英文的回调；App 传自己的（或不传 = 不要人话行）。
+ *   CLI 传一个渲染中文/英文的回调；App 传自己的（或不传 = 不要说明行）。
  *   （这就是"库不带语言，语言在视图层"的落点）*/
 typedef void (*img_text_cb)(const img_ev *e, void *ud);
 void img_out_set_text(img_text_cb cb, void *ud);
@@ -160,7 +160,7 @@ const char *img_abi(void);                        /* "64-bit" */
 /* ---------- 失败卡片（0c 完整版；这里先落地最小可用） ---------- */
 void img_error_report(int rc, const char *code, const char *mod, const char *op,
                       const char *where, const char *why, const char *suggest);
-/* ★ 失败卡片：人话 + 可整段复制。写屏幕（human 模式）并落 <镜像>.error.txt，
+/* ★ 失败卡片：说明 + 可整段复制。写屏幕（human 模式）并落 <镜像>.error.txt，
  *   内容含：工具/版本/命令/镜像指纹 / 失败位置 / 错误码 / 原因 / 建议 / 事件尾部。
  *   App 侧可以直接把它塞进"复制到剪贴板"按钮。*/
 /* ---------- I/O 看门狗（无进展超时）----------

@@ -57,7 +57,7 @@ static void rm_rf(const char *dir){
 
 /* ★ wimlib 1.14 的头声明了 wimlib_get_error_string()，但发行版的 libwim.so 没导出
  *   这个符号（链接期 undefined reference）—— 与 img_wim_apply.c 同一对策：
- *   我们只需要一句人话 + 错误码，自己给一条，不依赖"声明存在但符号缺失"的 API。*/
+ *   我们只需要一句说明 + 错误码，自己给一条，不依赖"声明存在但符号缺失"的 API。*/
 static const char *wim_rc_str(int r){
     static char b[64];
     snprintf(b,sizeof b,"wimlib 错误码 %d",r);
@@ -603,7 +603,7 @@ int img_wim_stream_consume(const char *wim_path,int index,const char *inner_path
     wimlib_free(o.w);
     if(th_on) pthread_join(th,NULL);
     sigaction(SIGPIPE,&sa_old,NULL);
-    if(rc==IMG_OK && c.rc!=IMG_OK) rc=c.rc;   /* 消费侧的错误优先报（更像人话）*/
+    if(rc==IMG_OK && c.rc!=IMG_OK) rc=c.rc;   /* 消费侧的错误优先报（更贴合语义）*/
     if(rc==IMG_OK && out_size) *out_size=st.size_bytes;
     return rc;
 }
