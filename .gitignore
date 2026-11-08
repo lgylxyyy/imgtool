@@ -47,3 +47,8 @@ LICENSES/*.txt.bak
 # ESP 引导件：微软二进制，不入库（见 reference/esp/README.md）
 reference/esp/*.efi
 reference/esp/*.EFI
+
+# ── reference 里的 Windows 引导字节（2026-11-09 移出仓库，见 reference/README.md）──
+# 这些是从真 Windows 盘抽出来的 BCD / VBR / MBR 快照，只作研究参考。
+# 编译期内置模板仍在 src/img_bcd_tpl.h / img_vbr_tpl.h / img_mbr_tpl.h（程序要用）。
+reference/*.bin
