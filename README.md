@@ -21,7 +21,7 @@ Windows 引导（MBR 码 / VBR 码 / BCD / bootmgr / bootmgfw.efi / WinRE）。
 | **分区表** | MBR / GPT 读写、按角色自动布局（ESP + MSR + 系统 + 恢复）、增删改、属性位、导出/导入整表 |
 | **FAT32** | 列目录、读写文件、建目录、改名、删除、卷标、时间戳、8.3 短名处理 |
 | **NTFS** | 列目录、读写文件、递归复制/移动、删除、`du`、卷标、格式化（`mkntfs`） |
-| **WIM / ESD** | 列映像、估算展开体积、灌到分区、从映像里抽单个文件 |
+| **WIM / ESD** | 列映像、估算展开体积、灌到分区、从映像里抽单个文件、**捕获**（qcow2 → 新 WIM） |
 | **ISO** | 浏览 ISO9660 / UDF、抽取内部文件（`install.wim` 可直接从 ISO 里取） |
 | **压缩包** | zip / 7z / tar 浏览与解压（只读），**RAR 也能读**（内置 unrar 解码器） |
 | **引导** | 写 MBR/VBR 引导码、铺 `bootmgr` / `bootmgfw.efi` / `boot.sdi` / 字体、生成 BCD（BIOS 与 UEFI 两套）、引导自检、`win.finish` 收尾 |
@@ -190,7 +190,7 @@ imgcmd fat.put     --img=/sdcard/a.qcow2 --lba=<ESP> --src=/tmp/b.efi --dst=/EFI
 
 ---
 
-## 命令一览（75 条）
+## 命令一览（76 条）
 
 > 参数太多，这里只列**必填**参数；完整签名用 `imgcmd --list` 或 `imgcmd --help=<命令>`。
 
@@ -243,7 +243,7 @@ imgcmd fat.put     --img=/sdcard/a.qcow2 --lba=<ESP> --src=/tmp/b.efi --dst=/EFI
 | `wim.extract` | 从 WIM/ESD 里只读抽出【单个文件】到本地（--wim 可直接给 ISO；取消不留半成品） | wim, path, dst |
 | `wim.file-version` | 读映像里某个【文件】的 PE 版本（跨映像取引导文件前的版本闸门；不落临时文件） | path |
 | `wim.put` | 把 WIM/ESD/ISO 里的一个文件直接写进分区（0 临时文件；REQ-29） | img, lba, wim, path, dst-path |
-
+| `wim.capture` | 把系统盘捕获成 WIM/ESD（estimate=true 只算大小） | img, lba, out, path, comp, name |
 ### ntfs.*（9 条）
 
 | 命令 | 作用 | 必填参数 |

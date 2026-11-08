@@ -39,6 +39,7 @@
 #include "img_du.h"
 #include "img_win_finish.h"
 #include "img_reg.h"
+#include "img_wim_capture.h"
 #include "img_qcow2_int.h"   /* P3：img_vhd_create / img_vmdk_create */
 /* ---- 功能开关（CMake 降级判定；缺库时对应 =0，命令仍列在表里但明确报不可用）---- */
 #ifndef IMG_WITH_WIM
@@ -8435,6 +8436,95 @@ static int cmd_reg_del(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+/* ================= wim.capture（P4）：qcow2 → WIM ================= */
+static const img_arg A_WIMCAP[] = {
+    {"img",        IMG_A_STR,  true,  NULL, "源镜像（qcow2 / vhd / vmdk / raw）", NULL},
+    {"lba",        IMG_A_U64,  true,  NULL, "系统分区（NTFS）起始 LBA", chk_lba},
+    {"out",        IMG_A_STR,  false, NULL, "输出 WIM 路径（estimate=true 时可省）", NULL},
+    {"path",       IMG_A_STR,  false, NULL, "只捕获这个子目录（空=整盘）", NULL},
+    {"comp",       IMG_A_ENUM, false, "xpress","压缩：none | xpress | lzx | lzms(ESD)", NULL},
+    {"name",       IMG_A_STR,  false, "Windows","映像名", NULL},
+    {"desc",       IMG_A_STR,  false, NULL, "映像描述", NULL},
+    {"capture-acl",IMG_A_BOOL, false, "true","保留 ACL（默认 true）", NULL},
+    {"estimate",   IMG_A_BOOL, false, "false","只估算（不抽文件、不打 WIM）", NULL},
+};
+static int cmd_wim_capture(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba = img_args_u64(in,"lba",0);
+    const char *outw = img_args_get(in,"out");
+    const char *sub = img_args_get(in,"path");
+    const char *comp = img_args_get(in,"comp"); if(!comp) comp="xpress";
+    bool est_only = img_args_bool(in,"estimate",false);
+    img_qcow2 *q = img_ctx_qcow2(ctx);
+    if(!q) return qc_open_fail(out,ctx);
+
+    img_parttable_t *t=NULL;
+    int rc = img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){
+            pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在",NULL); return IMG_EINVAL; }
+
+    if(est_only){
+        uint64_t bytes=0, files=0; char err[256]="";
+        rc = img_wim_capture_estimate(img_ctx_path(ctx), lba, pb, sub, &bytes, &files, err, sizeof err);
+        if(rc != IMG_OK){
+            img_result_fail(out,rc,"WIM-ESTIMATE-FAIL",img_ctx_path(ctx),err,NULL);
+            return rc;
+        }
+        img_result_u64(out,"bytes_needed",bytes);
+        img_result_u64(out,"files",files);
+        img_result_u64(out,"bytes_needed_mb",(bytes+1048575)/1048576);
+        return IMG_OK;
+    }
+
+    if(!outw || !*outw){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","out","必须给输出 WIM 路径",NULL);
+        return IMG_EINVAL;
+    }
+    img_wim_comp c = IMG_WIM_COMP_XPRESS;
+    if(!strcasecmp(comp,"none")) c = IMG_WIM_COMP_NONE;
+    else if(!strcasecmp(comp,"lzx")) c = IMG_WIM_COMP_LZX;
+    else if(!strcasecmp(comp,"lzms")||!strcasecmp(comp,"esd")) c = IMG_WIM_COMP_LZMS;
+    else if(strcasecmp(comp,"xpress")){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","comp","只接受 none|xpress|lzx|lzms",NULL);
+        return IMG_EINVAL;
+    }
+
+    img_wim_capture_opts_t o;
+    memset(&o,0,sizeof o);
+    o.comp = c;
+    o.image_name = img_args_get(in,"name");
+    o.image_desc = img_args_get(in,"desc");
+    o.capture_acl = img_args_bool(in,"capture-acl",true);
+
+    img_wim_capture_result_t r;
+    char err[256]="";
+    img_span sp; img_span_prep(&sp,"wim","capture","捕获成 WIM");
+    img_span_kv_u64(&sp,"lba",lba); img_span_begin(&sp);
+    rc = img_wim_capture(img_ctx_path(ctx), lba, pb, sub, outw, &o, &r, img_cmd_prog(), err, sizeof err);
+    img_span_end(&sp,rc);
+    if(rc != IMG_OK){
+        const char *code = (rc==IMG_ENOTSUP)?"WIM-CAP-NOTSUP"
+                         : (rc==IMG_ESTATE)  ?"WIM-CAP-SRC-BAD"
+                                             :"WIM-CAP-FAIL";
+        img_result_fail(out,rc,code,outw,err[0]?err:"捕获失败",
+            "临时目录要能放下整棵树（Windows ≈ 15~25 GB）；先用 estimate=true 看需求");
+        return rc;
+    }
+    img_result_str(out,"wim",outw);
+    img_result_str(out,"compression",img_wim_comp_name(c));
+    img_result_u64(out,"files",r.files);
+    img_result_u64(out,"dirs",r.dirs);
+    img_result_u64(out,"bytes_in",r.bytes_in);
+    img_result_u64(out,"bytes_out",r.bytes_out);
+    img_result_u64(out,"tmpdir_need",r.tmpdir_need);
+    if(r.bytes_in && r.bytes_out)
+        img_result_u64(out,"ratio_pct", r.bytes_out*100/r.bytes_in);
+    return IMG_OK;
+}
+
 static const img_arg A_WINFINISH[] = {
     {"img",     IMG_A_STR,  true,  NULL,   "镜像路径（qcow2）", NULL},
     {"lba",     IMG_A_U64,  true,  NULL,   "Windows 系统分区起始 LBA", chk_lba},
@@ -9206,6 +9296,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_REGLIST,(int)(sizeof A_REGLIST/sizeof A_REGLIST[0]), cmd_reg_list, NULL, 0},
     {"reg.del", "1.0", "离线删除注册表值或键（删键默认不递归）",
         A_REGDEL,(int)(sizeof A_REGDEL/sizeof A_REGDEL[0]), cmd_reg_del, NULL, 0},
+    {"wim.capture", "1.0", "把 qcow2 里的系统盘捕获成 WIM/ESD（先抽到临时目录再打包；estimate=true 只估算）",
+        A_WIMCAP,(int)(sizeof A_WIMCAP/sizeof A_WIMCAP[0]), cmd_wim_capture, NULL, 0},
     {"copy", "1.0", "统一复制：同卷/跨分区/跨镜像/宿主/ISO/WIM；路径用 !p3: 语法",
         A_COPY,(int)(sizeof A_COPY/sizeof A_COPY[0]), cmd_copy,
         "copy \"<源路径>\" \"<目标路径>\" [--conflict=fail|overwrite|rename]", 2},
