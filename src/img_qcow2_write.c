@@ -254,8 +254,9 @@ int img_qcow2_create(img_io *dest, const img_qcow2_create_opts_t *o){
 /* ------------------------------------------------------------------ */
 int img_qcow2_write_init(img_qcow2 *q){
     if(!q) return IMG_EINVAL;
-    /* ★ P3：raw 无 qcow2 结构（无 L1/L2/refcount），不需要准备 */
-    if(q->fmt == DISK_FMT_RAW) return IMG_OK;
+    /* ★ P3：raw / VHD / VMDK 无 qcow2 结构（无 L1/L2/refcount），不需要准备 */
+    if(q->fmt == DISK_FMT_RAW || q->fmt == DISK_FMT_VHD || q->fmt == DISK_FMT_VMDK)
+        return IMG_OK;
     uint64_t cs = q->h.cluster_size;
     uint32_t rcb = q->refcount_bits ? q->refcount_bits : 16;
     q->refcount_bits = rcb;

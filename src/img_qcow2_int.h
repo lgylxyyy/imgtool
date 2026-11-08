@@ -62,6 +62,8 @@ int         img_fmt_open(img_qcow2 *q);       /* VHD/VMDK 打开（按 q->fmt �
 void        img_fmt_close(img_qcow2 *q);
 int         img_fmt_read(img_qcow2 *q, uint64_t off, void *buf, size_t len);
 int         img_fmt_write(img_qcow2 *q, uint64_t off, const void *buf, size_t len);
+int         img_vhd_create(img_io *io, uint64_t bytes);
+int         img_vmdk_create(img_io *io, uint64_t bytes);
 int         img_vhd_open(img_qcow2 *q);
 void        img_vhd_close(img_qcow2 *q);
 int         img_vhd_read(img_qcow2 *q, uint64_t off, void *buf, size_t len);

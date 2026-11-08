@@ -17,7 +17,7 @@ Windows 引导（MBR 码 / VBR 码 / BCD / bootmgr / bootmgfw.efi / WinRE）。
 
 | 领域 | 能力 |
 |---|---|
-| **镜像** | 建 qcow2、扩容、压缩回收（只写非零块）、克隆 |
+| **镜像** | 建 qcow2 / raw / vmdk、扩容、压缩回收（只写非零块）、克隆 |
 | **分区表** | MBR / GPT 读写、按角色自动布局（ESP + MSR + 系统 + 恢复）、增删改、属性位、导出/导入整表 |
 | **FAT32** | 列目录、读写文件、建目录、改名、删除、卷标、时间戳、8.3 短名处理 |
 | **NTFS** | 列目录、读写文件、递归复制/移动、删除、`du`、卷标、格式化（`mkntfs`） |
@@ -27,6 +27,18 @@ Windows 引导（MBR 码 / VBR 码 / BCD / bootmgr / bootmgfw.efi / WinRE）。
 | **引导** | 写 MBR/VBR 引导码、铺 `bootmgr` / `bootmgfw.efi` / `boot.sdi` / 字体、生成 BCD（BIOS 与 UEFI 两套）、引导自检、`win.finish` 收尾 |
 | **恢复环境** | 把 `winre.wim` 装进恢复分区或系统分区、写 `ReAgent.xml` / 恢复脚本 |
 | **注册表** | 离线读写 5 个标准 hive（SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT）；事务性：抽出→改→校验→写回 |
+
+### 磁盘格式
+
+| 格式 | 读 | 写 | 建盘 |
+|---|---|---|---|
+| **qcow2** | ✅ | ✅ | ✅ |
+| **raw**（.img/.raw/.dd） | ✅ | ✅ | ✅ |
+| **VHD**（vpc，动态盘） | ✅ | ✅ | ⚠️ 暂不支持（用 raw 转） |
+| **VMDK**（sparse） | ✅ | ✅ | ✅ |
+
+格式按**魔数**自动识别，不看扩展名；统一路径语法对四种格式一视同仁
+（`copy --src="disk.vhd!p2:/x"` 之类）。
 
 **不做的事**：不启动虚拟机、不联网、不做在线挂载。镜像必须处于关机状态 ——
 我们是绕过文件系统驱动直接改元数据，两个写入方同时改必然损坏。

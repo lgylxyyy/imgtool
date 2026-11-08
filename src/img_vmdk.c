@@ -45,6 +45,9 @@ static uint64_t rd_le64(const uint8_t *p){
 static void wr_le32(uint8_t *p, uint32_t v){
     p[0]=v&0xff; p[1]=(v>>8)&0xff; p[2]=(v>>16)&0xff; p[3]=(v>>24)&0xff;
 }
+static void wr_le64(uint8_t *p, uint64_t v){
+    for(int i=0;i<8;i++){ p[i]=v&0xff; v>>=8; }
+}
 
 int img_vmdk_open(img_qcow2 *q){
     if(!q || !q->io) return IMG_EINVAL;
@@ -206,5 +209,64 @@ int img_vmdk_write(img_qcow2 *q, uint64_t off, const void *buf, size_t len){
         if(img_io_write_full(q->io, data_off, in + done, n) != IMG_OK) return IMG_EIO;
         done += n;
     }
+    return IMG_OK;
+}
+
+/* ---------------- 创建 sparse VMDK ----------------
+ * 布局：[sparse头][描述符(1扇区)][GD][RGD][...数据区]
+ * qemu 兼容：rgdOffset（冗余 GD）也写一份。 */
+int img_vmdk_create(img_io *io, uint64_t bytes){
+    if(!io || !bytes) return IMG_EINVAL;
+    uint64_t sectors = (bytes + VMDK_SECTOR - 1) / VMDK_SECTOR;
+    uint32_t grain = 128;               /* 64KB grain */
+    uint32_t gtes = 512;
+    uint64_t grains_total = (sectors + grain - 1) / grain;
+    uint32_t num_gts = (uint32_t)((grains_total + gtes - 1) / gtes);
+    if(num_gts == 0) num_gts = 1;
+
+    /* sparse 头 */
+    uint8_t hdr[512]; memset(hdr, 0, sizeof hdr);
+    memcpy(hdr, "KDMV", 4);
+    wr_le32(hdr+4,  1);                          /* version */
+    wr_le32(hdr+8,  3);                          /* flags: sparse|embedded desc */
+    wr_le64(hdr+12, sectors);                    /* capacity */
+    wr_le32(hdr+20, grain);
+    wr_le32(hdr+28, 1);                          /* descriptorOffset（扇区）*/
+    wr_le32(hdr+36, 20);                         /* descriptorSize（扇区 = 10KB）*/
+    wr_le32(hdr+44, gtes);
+    wr_le32(hdr+48, 2 + 20);                     /* rgdOffset：描述符后 */
+    wr_le32(hdr+56, 2 + 20 + num_gts);           /* gdOffset：rgd 后 */
+    wr_le32(hdr+64, 2 + 20 + num_gts*2);         /* overHead */
+    if(img_io_write_full(io, 0, hdr, sizeof hdr) != IMG_OK) return IMG_EIO;
+
+    /* 描述符（文本）*/
+    char desc[1024];
+    int dn = snprintf(desc, sizeof desc,
+        "# Disk DescriptorFile\nversion=1\nCID=fffffffe\nparentCID=ffffffff\n"
+        "createType=\"sparse\"\n\n"
+        "# Extent description\n"
+        "RW %llu SPARSE \"%s\"\n\n"
+        "# The Disk Data Base \n#DDB\n\n"
+        "ddb.virtualHWVersion = \"4\"\nddb.geometry.cylinders = \"%llu\"\n"
+        "ddb.geometry.heads = \"16\"\nddb.geometry.sectors = \"63\"\n",
+        (unsigned long long)grains_total, "disk.vmdk",
+        (unsigned long long)(sectors / (16*63) + 1));
+    if(img_io_write_full(io, VMDK_SECTOR, desc, (size_t)dn) != IMG_OK) return IMG_EIO;
+
+    /* GD + RGD（全 0 = 未分配）*/
+    size_t gd_bytes = (size_t)num_gts * 4;
+    uint8_t *zero = (uint8_t*)calloc(1, gd_bytes);
+    if(!zero) return IMG_ENOMEM;
+    uint64_t rgd_off = (uint64_t)(2+20) * VMDK_SECTOR;
+    uint64_t gd_off  = (uint64_t)(2+20+num_gts) * VMDK_SECTOR;
+    if(img_io_write_full(io, rgd_off, zero, gd_bytes) != IMG_OK){ free(zero); return IMG_EIO; }
+    if(img_io_write_full(io, gd_off, zero, gd_bytes) != IMG_OK){ free(zero); return IMG_EIO; }
+    free(zero);
+    /* ★ 预留 overHead 区（qemu 要求文件至少到 overHead 末尾）。
+     *   规则：overHead = gd 之后 1 个扇区；文件 truncate 到 overHead*512。
+     *   不预留的话 qemu 报 "File truncated, expecting at least N bytes"。 */
+    uint64_t overHead_sect = (uint64_t)(2 + 20 + num_gts * 2 + 1);
+    if(img_io_truncate(io, overHead_sect * VMDK_SECTOR) != IMG_OK) return IMG_EIO;
+    (void)img_io_sync(io);
     return IMG_OK;
 }

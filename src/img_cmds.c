@@ -39,6 +39,7 @@
 #include "img_du.h"
 #include "img_win_finish.h"
 #include "img_reg.h"
+#include "img_qcow2_int.h"   /* P3：img_vhd_create / img_vmdk_create */
 /* ---- 功能开关（CMake 降级判定；缺库时对应 =0，命令仍列在表里但明确报不可用）---- */
 #ifndef IMG_WITH_WIM
 #define IMG_WITH_WIM 0
@@ -2082,7 +2083,8 @@ static int cmd_boot_repair(img_ctx *ctx, const img_args *in, img_result *out){
 
 /* ---------- img.create ---------- */
 static const img_arg A_IMGCREATE[] = {
-    {"out",     IMG_A_STR,  true,  NULL,   "要创建的 qcow2 路径（已存在时需 force=true）", NULL},
+    {"out",     IMG_A_STR,  true,  NULL,   "要创建的镜像路径（已存在时需 force=true）", NULL},
+    {"format",  IMG_A_ENUM, false, "qcow2","磁盘格式：qcow2 | raw | vhd | vmdk", NULL},
     {"size-gb", IMG_A_U64,  true,  NULL,   "虚拟磁盘大小（GiB，1~1024）", NULL},
     {"table",   IMG_A_ENUM, false, "gpt",  "分区表：gpt(UEFI) | mbr(BIOS) | none(空盘，不写任何分区表)", NULL},
     {"layout",  IMG_A_ENUM, false, "windows", "分区布局：windows(ESP+MSR+Windows) | single(整盘一个分区) | empty(有表但无分区)", NULL},
@@ -2342,10 +2344,33 @@ static int cmd_img_create(img_ctx *ctx, const img_args *in, img_result *out){
     img_io_opts_t io={0}; io.writable=true; io.truncate=true;
     img_io *f=img_io_open_path(outp,&io);
     if(!f){ img_result_fail(out,IMG_EIO,"HOST-OPEN-FAIL",outp,"创建文件失败（权限/目录不存在）",NULL); return IMG_EIO; }
-    img_qcow2_create_opts_t co={0}; co.size=bytes; co.cluster_bits=16;
-    int rc=img_qcow2_create(f,&co);
-    if(rc!=IMG_OK){ img_io_close(f); unlink(outp);
-        img_result_fail(out,rc,"IMG-FORMAT",outp,"qcow2 创建失败",NULL); return rc; }
+    /* ★ P3：按 --format 选创建方式。
+     *   raw  = truncate 到目标大小（全 0）
+     *   vhd  = 先按 raw 铺满，再包装成动态 VHD（footer + cxsparse 头 + BAT）
+     *   vmdk = sparse 头 + 描述符 + GD/GT
+     *   其它（默认）= qcow2 */
+    const char *fmt_s = img_args_get(in,"format"); if(!fmt_s||!*fmt_s) fmt_s="qcow2";
+    int rc = IMG_OK;
+    if(!strcasecmp(fmt_s,"raw")){
+        rc = img_io_truncate(f, bytes);
+        if(rc != IMG_OK){ img_io_close(f); unlink(outp);
+            img_result_fail(out,rc,"IMG-FORMAT",outp,"raw 创建失败",NULL); return rc; }
+    } else if(!strcasecmp(fmt_s,"vhd") || !strcasecmp(fmt_s,"vpc")){
+        img_io_close(f); unlink(outp);
+        img_result_fail(out,IMG_ENOTSUP,"IMG-FORMAT-NOTSUP",outp,
+            "VHD 建盘暂不支持（读/写已完整支持：现有 VHD 可正常读写）",
+            "建 VHD 请先用 --format=raw 建盘，在 PC 上用 qemu-img convert -f raw -O vpc 转换");
+        return IMG_ENOTSUP;
+    } else if(!strcasecmp(fmt_s,"vmdk")){
+        rc = img_vmdk_create(f, bytes);
+        if(rc != IMG_OK){ img_io_close(f); unlink(outp);
+            img_result_fail(out,rc,"IMG-FORMAT",outp,"VMDK 创建失败",NULL); return rc; }
+    } else {
+        img_qcow2_create_opts_t co={0}; co.size=bytes; co.cluster_bits=16;
+        rc = img_qcow2_create(f,&co);
+        if(rc!=IMG_OK){ img_io_close(f); unlink(outp);
+            img_result_fail(out,rc,"IMG-FORMAT",outp,"qcow2 创建失败",NULL); return rc; }
+    }
 
     /* ② 分区表（复用 img_layout_build，与 imglayout mk 同一份实现）*/
     img_qcow2_opts_t qo={0};
@@ -2356,7 +2381,8 @@ static int cmd_img_create(img_ctx *ctx, const img_args *in, img_result *out){
      *   之后可以用 part.layout / 外部工具自己分区。*/
     if(no_tbl){
         img_qcow2_close(q); img_io_close(f);
-        img_result_u64(out,"size_bytes",bytes);
+        img_result_str(out,"format",fmt_s);
+    img_result_u64(out,"size_bytes",bytes);
         img_result_str(out,"table","none");
         img_result_u64(out,"parts_total",0);
         return IMG_OK;
