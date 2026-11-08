@@ -8169,6 +8169,7 @@ static const img_arg A_COPY[] = {
     {"list_file", IMG_A_STR, false, NULL, "批量：每行 `源路径>目标路径`（可带 !p3:）", NULL},
     {"on_fail", IMG_A_ENUM, false, "continue", "批量失败策略：continue | stop", NULL},
     {"skip-trashed",IMG_A_BOOL,false,"true", "递归子项跳过 .trashed-*（Android 系统回收站）；顶层 src 不受影响（REQ-32）", NULL},
+    {"max-depth", IMG_A_U64, false, "32", "目录递归深度上限（P1；超限报 COPY-DEPTH-EXCEEDED）", NULL},
     {"exclude", IMG_A_STR, false, NULL,    "basename 通配排除，逗号分隔（如 .trashed-*,*.tmp）；大小写敏感", NULL},
     {"exclude-from",IMG_A_STR,false,NULL,  "排除清单文件（一行一条，tar -X 风格，只按 basename 匹配）", NULL},
 };
@@ -8237,7 +8238,7 @@ static const char *op_code(int rc, int side){
         case IMG_ECYCLE:     return "COPY-INTO-SELF";
         case IMG_EREADONLY:  return "PATH-READONLY";
         case IMG_EPARTIAL:   return "MOVE-PARTIAL";
-        case IMG_EREFUSED:   return "MOVE-HOST-DELETE-REFUSED";
+        case IMG_EREFUSED:   return "COPY-DEPTH-EXCEEDED";   /* ★ P1：copy 深度超限；move 的宿主删源拒绝另有码 */
         case IMG_ENAMEINVALID:return "NAME-INVALID";
         default:             return "COPY-FAIL";
     }
@@ -8307,6 +8308,9 @@ static int cmd_copy(img_ctx *ctx, const img_args *in, img_result *out){
     /* ★ REQ-32：copy 默认跳过 Android 系统回收站（.trashed-*），只作用于递归子项；
      *   --exclude 可给逗号分隔的 basename 通配；--exclude-from 一行一条。*/
     o.skip_trashed=img_args_bool(in,"skip-trashed",true);
+    o.max_depth=(int)img_args_u64(in,"max-depth",32);   /* ★ P1：可调递归深度 */
+    if(o.max_depth<1) o.max_depth=32;
+    if(o.max_depth>256) o.max_depth=256;
     const char *ex=img_args_get(in,"exclude");
     if(ex && *ex){
         const char *p=ex;
@@ -8369,7 +8373,7 @@ static int cmd_copy(img_ctx *ctx, const img_args *in, img_result *out){
             img_path ps,pd; int rc;
             memset(&ps,0,sizeof ps); memset(&pd,0,sizeof pd);
             rc=img_path_parse(a,&ps,NULL,0);
-            if(rc==IMG_OK) rc=img_path_parse(b,&pd,NULL,0);
+            if(rc==IMG_OK) rc=img_path_parse_dst(b,&pd,NULL,0);   /* ★ P1: dst 允许新建容器 */
             img_xcopy_stats stx; memset(&stx,0,sizeof stx);
             if(rc==IMG_OK && pd.is_readonly) rc=IMG_EREADONLY;
             if(rc==IMG_OK){
@@ -8403,11 +8407,19 @@ static int cmd_copy(img_ctx *ctx, const img_args *in, img_result *out){
 
     img_path ps,pd;
     int rc=parse_or_fail(ss,&ps,"src",out);
-    if(rc==IMG_OK) rc=parse_or_fail(ds,&pd,"dst",out);
-    if(rc!=IMG_OK){ img_path_cleanup(&ps); return rc; }
-    if(pd.is_readonly){
+    if(rc==IMG_OK) rc=img_path_parse_dst(ds,&pd,NULL,0);   /* ★ P1: dst 允许新建容器 */
+    if(rc!=IMG_OK){
+        img_result_fail(out,rc,"PATH-BAD",ds,
+            (rc==IMG_ENOENT)?"目标容器不存在（dst 新建只支持 zip/7z/tar/tgz）":"目标路径无法解析",
+            "dst 写法：/x/a.zip!:/f.txt（新建包）、host:/x、/x.qcow2!p3:/f.txt");
         img_path_cleanup(&ps); img_path_cleanup(&pd);
-        img_result_fail(out,IMG_EREADONLY,"PATH-READONLY",ds,"目标是只读容器（ISO/WIM/ESD/压缩包）",NULL);
+        return rc;
+    }
+    /* ★ P1（2026-11-08）：is_new_container 的包不算只读 —— 它就是要被写出来的。
+     *   真只读（ISO/WIM/ESD、已存在的 RAR）仍由 pd.is_readonly 拦。 */
+    if(pd.is_readonly && !pd.is_new_container){
+        img_path_cleanup(&ps); img_path_cleanup(&pd);
+        img_result_fail(out,IMG_EREADONLY,"PATH-READONLY",ds,"目标是只读容器（ISO/WIM/ESD/RAR）",NULL);
         return IMG_EREADONLY;
     }
     img_xloc ls,ld; p2loc(&ps,&ls); p2loc(&pd,&ld);

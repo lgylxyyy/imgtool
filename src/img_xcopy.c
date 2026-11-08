@@ -236,6 +236,9 @@ static int ep_open(xep *e, const img_xloc *loc, img_ctx *shared, bool writable,
         rc=img_wim_extract_tree(loc->img, loc->index?loc->index:1, loc->path,
                                 dir, NULL, err, sizeof err);
         if(rc!=IMG_OK) return rc;
+        /* ★ P1（2026-11-08）：wimlib_extract_paths 抽 "/1" 到 out_dir 时，
+         *   会在 out_dir 下【保留 "/1" 这一层】（实测 out_dir/1/2/3）。
+         *   所以源根要拼上 loc->path，才是用户要的那棵子树。 */
         snprintf(e->root,sizeof e->root,"%s%s",dir,loc->path);
         /* 材料化之后就是一棵普通本地树：后续 stat/list/read 全走宿主分支。
          * tmp_root 仍然记着，关闭端点时整棵删掉。*/
@@ -385,6 +388,14 @@ static void cb_ntfs(void *ud, const char *name, bool is_dir, uint64_t size){
 static void cb_fat(void *ud, const char *name, bool is_dir, uint64_t size){
     xlist_push((xlist*)ud,name,is_dir,size);
 }
+/* ★ P1：压缩包索引 walk 的回调（条目带完整路径，只取名） */
+static void cb_arch(void *ud, const img_archive_ent *e){
+    if(!e) return;
+    const char *nm=strrchr(e->path,'/');
+    nm = nm ? nm+1 : e->path;
+    if(!*nm) return;                        /* 根目录自身 */
+    xlist_push((xlist*)ud, nm, e->is_dir, e->size);
+}
 static void cb_iso(void *ud, const char *name, bool is_dir, uint64_t size, uint64_t mtime){
     (void)mtime;
     xlist_push((xlist*)ud,name,is_dir,size);
@@ -441,6 +452,16 @@ static int src_list(xep *s, const char *path, xlist *l){
          *   直接当 rc 用会把"9 个条目"误判成错误 +9。*/
         int n=img_iso_list(s->iso,path,cb_iso,l);
         rc=(n>=0)?IMG_OK:n;
+        break;
+    }
+    case IMG_XK_ARCHIVE:{
+        /* ★ P1（2026-11-08）：压缩包目录枚举。索引扫一遍包（20 万条 ≈0.4s），
+         *   walk 拿【直接子项】。回调是 (ud, const img_archive_ent*)。 */
+        img_archive_index *ix=NULL; char err[256]="";
+        int rc2=img_archive_index_build(s->loc.img,&ix,err,sizeof err);
+        if(rc2!=IMG_OK){ rc=rc2; break; }
+        rc=img_archive_index_walk(ix,path,false,cb_arch,l);
+        img_archive_index_release(ix);
         break;
     }
     default: rc=IMG_ENOTSUP; break;
@@ -1107,7 +1128,7 @@ static int x_excluded(const img_xcopy_opts *o, const char *name){
 }
 
 static int copy_dir(xctx *c, const char *spath, const char *dpath, int depth, bool top){
-    if(depth>c->max_depth) return IMG_ESTATE;
+    if(depth>c->max_depth) return IMG_EREFUSED;   /* ★ P1：深度超限（原来 ESTATE 会被误报成"目标类型冲突"）*/
     char final[4096]; bool existed=false, ed=false;
     int rc=resolve_final(c,spath,dpath,top,final,sizeof final,&existed,&ed);
     if(rc!=IMG_OK) return rc;

@@ -39,10 +39,20 @@ typedef struct {
     char      inner[2048];   /* 容器内路径（/ 开头；HOST 时为空） */
     char      temp_path[2048]; /* 需要清理的临时文件（可为空） */
     bool      is_readonly;   /* 链上有 ISO/WIM/ESD */
+    bool      is_new_container; /* ★ dst 模式：容器不存在，按扩展名新建（zip/7z/tar/tgz） */
 } img_path;
 
-/* 解析。失败返回 IMG_E*，why 里放人话。 */
+/* 解析。失败返回 IMG_E*，why 里放人话。
+ *
+ * ★ 2026-11-08（P1 统一 copy）：新增 dst 模式。
+ *   dst=true 时，容器文件【不存在】不报错 —— 按扩展名判格式。
+ *   这样 `copy --dst=/x/a.zip!:/f.txt` 能"新建包并写第一个文件"。
+ *   （源侧仍然必须存在：不存在就是真的打不开。） */
 int  img_path_parse(const char *spec, img_path *out, char *why, size_t whycap);
+int  img_path_parse_ex(const char *spec, img_path *out, bool is_dst, char *why, size_t whycap);
+static inline int img_path_parse_dst(const char *spec, img_path *out, char *why, size_t whycap){
+    return img_path_parse_ex(spec, out, true, why, whycap);
+}
 
 /* 渲染成规范串（错误信息/日志用）。 */
 int  img_path_format(const img_path *p, char *out, size_t cap);

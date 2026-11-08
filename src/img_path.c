@@ -113,6 +113,14 @@ static int detect_container(const char *path, int *type, char *why, size_t cap){
     if(n>=2 && b[0]==0x1f && b[1]==0x8b){ close(fd); *type=CT_ARCHIVE; return IMG_OK; }
     if(n>=6 && !memcmp(b,"\xFD""7zXZ",5)){ close(fd); *type=CT_ARCHIVE; return IMG_OK; }
     if(n>=3 && !memcmp(b,"BZh",3)){ close(fd); *type=CT_ARCHIVE; return IMG_OK; }
+    /* ★ P1（2026-11-08）：tar 的魔数在偏移 257（"ustar"）—— 注释早就写了，
+     *   但代码一直没实现，导致 .tar 包被当成"不认识的容器"。 */
+    {
+        unsigned char tb[6]={0};
+        if(pread(fd,tb,6,257)==6 && (!memcmp(tb,"ustar",5) || !memcmp(tb,"ustar\0",6))){
+            close(fd); *type=CT_ARCHIVE; return IMG_OK;
+        }
+    }
     n=pread(fd,b,8,0x8001);
     if(n==8 && (!memcmp(b,"CD001",5) || !memcmp(b,"BEA01",5) ||
                 !memcmp(b,"NSR02",5) || !memcmp(b,"NSR03",5))){
@@ -242,6 +250,9 @@ static int materialize_iso_wim(const char *iso_path, const char *inner,
 
 /* ---------- 顶层解析 ---------- */
 int img_path_parse(const char *spec, img_path *out, char *why, size_t whycap){
+    return img_path_parse_ex(spec,out,false,why,whycap);
+}
+int img_path_parse_ex(const char *spec, img_path *out, bool is_dst, char *why, size_t whycap){
     if(why && whycap) why[0]=0;
     if(!spec || !*spec || !out){ setwhy(why,whycap,"路径为空"); return IMG_EINVAL; }
     memset(out,0,sizeof *out);
@@ -271,6 +282,21 @@ int img_path_parse(const char *spec, img_path *out, char *why, size_t whycap){
 
     int ct=0;
     int rc=detect_container(out->host,&ct,why,whycap);
+    if(rc==IMG_ENOENT && is_dst){
+        /* ★ P1（2026-11-08）：目标侧允许"新建容器"。按扩展名判：
+         *   zip/7z/tar/tgz → CT_ARCHIVE；iso → CT_ISO（稍后写层报只读）；
+         *   其余扩展名照旧报 ENOENT（不打哑谜）。 */
+        const char *ext=strrchr(out->host,'.');
+        if(ext && (!strncasecmp(ext,".zip",4)||!strncasecmp(ext,".7z",3)||
+                   !strncasecmp(ext,".tar",4)||!strncasecmp(ext,".tgz",4)))
+            ct=CT_ARCHIVE;
+        else if(ext && !strncasecmp(ext,".iso",4))
+            ct=CT_ISO;
+        else
+            return rc;
+        rc=IMG_OK;
+        out->is_new_container=true;
+    }
     if(rc!=IMG_OK) return rc;
 
     const char *rest=bang+1;

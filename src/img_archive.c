@@ -587,6 +587,26 @@ int img_archive_read_entry(const char *path, const char *inner, bool is_dir,
         return img_rar_read(path,inner,(img_rar_data_cb)cb,ud,out_bytes,prog,err,errcap);
 #endif
     char want[512]; norm_path(inner,want,sizeof want);
+    /* ★ P1（2026-11-08）：包根 "/" 特殊处理 —— 包内条目名不带前导 /（"a.txt"），
+     *   而 norm_path 把 "/" 归一成 "/"，前缀匹配永不成立 → 根永远 ENOENT。
+     *   根目录的语义是"存在且是目录"（包非空即成立），子项由 walk 枚举。 */
+    if(!strcmp(want,"/")){
+        char first[512]; bool any=false;
+        for(int pass=0; pass<2 && !any; pass++){
+            struct archive *a=NULL;
+            if(open_for_read(path,pass==1,&a,err,errcap)!=IMG_OK) return IMG_EFORMAT;
+            struct archive_entry *e;
+            while(archive_read_next_header(a,&e)==ARCHIVE_OK){
+                const char *raw=archive_entry_pathname(e);
+                if(raw && *raw){ any=true; break; }
+                archive_read_data_skip(a);
+            }
+            archive_read_free(a);
+        }
+        if(!any){ set_err(err,errcap,"包里没有任何条目：%s",want); return IMG_ENOENT; }
+        /* read_entry 的 is_dir 是【值参】，根目录时无需改动 */
+        return IMG_OK;
+    }
     for(int pass=0; pass<2; pass++){
         struct archive *a=NULL;
         int rc=open_for_read(path,pass==1,&a,err,errcap);
@@ -760,6 +780,25 @@ int img_archive_stat(const char *path, const char *inner, bool *isdir,
         return img_rar_stat(path,inner,isdir,size,mtime,err,errcap);
 #endif
     char want[512]; norm_path(inner,want,sizeof want);
+    /* ★ P1（2026-11-08）：包根 "/" 特殊处理 —— 包内条目名不带前导 /（"a.txt"），
+     *   前缀匹配永不成立 → 根永远 ENOENT。根的语义 = "存在且是目录"（包非空即成立）。 */
+    if(!strcmp(want,"/")){
+        bool any=false;
+        for(int pass=0; pass<2 && !any; pass++){
+            struct archive *a=NULL;
+            if(open_for_read(path,pass==1,&a,err,errcap)!=IMG_OK) return IMG_EFORMAT;
+            struct archive_entry *e;
+            while(archive_read_next_header(a,&e)==ARCHIVE_OK){
+                const char *raw=archive_entry_pathname(e);
+                if(raw && *raw){ any=true; break; }
+                archive_read_data_skip(a);
+            }
+            archive_read_free(a);
+        }
+        if(!any){ set_err(err,errcap,"包里没有任何条目：%s",want); return IMG_ENOENT; }
+        if(isdir) *isdir=true;
+        return IMG_OK;
+    }
     for(int pass=0; pass<2; pass++){
         struct archive *a=NULL;
         if(open_for_read(path,pass==1,&a,err,errcap)!=IMG_OK) return IMG_EFORMAT;
