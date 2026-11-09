@@ -28,8 +28,32 @@ cmake --build "$ROOT/build" -j"$(nproc)"
 
 echo
 if [ "${MODE:-full}" = "debug-fat" ]; then
-  echo "════ 调试模式：只复现 FAT 的 buffer overflow 并打栈 ════"
-  exec bash "$ROOT/ci/repro-fat.sh"
+  echo "════ 调试模式：跑真实测试，崩溃就抓 argv + 栈 ════"
+  T="$ROOT/build/tools"
+  # 套一层壳：正常快跑；只有子进程被信号杀掉时，才用 gdb 重跑同一条命令打栈。
+  cp -f "$T/imgcmd" "$T/imgcmd.real"
+  cat > "$T/imgcmd" <<'WRAP'
+#!/bin/bash
+here="$(cd "$(dirname "$0")" && pwd)"
+real="$here/imgcmd.real"
+"$real" "$@"; rc=$?
+if [ "$rc" -ge 128 ]; then
+  echo "=== 崩溃 rc=$rc ===" >&2
+  echo "=== argv: $* ===" >&2
+  gdb -batch -nx -ex run -ex 'bt 20' --args "$real" "$@" 2>&1 | tail -40 >&2
+fi
+exit "$rc"
+WRAP
+  chmod +x "$T/imgcmd"
+  for t in copy-test.py fileops-test.py xcopy-test.py ads-test.sh fat-fs-test.py; do
+    echo
+    echo "──── $t ────"
+    case "$t" in
+      *.py) python3 "$ROOT/tests/$t" 2>&1 | grep -nE '崩溃|argv:|^#[0-9]+ |✅|❌|结果：' | tail -80 || true ;;
+      *)    bash    "$ROOT/tests/$t" 2>&1 | grep -nE '崩溃|argv:|^#[0-9]+ |✅|❌|结果：' | tail -80 || true ;;
+    esac
+  done
+  exit 0
 fi
 
 echo "════ 3. 依赖能力断言（缺库会让用例静默跳过，这里必须拦下）════"
