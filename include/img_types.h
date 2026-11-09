@@ -148,42 +148,39 @@ typedef void (*img_progress_cb)(void *ud, const img_progress_t *p);
 const char *img_phase_name(img_phase_t ph);
 const char *img_op_name(img_op_t op);
 
+/* ---------------- 临时目录 ----------------
+ * 可写临时目录按 IMGTOOL_TMPDIR → TMPDIR → /tmp 顺序取第一个可写的。
+ * 库内不得写死 "/tmp"。返回 NULL 表示没有可写目录，调用方必须报错。
+ * 已删除「容器所在目录」这一档：映像可能位于只读路径或其他应用目录下。 */
+const char *img_tmpdir(void);
+
+/* 口径自查（sys.tmpdir 命令用）：
+ *   img_tmpdir_source() 回报命中的档位：env / tmpdir / fallback
+ *   img_tmpdir_reset()  让下次 img_tmpdir() 重新解析（env 中途变更时）
+ *   img_tmpdir_sweep()  清理已退出进程留下的残留，返回删除条目数
+ *   img_tmpdir_free_bytes() 查询该目录所在卷的空间 */
+const char *img_tmpdir_source(void);
+void        img_tmpdir_reset(void);
+int         img_tmpdir_sweep(void);
+int         img_tmpdir_free_bytes(uint64_t *out_free, uint64_t *out_total);
+
+/* ntfs-3g / wimlib 需要一个已存在的普通文件作为设备名占位（两者会 realpath 它，
+ * wimlib 还要 stat 判类型）。不得写死相对路径：进程工作目录可能是 "/"。
+ * 返回 NULL 表示没有可写目录。占位文件按 pid 生命周期管理，
+ * 创建时清理已退出进程的同类文件，退出时由 atexit 删除自身。 */
+const char *img_dev_placeholder(void);
+
+/* ---------------- 统一临时文件命名 ----------------
+ * 所有临时文件与目录都经这两个入口创建，命名统一为：
+ *   imgtool-tmp-<用途>-<pid>-<序号>       文件
+ *   imgtool-tmp-<用途>-<pid>-XXXXXX      目录（mkdtemp）
+ * 用途 token 为 [a-z0-9-]+，由调用方给定（如 iso-wim、pe-core、wimcap）。
+ * 清理契约：调用方用完即删；atexit 删除本 pid 的全部条目；
+ * 每条命令开头 img_tmpdir_sweep() 删除已退出进程的残留。 */
+const char *img_tmpfile(const char *purpose, char *out, size_t cap);
+int         img_tmpfile_dir(const char *purpose, char *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif
-/* 可写临时目录：IMGTOOL_TMPDIR → TMPDIR → /tmp → "."，取第一个可写的。
- * ★ 安卓没有 /tmp，库内任何地方都不许再写死 "/tmp"。返回 NULL 表示没有可写目录，
- *   调用方必须报错，不能继续往 /tmp 上撞。 */
-const char *img_tmpdir(void);
-
-/* ntfs-3g / wimlib 需要一个"已存在的普通文件"当设备名占位（它们会 realpath 它，
-   wimlib 还要 stat 判类型）。★ 绝不能写死相对路径：App 进程的工作目录是 "/"，
-   根本创建不了文件（真机上 wim.apply 就是这么废掉的）。返回 NULL = 没有可写目录。 */
-const char *img_dev_placeholder(void);
-
 #endif
-
-/* ---- P1-6（2026-11-08）：统一临时文件 API ----------------------------
- * 所有临时文件/目录一律走这两个入口，命名统一为：
- *     imgtool-tmp-<用途>-<pid>-<序号>        （文件）
- *     imgtool-tmp-<用途>-<pid>-XXXXXX       （mkdtemp 目录）
- * 用途 token 一律 [a-z0-9-]+，由调用方给（"iso-wim"/"pe-core"/"aw"…）。
- * 清理契约：
- *   · 正常路径：调用方用完 unlink/rm_rf（img_tmpfile_open 的 fd 关闭即可）；
- *   · 异常退出：atexit 兜底删自己 pid 的文件；
- *   · App 启动：img_tmpdir_sweep() 清掉【已死 pid】留下的 imgtool-tmp-*。
- *   （imgtool-dev-<pid> 占位设备文件保留旧名——它是按 pid 寿命设计的，语义不同。）
- * 位置解析（img_tmpdir）：
- *   IMGTOOL_TMPDIR → TMPDIR → <镜像同目录>/.imgtool-tmp → 拒绝 "." 兜底。
- *   ★ 不再回落 "."（会把临时文件撒在手机任意目录）。镜像同目录由
- *     img_tmpdir_hint() 设置（命令层在打开第一个容器时填）。 */
-const char *img_tmpfile(const char *purpose, char *out, size_t cap);
-int         img_tmpfile_dir(const char *purpose, char *out, size_t cap);   /* mkdtemp 目录 */
-void        img_tmpdir_hint(const char *dir);     /* 命令层填：镜像所在目录（可 NULL 清除） */
-/* REQ-61 §3：口径自查用。sweep 返回本次收走的条目数；
-   source 回报命中的哪一档（env / tmpdir / hint / fallback）；
-   reset 让下一次 img_tmpdir() 重新解析（env 中途变更时用）。 */
-int         img_tmpdir_sweep(void);
-const char *img_tmpdir_source(void);
-void        img_tmpdir_reset(void);
-int         img_tmpdir_free_bytes(uint64_t *out_free, uint64_t *out_total);

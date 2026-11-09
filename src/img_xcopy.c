@@ -212,12 +212,6 @@ static int ep_open(xep *e, const img_xloc *loc, img_ctx *shared, bool writable,
     e->loc=*loc;
     xstrlcpy(e->root, loc->path, sizeof e->root);
     if(loc->kind==IMG_XK_HOST) return IMG_OK;
-    /* ★ P1-6：容器所在目录 → 临时目录 hint（.imgtool-tmp 同分区原子） */
-    if(loc->img[0]){
-        char d[2048]; snprintf(d,sizeof d,"%s",loc->img);
-        char *sl=strrchr(d,'/');
-        if(sl && sl!=d){ *sl=0; img_tmpdir_hint(d); }
-    }
     if(loc->kind==IMG_XK_ARCHIVE) return IMG_OK;   /* 压缩包不需要持久端点：按需开流 */
 
     if(loc->kind==IMG_XK_ISO){

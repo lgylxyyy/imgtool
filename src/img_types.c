@@ -78,14 +78,8 @@ const char *img_op_name(img_op_t o){
 /* ---- P1-6（2026-11-08）：统一临时目录策略 ----
  * 优先级：IMGTOOL_TMPDIR → TMPDIR → <镜像同目录>/.imgtool-tmp。
  * ★ 不再回落 "."（以前会把 imgtool-src-* 等撒在手机任意目录）。
- *   镜像同目录由 img_tmpdir_hint() 提供（命令层打开容器时填），
- *   好处：同分区 rename 原子（archive 写端依赖），清理就是删一个目录。 */
-static char g_tmp_hint[1024];     /* 镜像同目录（命令层填） */
-static bool g_tmp_hint_done;
-void img_tmpdir_hint(const char *dir){
-    if(dir && *dir){ snprintf(g_tmp_hint,sizeof g_tmp_hint,"%s",dir); g_tmp_hint_done=true; }
-    else { g_tmp_hint[0]=0; g_tmp_hint_done=false; }
-}
+ *   ★ 已删除「容器所在目录」档（REQ-61 要求 3）：映像可能在只读路径或
+ *   别人的应用目录下，往那儿建目录要么失败、要么把临时文件留在用户可见处。 */
 static int mk_ok(const char *d){
     /* 能写能进；并且真建一下（hint 目录可能还不存在） */
     if(!d||!*d) return 0;
@@ -103,19 +97,15 @@ void img_tmpdir_reset(void){ g_tmp_cached[0]=0; g_tmp_source[0]=0; }
 const char *img_tmpdir(void){
     char *cached = g_tmp_cached;
     if(cached[0]) return cached;
-    const char *cand[4]; int nc = 0;
-    const char *tag[4];
+    const char *cand[3]; int nc = 0;
+    const char *tag[3];
     const char *e1 = getenv("IMGTOOL_TMPDIR"), *e2 = getenv("TMPDIR");
     if(e1 && *e1){ cand[nc]=e1; tag[nc++]="env"; }
     if(e2 && *e2){ cand[nc]=e2; tag[nc++]="tmpdir"; }
-    /* 镜像同目录/.imgtool-tmp：hint 给了才试 */
-    static char hintdir[1152];
-    if(g_tmp_hint_done && g_tmp_hint[0]){
-        size_t L=strlen(g_tmp_hint);
-        while(L && g_tmp_hint[L-1]=='/') L--;
-        snprintf(hintdir,sizeof hintdir,"%.*s/.imgtool-tmp",(int)L,g_tmp_hint);
-        cand[nc]=hintdir; tag[nc++]="hint";
-    }
+    /* ★ REQ-61 §0 要求 3：不再有「容器所在目录」这一档。
+     *   目标映像可能在只读路径或别人的应用目录下，往那儿建 .imgtool-tmp
+     *   要么失败、要么把临时文件留在用户看得见的地方。
+     *   调用方（App）必须显式设 IMGTOOL_TMPDIR；没设就退到 /tmp。 */
     cand[nc]="/tmp"; tag[nc++]="fallback";
     for(int i = 0; i < nc; i++){
         size_t L = strlen(cand[i]);
@@ -307,13 +297,6 @@ int img_tmpdir_sweep(void){
     const char *e1=getenv("IMGTOOL_TMPDIR"), *e2=getenv("TMPDIR");
     if(e1 && *e1) cand[nc++]=e1;
     if(e2 && *e2) cand[nc++]=e2;
-    static char hintdir[1152];
-    if(g_tmp_hint[0]){
-        size_t L=strlen(g_tmp_hint);
-        while(L && g_tmp_hint[L-1]=='/') L--;
-        snprintf(hintdir,sizeof hintdir,"%.*s/.imgtool-tmp",(int)L,g_tmp_hint);
-        cand[nc++]=hintdir;
-    }
     cand[nc++]="/tmp";
     for(int i=0;i<nc;i++) total += tmp_sweep_one(cand[i]);
     return total;

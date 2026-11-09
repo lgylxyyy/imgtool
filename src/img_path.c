@@ -292,13 +292,6 @@ int img_path_parse_ex(const char *spec, img_path *out, bool is_dst, char *why, s
         out->kind=IMG_XK_HOST; return IMG_OK;
     }
 
-    /* ★ P1-6：把容器所在目录登记为临时目录 hint（<dir>/.imgtool-tmp），
-     *   同分区 rename 原子，清理只删一个目录。只在还没设过时填。 */
-    {
-        char d[2048]; snprintf(d,sizeof d,"%s",out->host);
-        char *sl=strrchr(d,'/');
-        if(sl && sl!=d){ *sl=0; img_tmpdir_hint(d); }
-    }
     int ct=0;
     int rc=detect_container(out->host,&ct,why,whycap);
     if(rc==IMG_ENOENT && is_dst){
