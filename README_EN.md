@@ -76,7 +76,13 @@ Requirements: CMake ≥ 3.16, a C11 compiler, `zlib`. Optional:
 | `libhivex` | BCD / registry hives | Auto-detected |
 | bundled unrar | `archive.*` reading RAR | `-DIMG_WITH_RAR=OFF` |
 
-Artifacts: `build/tools/imgcmd`, `build/libimgtool.a`.
+Artifacts: `build/tools/imgcmd`, `build/libimgtool.a`, `build/libimgtool.so`.
+
+> When building the `.so` on a host whose static `libwim.a` was not compiled
+> with `-fPIC` (Ubuntu amd64 is such a case), the shared library automatically
+> links the dynamic `libwim.so`; ISO direct streaming is then off inside the
+> `.so` (`imgcmd` is unaffected and stays statically linked). Override with
+> `-DIMG_WIM_STATIC_PIC=AUTO|ON|OFF`.
 
 ### Android (NDK cross-compile)
 

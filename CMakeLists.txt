@@ -215,21 +215,64 @@ if(NOT IMG_WITH_NTFS3G)
   endif()
 endif()
 option(IMG_WIM_STATIC "静态链接 wimlib（ISO 直灌的前提；共享库版会退回抽取）" ON)
+# 静态 libwim 能否进【共享库】取决于它有没有用 -fPIC 编译。
+# 实测：Ubuntu 24.04 arm64 的 libwim.a 可用，amd64 的不行
+# （relocation R_X86_64_PC32 against symbol `stdout' can not be used when
+#   making a shared object）。所以这里探一次，失败就让 .so 退回共享 wimlib。
+set(IMG_WIM_STATIC_PIC "" CACHE STRING "静态 libwim 能否进共享库（AUTO/ON/OFF；默认自动探测）")
 if(IMG_WITH_WIM)
   find_library(WIM_LIB wim)
   if(WIM_LIB)
     add_compile_definitions(IMG_WITH_WIM=1)
-    # ★ 2026-10-26（REQ-16）：ISO 直灌靠 img_vfd.c 把 libc 的 fd 操作在本 .so 内改道。
-    #   共享库版 wimlib 调的是系统 libc 的 read/pread，拦不住 → 只能静态。
+    set(WIM_LIB_SHARED "${WIM_LIB}")
     get_filename_component(_wimdir "${WIM_LIB}" DIRECTORY)
     find_file(WIM_STATIC NAMES libwim.a PATHS "${_wimdir}" NO_DEFAULT_PATH)
+
+    # ---- 探测静态库是否 PIC（只在本机编译时探测；交叉构建的 wimlib 由 android-deps.sh 用 -fPIC 编）----
+    if("${IMG_WIM_STATIC_PIC}" STREQUAL "AUTO" OR "${IMG_WIM_STATIC_PIC}" STREQUAL "")
+      if(CMAKE_CROSSCOMPILING)
+        set(IMG_WIM_STATIC_PIC ON)
+      elseif(APPLE)
+        set(IMG_WIM_STATIC_PIC ON)
+      elseif(IMG_WIM_STATIC AND WIM_STATIC)
+        file(WRITE "${CMAKE_BINARY_DIR}/wim_pic_probe.c"
+             "extern int wimlib_global_init(int); int probe(void){return wimlib_global_init(0);}\n")
+        execute_process(
+          COMMAND ${CMAKE_C_COMPILER} -shared -fPIC
+                  -o "${CMAKE_BINARY_DIR}/wim_pic_probe.so"
+                  "${CMAKE_BINARY_DIR}/wim_pic_probe.c" "${WIM_STATIC}"
+          RESULT_VARIABLE _wim_pic_rc OUTPUT_QUIET ERROR_QUIET)
+        if(_wim_pic_rc EQUAL 0)
+          set(IMG_WIM_STATIC_PIC ON)
+        else()
+          set(IMG_WIM_STATIC_PIC OFF)
+        endif()
+        file(REMOVE "${CMAKE_BINARY_DIR}/wim_pic_probe.so" "${CMAKE_BINARY_DIR}/wim_pic_probe.c")
+      else()
+        set(IMG_WIM_STATIC_PIC OFF)
+      endif()
+      message(STATUS "imgtool: 静态 libwim 可进共享库 = ${IMG_WIM_STATIC_PIC}")
+    endif()
+
+    # 可执行文件：静态优先（ISO 直灌的前提）
+    set(IMG_WIM_VFD_EXE 0)
     if(IMG_WIM_STATIC AND WIM_STATIC)
-      set(WIM_LIB "${WIM_STATIC}")
-      add_compile_definitions(IMG_WIM_VFD=1)
+      set(WIM_LIB_EXE "${WIM_STATIC}")
+      set(IMG_WIM_VFD_EXE 1)
       message(STATUS "imgtool: wimlib 静态链接 → ISO 直灌可用（不落临时文件）")
     else()
-      add_compile_definitions(IMG_WIM_VFD=0)
+      set(WIM_LIB_EXE "${WIM_LIB_SHARED}")
       message(STATUS "imgtool: wimlib 是共享库 → ISO 直灌关闭（wim.apply 会先抽 install.wim）")
+    endif()
+
+    # 共享库：静态库必须是 PIC；否则退回共享 wimlib，并关掉 VFD
+    set(IMG_WIM_VFD_SHARED 0)
+    if(IMG_WIM_STATIC AND WIM_STATIC AND IMG_WIM_STATIC_PIC)
+      set(WIM_LIB_SHARED_TGT "${WIM_STATIC}")
+      set(IMG_WIM_VFD_SHARED 1)
+    else()
+      set(WIM_LIB_SHARED_TGT "${WIM_LIB_SHARED}")
+      message(STATUS "imgtool: 共享库改用动态 wimlib（静态库不可重定位）→ .so 的 ISO 直灌关闭")
     endif()
   else()
     message(WARNING "imgtool: libwim 未找到 → 关闭 WIM/ESD 功能（wim.* 命令报 FEATURE-UNAVAILABLE）")
@@ -237,7 +280,9 @@ if(IMG_WITH_WIM)
   endif()
 endif()
 if(NOT IMG_WITH_WIM)
-  add_compile_definitions(IMG_WITH_WIM=0 IMG_WIM_VFD=0)
+  add_compile_definitions(IMG_WITH_WIM=0)
+  set(IMG_WIM_VFD_EXE 0)
+  set(IMG_WIM_VFD_SHARED 0)
   list(REMOVE_ITEM IMG_SOURCES src/img_wim_apply.c src/img_wim_fs.c)
 endif()
 
@@ -270,7 +315,8 @@ if(IMG_WITH_ARCHIVE AND ARCHIVE_LIB)
   target_link_libraries(imgtool PUBLIC ${IMG_ARCHIVE_LIBS})
 endif()
 if(IMG_WITH_WIM AND WIM_LIB)
-  target_link_libraries(imgtool PUBLIC ${WIM_LIB})
+  target_link_libraries(imgtool PUBLIC ${WIM_LIB_EXE})
+  target_compile_definitions(imgtool PRIVATE IMG_WIM_VFD=${IMG_WIM_VFD_EXE})
 endif()
 
 # ---- 共享库（Android .so）----
@@ -304,7 +350,8 @@ if(TARGET img_unrar)
   endif()
 endif()
 if(IMG_WITH_WIM AND WIM_LIB)
-  target_link_libraries(imgtool_shared PUBLIC ${WIM_LIB})
+  target_link_libraries(imgtool_shared PUBLIC ${WIM_LIB_SHARED_TGT})
+  target_compile_definitions(imgtool_shared PRIVATE IMG_WIM_VFD=${IMG_WIM_VFD_SHARED})
 endif()
 if(IMG_WITH_ARCHIVE AND ARCHIVE_LIB)
   target_include_directories(imgtool_shared PRIVATE ${ARCHIVE_INC})

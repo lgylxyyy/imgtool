@@ -74,7 +74,12 @@ NDK、Android SDK、构建根、依赖缓存、测试素材目录。
 | `libhivex` | BCD / 注册表 hive | 自动检测 |
 | 内置 unrar | `archive.*` 读 RAR | `-DIMG_WITH_RAR=OFF` |
 
-产物：`build/tools/imgcmd`（主命令行）、`build/libimgtool.a`。
+产物：`build/tools/imgcmd`（主命令行）、`build/libimgtool.a`、`build/libimgtool.so`。
+
+> 宿主上构建 `.so` 时，若系统的静态 `libwim.a` 没有用 `-fPIC` 编译
+> （Ubuntu amd64 就是这样），`.so` 会自动改用动态 `libwim.so`，
+> 代价是 `.so` 里的 ISO 直灌关闭（`imgcmd` 不受影响，仍静态链接）。
+> 要强制指定：`-DIMG_WIM_STATIC_PIC=AUTO|ON|OFF`。
 
 ### Android（NDK 交叉编译）
 
