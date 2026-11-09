@@ -22,7 +22,7 @@ ESP_SEC=$($T/imgpart show "$IMG" | python3 -c "
 import sys,json;d=json.load(sys.stdin);print([p['sectors'] for p in d['parts'] if p['typeGuid'].startswith('c12a7328')][0])")
 echo "  ESP LBA=$ESP_LBA 扇区=$ESP_SEC"
 $T/imgmkfs "$IMG" --mkfs "$ESP_LBA" "TEST" >/dev/null 2>&1 || { echo "格式化失败"; exit 2; }
-# ★ 2026-10-19：测试自给自足——不再依赖 /workspace 里的杂物（曾因清理 bootx64.efi 误报失败）
+# ★ 2026-10-19：测试自给自足——不依赖工作区里的杂物（曾因清理 bootx64.efi 误报失败）
 head -c 65536 /dev/urandom > "$W/dummy.efi"
 printf "$W/dummy.efi\t/EFI/Boot/bootx64.efi\n/etc/hostname\t/EFI/hello.txt\n" > "$W/man.txt"
 "${T%/tools}/tests/fatput" "$IMG" "$ESP_LBA" "$W/man.txt" >/dev/null || { echo "灌文件失败"; exit 2; }

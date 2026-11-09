@@ -30,7 +30,9 @@ def _fmt(x):
 
 import struct, sys, os
 
-RAW = '/workspace/.tmp/w10b.raw'
+# 不设默认盘：CLI 必须显式给 raw 路径（或 --qcow2 + --lba）。
+# 早先这里写死了一张本机路径，换机器后所有调用都会指向不存在的文件。
+RAW = os.environ.get('NTFS_RAW', '')
 PART_LBA = 1050624
 BLOCK = 512
 

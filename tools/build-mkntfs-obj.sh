@@ -9,15 +9,23 @@
 #
 # 用法：
 #   tools/build-mkntfs-obj.sh [源码目录] [输出目录]
-#   默认 /workspace/third_party/ntfs-3g → /workspace/build/mkntfs_obj
+#   默认 <工作区>/third_party/ntfs-3g → <构建根>/mkntfs_obj
+#   工作区与构建根由脚本位置推导，仓库内 build 是软链时取其所指目录的父目录。
 #
 # 之后配置（少一个开关就会退回 OFF）：
 #   cd build && cmake .. -DCMAKE_BUILD_TYPE=Release -DIMG_WITH_NTFS=ON && make -j8
 #   ./tools/imgcmd --list | grep -o '"features":{[^}]*}'   # mkntfs 必须是 true
 set -euo pipefail
 
-SRC=${1:-/workspace/third_party/ntfs-3g}
-OD=${2:-/workspace/build/mkntfs_obj}
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -L "$REPO/build" ]; then
+  BUILD_ROOT="$(dirname "$(readlink -f "$REPO/build")")"
+else
+  BUILD_ROOT="$REPO/build"
+fi
+WS_ROOT="$(dirname "$BUILD_ROOT")"
+SRC=${1:-$WS_ROOT/third_party/ntfs-3g}
+OD=${2:-$BUILD_ROOT/mkntfs_obj}
 CC=${CC:-gcc}
 OBJCOPY=${OBJCOPY:-objcopy}
 

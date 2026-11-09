@@ -125,7 +125,8 @@ if [ -x "$ROOT/build/tests/recovery_bcd_test" ]; then
   [ -f "$ISOBCD" ] || ISOBCD="$ROOT/../build/w128/iso/bcd"
   if [ ! -f "$ISOBCD" ]; then
     # 兜底：有官方 ISO 就现场抽 efi/microsoft/boot/bcd
-    ISO=$(ls "${IMGTOOL_IMAGES:-/workspace/images}"/*.iso 2>/dev/null | head -1)
+    iso_dir="${IMGTOOL_IMAGES:-$(cd "$ROOT/../.." && pwd)/images}"
+    ISO=$(ls "$iso_dir"/*.iso 2>/dev/null | head -1)
     if [ -n "${ISO:-}" ] && command -v 7z >/dev/null 2>&1; then
       mkdir -p "$W/iso"
       7z e -y -o"$W/iso" "$ISO" "efi/microsoft/boot/bcd" >/dev/null 2>&1

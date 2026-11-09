@@ -3,17 +3,18 @@
 #
 # 夹具不随仓库走（221 MB），用环境变量指定：
 #   IMG_RAR_FIXTURE=/path/to/solid.rar tests/rar-test.sh
-# 默认试 /workspace/tmp/cs16.rar（用户给的那个 CS1.6 固实包），没有就跳过。
+# 默认试 <工作区>/tmp/cs16.rar，没有就跳过。
 set -u
 T="${IMGCMD:-$(cd "$(dirname "$0")/.." && pwd)/build/tools/imgcmd}"
-FX="${IMG_RAR_FIXTURE:-/workspace/tmp/cs16.rar}"
+WS_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+FX="${IMG_RAR_FIXTURE:-$WS_ROOT/tmp/cs16.rar}"
 pass=0; fail=0
 ok(){ pass=$((pass+1)); echo "  ✅ $1"; }
 no(){ fail=$((fail+1)); echo "  ❌ $1"; echo "      $2"; }
 skip(){ echo "  ⏭ $1"; }
 
 if [ ! -f "$FX" ]; then
-  echo "════ 没有 RAR 夹具（IMG_RAR_FIXTURE 或 /workspace/tmp/cs16.rar）→ 跳过 ════"
+  echo "════ 没有 RAR 夹具（设 IMG_RAR_FIXTURE 指向一个 solid RAR）→ 跳过 ════"
   exit 0
 fi
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT

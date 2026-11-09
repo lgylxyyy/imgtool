@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # REQ-31 压缩包只读：列目录 / 抽文件 / 抽目录 / 加密拒绝 / 7z solid
 set -u
-T="${IMGCMD:-/workspace/build/host/tools/imgcmd}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+T="${IMGCMD:-$ROOT/build/tools/imgcmd}"
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
 pass=0; fail=0
 ok(){ pass=$((pass+1)); echo "  ✅ $1"; }

@@ -4,6 +4,11 @@
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T="$ROOT/build/tools"
+# 外部素材与构建根都由仓库位置推导；换机器时用环境变量覆盖，不写死绝对路径。
+WS_ROOT=$(cd "$ROOT/../.." && pwd)
+if [ -L "$ROOT/build" ]; then BUILD_ROOT=$(dirname "$(readlink -f "$ROOT/build")"); else BUILD_ROOT="$ROOT/build"; fi
+ASSETS="${IMGTOOL_IMAGES:-$WS_ROOT/images}"
+ISO_WIN10="${IMGTOOL_ISO_WIN10:-$BUILD_ROOT/iso-win10}"
 W=$(mktemp -d /tmp/cmdtestXXXXXX)
 pass=0; fail=0
 ok(){ echo "  ✅ $1"; pass=$((pass+1)); }
@@ -111,7 +116,7 @@ $T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src="$W/blob.bin" --dst=/EFI/b
 [ "$(jq_ "d['ok']" < "$W/res.json")" = "True" ] && ok "reserve=1 正常执行（fallocate 失败也只警告不拦）" || ng "reserve=1 失败：$(head -c 160 "$W/res.json")"
 
 echo "════ 4b. wim.size 尺寸估算（工具给数字，App 定政策）════"
-ESD=$(ls /workspace/*.esd 2>/dev/null | head -1)
+ESD=$(ls "$WS_ROOT"/*.esd 2>/dev/null | head -1)
 if [ -n "$ESD" ]; then
   $T/imgcmd wim.size --wim="$ESD" --index=1 > "$W/w.json" 2>/dev/null
   d=$(jq_ "d['data']['data_bytes']" < "$W/w.json"); e=$(jq_ "d['data']['est_ntfs_bytes']" < "$W/w.json")
@@ -275,7 +280,7 @@ echo "════ 4f. 建盘流水线（img.create / fs.format / ntfs.put / ntf
 
 echo "════ 4g. ISO 抽取（iso.ls / iso.extract；UDF 桥）════"
 {   # ★ Windows 安装盘的 ISO9660 目录树是空的，install.wim 只在 UDF 里 —— 这几条锁住"能进去"。
-    ISO=$(ls /workspace/images/*LTSC*.iso 2>/dev/null | head -1)
+    ISO=$(ls "$ASSETS"/*LTSC*.iso 2>/dev/null | head -1)
     if [ -z "$ISO" ]; then
         echo "  ⏭ 没找到 LTSC ISO，跳过 ISO 用例"
     else
@@ -316,8 +321,8 @@ print('%d/%s' % (d['data']['count'], d['data']['truncated']))" 2>/dev/null)" = "
         rm -f "$W/b.sdi"
         $T/imgcmd iso.extract --iso="$ISO" --path=/boot/boot.sdi --dst="$W/b.sdi" --progress=none > "$W/ix.json" 2>/dev/null
         if [ -s "$W/b.sdi" ] && [ "$(stat -c%s "$W/b.sdi")" = "3170304" ]; then
-            if [ -f /workspace/build/iso-win10/boot.sdi ]; then
-                [ "$(md5sum < "$W/b.sdi")" = "$(md5sum < /workspace/build/iso-win10/boot.sdi)" ] \
+            if [ -f $ISO_WIN10/boot.sdi ]; then
+                [ "$(md5sum < "$W/b.sdi")" = "$(md5sum < $ISO_WIN10/boot.sdi)" ] \
                     && ok "iso.extract /boot/boot.sdi → 3,170,304 字节，md5 与已知真值一致" \
                     || ng "boot.sdi md5 不一致"
             else
@@ -331,8 +336,8 @@ print('%d/%s' % (d['data']['count'], d['data']['truncated']))" 2>/dev/null)" = "
 
 echo "════ 4h. 恢复分区四件套（part.attr / winre.find / recovery.populate*）════"
 {   # ★ 政策是"默认不建"；这里验的是"勾了之后能不能纯命令表做完"。
-    WIM=/workspace/build/iso-win10/install.wim
-    SDI=/workspace/build/iso-win10/boot.sdi
+    WIM=$ISO_WIN10/install.wim
+    SDI=$ISO_WIN10/boot.sdi
     if [ ! -f "$WIM" ]; then
         echo "  ⏭ 没有 install.wim，跳过恢复分区用例"
     else

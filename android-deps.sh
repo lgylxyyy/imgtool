@@ -5,12 +5,36 @@
 # 用法：  ./android-deps.sh [abi...]            默认 arm64-v8a、全部库
 #         DEPS="wimlib ntfs3g" ./android-deps.sh arm64-v8a
 # 环境变量：NDK API OUT WORK SRC_DL NTFS3G_SRC
+# 默认值由脚本位置推导；要复用别处的依赖缓存，显式设 SRC_DL / NTFS3G_SRC
 set -euo pipefail
-NDK="${NDK:-/workspace/sdk/android-ndk/android-ndk-r28c}"
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 构建目录与依赖缓存目录都由脚本位置推导；仓库内 build 是软链时取其所指目录的父目录，
+# 这样既有产物与已下载的依赖仍在原处，换机器克隆也不会指向不存在的位置。
+if [ -L "$SRC/build" ]; then
+  BUILD_ROOT="$(dirname "$(readlink -f "$SRC/build")")"
+else
+  BUILD_ROOT="$SRC/build"
+fi
+WS_ROOT="$(dirname "$BUILD_ROOT")"
+
+pick_ndk() {
+  local c
+  for c in "${NDK:-}" "${ANDROID_NDK_HOME:-}" "${ANDROID_NDK_ROOT:-}" \
+           "${ANDROID_HOME:-}/ndk/"* "${ANDROID_SDK_ROOT:-}/ndk/"* \
+           "$HOME/Android/Sdk/ndk/"* "$WS_ROOT/sdk/android-ndk/"*; do
+    [ -n "$c" ] && [ -f "$c/source.properties" ] && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
+}
+NDK="$(pick_ndk || true)"
+if [ -z "$NDK" ]; then
+  echo "未找到 Android NDK。设置环境变量 NDK 或 ANDROID_NDK_HOME 指向 NDK 目录。" >&2
+  exit 1
+fi
 API="${API:-21}"
-OUT="${OUT:-/workspace/build/android}"
-SRC_DL="${SRC_DL:-/workspace/deps/src}"
-NTFS3G_SRC="${NTFS3G_SRC:-/workspace/deps/third_party/ntfs-3g}"
+OUT="${OUT:-$BUILD_ROOT/android}"
+SRC_DL="${SRC_DL:-$WS_ROOT/deps/src}"
+NTFS3G_SRC="${NTFS3G_SRC:-$WS_ROOT/deps/third_party/ntfs-3g}"
 WORK="$OUT/deps"
 # 注意：绝不能用 LIBS/CFLAGS 之类的名字做脚本自己的变量——它们会被 autoconf 继承
 SYS="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"

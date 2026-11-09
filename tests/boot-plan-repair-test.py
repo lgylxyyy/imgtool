@@ -194,14 +194,15 @@ d, _ = run('boot.tpl-apply', img=u, tpl=os.path.join(W, 't_bad.bcdtpl'), meta=ba
 check('--force=true 放行（并写回了 BCD）', d.get('ok'), json.dumps(d)[:300])
 
 # 真模板（真 ISO 抽的）也能应用
-real = '/workspace/templates/10.0_x64_uefi.bcdtpl'
+real = (os.environ.get('IMG_BCDTPL')
+        or os.path.join(os.path.dirname(os.path.dirname(ROOT)), 'templates', '10.0_x64_uefi.bcdtpl'))
 if os.path.exists(real):
     d, _ = run('boot.tpl-apply', img=u, tpl=real, **{'sys-lba': sys_lba, 'force': 'true'})
     check('真模板 10.0_x64_uefi 应用 ok', d.get('ok'), json.dumps(d)[:200])
     check('真模板 tpl_family=10.0', data(d).get('tpl_family') == '10.0',
           str(data(d).get('tpl_family')))
 else:
-    skip('真模板（沙箱无 /workspace/templates）')
+    skip('真模板（设 IMG_BCDTPL 指向一个真实 BCD 模板）')
 
 # 应用完必须 still 自检全绿
 d, _ = run('boot.check', img=u, mode='uefi')

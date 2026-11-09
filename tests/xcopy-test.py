@@ -337,10 +337,8 @@ else:
     skipped('ISO → NTFS')
 
 # ─────────── 18. WIM/ESD → NTFS ───────────
-esd = (os.environ.get('IMG_SAMPLE_ESD')
-       or next((p for p in (os.path.join(os.path.dirname(os.path.dirname(ROOT)), 'sample.esd'),
-                             '/workspace/sample.esd')
-                if os.path.exists(p)), '/workspace/sample.esd'))
+_ws = os.path.dirname(os.path.dirname(ROOT))
+esd = os.environ.get('IMG_SAMPLE_ESD') or os.path.join(_ws, 'sample.esd')
 if os.path.exists(esd):
     d = run('file.copy', src='wim:/Windows/System32/config/BBI', src_img=esd, src_index=1,
             dst='ntfs:/FromWim', img=B, dst_lba=BN)

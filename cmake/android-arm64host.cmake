@@ -9,7 +9,7 @@
 # 用法（arm64-v8a 为例）：
 #   cmake -S . -B build-android/arm64-v8a \
 #     -DCMAKE_TOOLCHAIN_FILE=cmake/android-arm64host.cmake \
-#     -DNDK_ROOT=/workspace/android-ndk/android-ndk-r28c \
+#     -DNDK_ROOT=<ndk 目录> \
 #     -DIMG_ANDROID_ABI=arm64-v8a -DIMG_ANDROID_API=21
 #
 # 必要前提（一次性）：把 NDK 的 compiler-rt builtins 暴露给宿主 clang
@@ -36,8 +36,9 @@ _tc_get(IMG_ANDROID_ABI IMG_ANDROID_ABI)
 _tc_get(IMG_ANDROID_API IMG_ANDROID_API)
 
 if(NOT NDK_ROOT)
+  # 只认环境变量与 SDK 目录下的 ndk/，不写死任何本机路径
   foreach(_c "$ENV{ANDROID_NDK_HOME}" "$ENV{ANDROID_NDK_ROOT}"
-             "$ENV{ANDROID_HOME}/ndk" /workspace/android-ndk/android-ndk-r28c)
+             "$ENV{ANDROID_HOME}/ndk" "$ENV{ANDROID_SDK_ROOT}/ndk")
     if(_c AND IS_DIRECTORY "${_c}")
       if(EXISTS "${_c}/source.properties")
         set(NDK_ROOT "${_c}")
@@ -165,7 +166,7 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
 # ---- 5. 别把主机构建目录写进 RPATH ---------------------------------------
-# 交叉产物要进 APK，DT_RUNPATH 里出现 /workspace/... 这种宿主路径毫无意义。
+# 交叉产物要进 APK，DT_RUNPATH 里出现宿主绝对路径毫无意义。
 set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
 set(CMAKE_INSTALL_RPATH "")
 set(CMAKE_BUILD_RPATH "")

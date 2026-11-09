@@ -2,7 +2,8 @@
 # REQ-30（sort/mkdir/stat/批量时间）+ REQ-32（copy 跳过回收站）回归
 # 只依赖宿主 imgcmd；不碰网络、不碰真机。
 set -u
-T="${IMGCMD:-/workspace/build/host/tools/imgcmd}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+T="${IMGCMD:-$ROOT/build/tools/imgcmd}"
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
 pass=0; fail=0
 ok(){ pass=$((pass+1)); echo "  ✅ $1"; }

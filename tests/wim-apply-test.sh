@@ -16,9 +16,10 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T="$ROOT/build/tools"
 TE="$ROOT/build/tests"
-# ★ 默认路径改到 images/（旧值写在 /workspace/ 根下，实际文件在 /workspace/images/，
-#   所以 WITH_WIM=1 也只会报"找不到 ESD"——这也是它长期被当成"跑不了的重型项"的原因之一）
-ESD="${1:-/workspace/images/【不忘初心】Windows11_26H1_28000.2525_X64_纯净[深度精简版][1.74G](2026.7.20).esd}"
+# 默认找 <工作区>/images/ 里的 ESD；换机器用 IMGTOOL_IMAGES 或第 1 个参数指定。
+WS_ROOT=$(cd "$ROOT/../.." && pwd)
+IMG_DIR="${IMGTOOL_IMAGES:-$WS_ROOT/images}"
+ESD="${1:-${IMGTOOL_ESD:-$IMG_DIR/【不忘初心】Windows11_26H1_28000.2525_X64_纯净[深度精简版][1.74G](2026.7.20).esd}}"
 IDX="${2:-1}"
 W=$(mktemp -d /tmp/wimtestXXXXXX)
 pass=0; fail=0
