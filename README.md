@@ -4,7 +4,7 @@
 
 **离线读写 qcow2 镜像内的分区、文件系统与 Windows 引导，不挂载、不开机。**
 
-[English 🇬🇧](README_EN.md) | [**中文**](README.md)
+[English](README_EN.md) | [**中文**](README.md)
 
 [![License](https://img.shields.io/badge/license-GPL--2.0--or--later-blue)](LICENSE)
 [![C11](https://img.shields.io/badge/C-11-informational)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
