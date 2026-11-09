@@ -25,6 +25,9 @@
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T="$ROOT/build/tools"
+# 素材与依赖路径统一由 scripts/env.sh 解析
+# shellcheck disable=SC1091
+. "$ROOT/scripts/env.sh"
 pass=0; fail=0; skipped=0
 run(){ # $1=名字 $2...=命令
   local name="$1"; shift
@@ -125,7 +128,7 @@ if [ -x "$ROOT/build/tests/recovery_bcd_test" ]; then
   [ -f "$ISOBCD" ] || ISOBCD="$ROOT/../build/w128/iso/bcd"
   if [ ! -f "$ISOBCD" ]; then
     # 兜底：有官方 ISO 就现场抽 efi/microsoft/boot/bcd
-    iso_dir="${IMGTOOL_IMAGES:-$(cd "$ROOT/../.." && pwd)/images}"
+    iso_dir="$IMGTOOL_IMAGES"
     ISO=$(ls "$iso_dir"/*.iso 2>/dev/null | head -1)
     if [ -n "${ISO:-}" ] && command -v 7z >/dev/null 2>&1; then
       mkdir -p "$W/iso"

@@ -18,14 +18,11 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if [ -L "$REPO/build" ]; then
-  BUILD_ROOT="$(dirname "$(readlink -f "$REPO/build")")"
-else
-  BUILD_ROOT="$REPO/build"
-fi
-WS_ROOT="$(dirname "$BUILD_ROOT")"
-SRC=${1:-$WS_ROOT/third_party/ntfs-3g}
-OD=${2:-$BUILD_ROOT/mkntfs_obj}
+# 路径统一由 scripts/env.sh 解析（环境变量 > imgtool.conf > 自动探测）。
+# shellcheck disable=SC1091
+. "$REPO/scripts/env.sh"
+SRC=${1:-$IMGTOOL_WS_ROOT/third_party/ntfs-3g}
+OD=${2:-$IMGTOOL_BUILD_ROOT/mkntfs_obj}
 CC=${CC:-gcc}
 OBJCOPY=${OBJCOPY:-objcopy}
 

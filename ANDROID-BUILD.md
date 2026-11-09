@@ -20,6 +20,12 @@ sysroot（头文件与库桩，权威）** 拼成交叉工具链。NDK 自带的
 
 ## 1. 用法
 
+先填本机路径（一次性；结果写入不提交的 `imgtool.conf`）：
+
+```bash
+./configure-local.sh --ask     # NDK / SDK 路径；回车沿用自动探测值
+```
+
 ```bash
 # 依赖（一次性；zlib 来自 NDK，libxml2→wimlib→ntfs-3g→hivex）
 API=28 ./android-deps.sh arm64-v8a armeabi-v7a x86_64

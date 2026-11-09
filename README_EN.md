@@ -45,6 +45,24 @@ build/tools/imgcmd --list | head -c 200
 
 ## Building
 
+### Local paths (fill in once per machine)
+
+No local path is hardcoded in the sources or scripts. Resolution order is
+**environment variable > `imgtool.conf` > auto-detect**. If none applies, the
+script fails with a message naming what is missing instead of silently pointing
+at a directory that does not exist.
+
+```bash
+./configure-local.sh            # detect and write imgtool.conf (not committed)
+./configure-local.sh --ask      # confirm each value; Enter keeps the detected one
+./configure-local.sh --show     # print the resolution, write nothing
+./configure-local.sh --presets  # also generate CMakeUserPresets.json
+```
+
+`imgtool.conf` and `CMakeUserPresets.json` are both in `.gitignore`. To fill it
+by hand, copy `imgtool.conf.example`; the keys are NDK, Android SDK, build root,
+dependency cache and test asset directory.
+
 ### Host
 
 Requirements: CMake ≥ 3.16, a C11 compiler, `zlib`. Optional:
@@ -62,10 +80,12 @@ Artifacts: `build/tools/imgcmd`, `build/libimgtool.a`.
 
 ### Android (NDK cross-compile)
 
-Same source tree; only the CMake toolchain file changes:
+Paths come from `./configure-local.sh` (see the previous section); an environment
+variable works for a one-off:
 
 ```bash
-export NDK=/path/to/android-ndk-r28c
+./configure-local.sh --ask         # store NDK / SDK paths in imgtool.conf
+# or: export NDK=/path/to/android-ndk-r28c
 
 ./android-deps.sh                  # one-time: cross-compile ntfs-3g/wimlib/zlib/libarchive/unrar
 
@@ -255,6 +275,9 @@ legacy/             Early implementation, kept for reference, not built
 third_party/unrar/  Bundled RAR decoder
 LICENSES/           Full license texts
 cmake/              Android NDK toolchain (android-arm64host.cmake)
+scripts/env.sh      Local path resolution (env > imgtool.conf > auto-detect)
+configure-local.sh  Detect local paths, write imgtool.conf
+imgtool.conf.example  Template for local paths (imgtool.conf itself is not tracked)
 android-cross.sh    Android cross-compile entry point
 android-deps.sh     One-time Android dependency build
 ```

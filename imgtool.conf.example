@@ -1,0 +1,44 @@
+# imgtool 本机配置（模板，入库）
+#
+# 用法：直接运行 ./configure-local.sh，它会自动探测并生成 imgtool.conf。
+#       只有自动探测不对时，才需要手工复制本文件：
+#
+#           cp imgtool.conf.example imgtool.conf
+#           然后按需填写下面的路径
+#
+# imgtool.conf 不进版本库（见 .gitignore），所以里面可以写本机绝对路径。
+# 优先级：环境变量 > imgtool.conf > 自动探测。
+# 留空 = 自动探测，不是禁用。
+
+# ---- Android 交叉构建 ---------------------------------------------------
+# NDK 目录（含 source.properties 的那一层）。
+# 留空时依次探测：NDK、ANDROID_NDK_HOME、ANDROID_NDK_ROOT、
+#                 <SDK>/ndk/*、~/Android/Sdk/ndk/*
+IMGTOOL_NDK=
+
+# Android SDK 目录（含 build-tools/ 或 platforms/）。
+IMGTOOL_ANDROID_SDK=
+
+# 交叉构建产物根目录。留空时：仓库内 build 是软链就取其所指目录的父目录，
+# 否则用仓库内的 build/。
+IMGTOOL_BUILD_ROOT=
+
+# ---- 交叉依赖与测试素材 -------------------------------------------------
+# 第三方依赖的下载与编译缓存（android-deps.sh 用）。
+# 留空时 = <工作区>/deps
+IMGTOOL_DEPS_ROOT=
+
+# 回归测试与真机验证用的素材目录（ISO / ESD / WIM）。
+# 留空时 = <工作区>/images；没有素材时相关用例自动跳过，不算失败。
+IMGTOOL_IMAGES=
+
+# Windows 安装盘抽出的 boot.sdi / install.wim（cmd_test.sh 的比对真值）。
+# 留空时 = <构建根>/iso-win10
+IMGTOOL_ISO_WIN10=
+
+# ---- 可选：单个素材的显式路径 -------------------------------------------
+# 只在自动查找找不到、又不想设整个目录时用。
+# IMGTOOL_ESD=/path/to/xxx.esd
+# IMG_RAR_FIXTURE=/path/to/solid.rar
+# IMG_BCDTPL=/path/to/10.0_x64_uefi.bcdtpl
+# IMG_SAMPLE_ESD=/path/to/sample.esd

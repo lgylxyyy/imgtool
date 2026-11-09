@@ -44,6 +44,23 @@ build/tools/imgcmd --list | head -c 200
 
 ## 构建
 
+### 本机路径（换机器只需填一次）
+
+源码和脚本里不写死任何本机路径。解析顺序是
+**环境变量 > `imgtool.conf` > 自动探测**；三者都不成立时报错并指出缺什么，
+不会静默指向一个不存在的目录。
+
+```bash
+./configure-local.sh            # 探测并写入 imgtool.conf（不提交）
+./configure-local.sh --ask      # 逐项确认，回车沿用探测值
+./configure-local.sh --show     # 只看结果，不写文件
+./configure-local.sh --presets  # 另外生成 CMakeUserPresets.json
+```
+
+`imgtool.conf` 与 `CMakeUserPresets.json` 都在 `.gitignore` 里。
+要手工填就照 `imgtool.conf.example` 复制一份，只有这几项：
+NDK、Android SDK、构建根、依赖缓存、测试素材目录。
+
 ### 宿主
 
 依赖：CMake ≥ 3.16、C11 编译器、`zlib`。以下可选：
@@ -61,10 +78,11 @@ build/tools/imgcmd --list | head -c 200
 
 ### Android（NDK 交叉编译）
 
-同一份源码，切换 CMake toolchain 文件即可：
+路径由 `./configure-local.sh` 一次性填好（见上一节），也可以临时用环境变量：
 
 ```bash
-export NDK=/path/to/android-ndk-r28c
+./configure-local.sh --ask         # 填 NDK / SDK 路径，写入 imgtool.conf
+# 或：export NDK=/path/to/android-ndk-r28c
 
 ./android-deps.sh                  # 一次性：交叉编译 ntfs-3g/wimlib/zlib/libarchive/unrar
 
@@ -253,6 +271,9 @@ legacy/             早期实现，留档、不参与构建
 third_party/unrar/  内置 RAR 解码器
 LICENSES/           许可证全文
 cmake/              Android NDK toolchain（android-arm64host.cmake）
+scripts/env.sh      本机路径解析（环境变量 > imgtool.conf > 自动探测）
+configure-local.sh  探测本机路径并写入 imgtool.conf
+imgtool.conf.example  本机配置模板（imgtool.conf 本身不入库）
 android-cross.sh    Android 交叉编译入口
 android-deps.sh     Android 第三方依赖编译（一次性）
 ```

@@ -4,11 +4,11 @@
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T="$ROOT/build/tools"
-# 外部素材与构建根都由仓库位置推导；换机器时用环境变量覆盖，不写死绝对路径。
-WS_ROOT=$(cd "$ROOT/../.." && pwd)
-if [ -L "$ROOT/build" ]; then BUILD_ROOT=$(dirname "$(readlink -f "$ROOT/build")"); else BUILD_ROOT="$ROOT/build"; fi
-ASSETS="${IMGTOOL_IMAGES:-$WS_ROOT/images}"
-ISO_WIN10="${IMGTOOL_ISO_WIN10:-$BUILD_ROOT/iso-win10}"
+# 外部素材与构建根统一由 scripts/env.sh 解析（环境变量 > imgtool.conf > 自动探测）
+# shellcheck disable=SC1091
+. "$ROOT/scripts/env.sh"
+ASSETS="$IMGTOOL_IMAGES"
+ISO_WIN10="$IMGTOOL_ISO_WIN10"
 W=$(mktemp -d /tmp/cmdtestXXXXXX)
 pass=0; fail=0
 ok(){ echo "  ✅ $1"; pass=$((pass+1)); }
@@ -116,7 +116,7 @@ $T/imgcmd fat.put --img="$W/t.qcow2" --lba=$LBA --src="$W/blob.bin" --dst=/EFI/b
 [ "$(jq_ "d['ok']" < "$W/res.json")" = "True" ] && ok "reserve=1 正常执行（fallocate 失败也只警告不拦）" || ng "reserve=1 失败：$(head -c 160 "$W/res.json")"
 
 echo "════ 4b. wim.size 尺寸估算（工具给数字，App 定政策）════"
-ESD=$(ls "$WS_ROOT"/*.esd 2>/dev/null | head -1)
+ESD=$(ls "$IMGTOOL_WS_ROOT"/*.esd 2>/dev/null | head -1)
 if [ -n "$ESD" ]; then
   $T/imgcmd wim.size --wim="$ESD" --index=1 > "$W/w.json" 2>/dev/null
   d=$(jq_ "d['data']['data_bytes']" < "$W/w.json"); e=$(jq_ "d['data']['est_ntfs_bytes']" < "$W/w.json")

@@ -5,30 +5,12 @@
 #       NTFS=OFF 可以不把 GPL 的 mkntfs 编进来（默认 ON：用户 2026-10-22 决定开源，接受 GPL）
 set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# 构建目录：仓库内 build 是软链时取其所指目录的父目录（保持既有产物位置），
-# 否则用仓库内的 build/。两种情形都不写死绝对路径。
-if [ -L "$SRC/build" ]; then
-  BUILD_ROOT="$(dirname "$(readlink -f "$SRC/build")")"
-else
-  BUILD_ROOT="$SRC/build"
-fi
-WS_ROOT="$(dirname "$BUILD_ROOT")"
-
-# NDK：环境变量优先，其次常见安装位置；都没有就明确报错，不猜。
-pick_ndk() {
-  local c
-  for c in "${NDK:-}" "${ANDROID_NDK_HOME:-}" "${ANDROID_NDK_ROOT:-}" \
-           "${ANDROID_HOME:-}/ndk/"* "${ANDROID_SDK_ROOT:-}/ndk/"* \
-           "$HOME/Android/Sdk/ndk/"* "$WS_ROOT/sdk/android-ndk/"*; do
-    [ -n "$c" ] && [ -f "$c/source.properties" ] && { printf '%s\n' "$c"; return 0; }
-  done
-  return 1
-}
-NDK="$(pick_ndk || true)"
-if [ -z "$NDK" ]; then
-  echo "未找到 Android NDK。设置环境变量 NDK 或 ANDROID_NDK_HOME 指向 NDK 目录。" >&2
-  exit 1
-fi
+# 路径统一由 scripts/env.sh 解析（环境变量 > imgtool.conf > 自动探测）。
+# shellcheck disable=SC1091
+. "$SRC/scripts/env.sh"
+imgtool_need "Android NDK" "${IMGTOOL_NDK:-}" "设 NDK / ANDROID_NDK_HOME，或运行 ./configure-local.sh" || exit 1
+NDK="$IMGTOOL_NDK"
+BUILD_ROOT="$IMGTOOL_BUILD_ROOT"
 API="${API:-21}"
 ABIS=("$@"); [ ${#ABIS[@]} -eq 0 ] && ABIS=(arm64-v8a armeabi-v7a x86_64)
 OUT="${OUT:-$BUILD_ROOT/android}"

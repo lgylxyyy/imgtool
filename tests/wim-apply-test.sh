@@ -17,8 +17,9 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T="$ROOT/build/tools"
 TE="$ROOT/build/tests"
 # 默认找 <工作区>/images/ 里的 ESD；换机器用 IMGTOOL_IMAGES 或第 1 个参数指定。
-WS_ROOT=$(cd "$ROOT/../.." && pwd)
-IMG_DIR="${IMGTOOL_IMAGES:-$WS_ROOT/images}"
+# shellcheck disable=SC1091
+. "$ROOT/scripts/env.sh"
+IMG_DIR="$IMGTOOL_IMAGES"
 ESD="${1:-${IMGTOOL_ESD:-$IMG_DIR/【不忘初心】Windows11_26H1_28000.2525_X64_纯净[深度精简版][1.74G](2026.7.20).esd}}"
 IDX="${2:-1}"
 W=$(mktemp -d /tmp/wimtestXXXXXX)
