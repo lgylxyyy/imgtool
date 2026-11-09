@@ -141,7 +141,7 @@ imgcmd sys.tmpdir                 # show the effective temporary directory
 ```
 
 `sys.tmpdir` reports the directory actually in use, which priority tier won
-(`env` / `tmpdir` / `hint` / `fallback`), the free space on that volume, and how
+(`env` / `tmpdir` / `fallback`), the free space on that volume, and how
 many stale entries the sweep removed. Tasks that need temporary space, such as
 `wim.capture`, should check capacity against this path first.
 

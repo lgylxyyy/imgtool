@@ -140,7 +140,7 @@ imgcmd sys.tmpdir                 # 查询当前生效的临时目录
 ```
 
 `sys.tmpdir` 返回实际使用的临时目录、命中的优先级档位（`env` / `tmpdir` /
-`hint` / `fallback`）、该卷剩余空间，以及本次清扫掉的残留数。
+`fallback`）、该卷剩余空间，以及本次清扫掉的残留数。
 `wim.capture` 等需要临时空间的任务，应先按此路径做容量检查。
 
 - 参数一律字符串形式：`--img=/sdcard/a.qcow2`、`--recursive=true`
