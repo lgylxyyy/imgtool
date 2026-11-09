@@ -27,6 +27,11 @@ cmake -S "$ROOT" -B "$ROOT/build" \
 cmake --build "$ROOT/build" -j"$(nproc)"
 
 echo
+if [ "${MODE:-full}" = "debug-fat" ]; then
+  echo "════ 调试模式：只复现 FAT 的 buffer overflow 并打栈 ════"
+  exec bash "$ROOT/ci/repro-fat.sh"
+fi
+
 echo "════ 3. 依赖能力断言（缺库会让用例静默跳过，这里必须拦下）════"
 FEAT="$("$ROOT/build/tools/imgcmd" --list | python3 -c 'import json,sys;d=json.load(sys.stdin)["features"];print("%s/%s/%s/%s" % (d["wimlib"],d["ntfs3g"],d["zlib"],d["mkntfs"]))')"
 echo "features(wimlib/ntfs3g/zlib/mkntfs) = $FEAT"
