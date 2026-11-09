@@ -245,9 +245,15 @@ int __real___open_2(const char *p, int f){
     static fn_t fn; if(!fn){ void *p_=dlsym(RTLD_NEXT,"__open_2"); memcpy(&fn,&p_,sizeof p_); }
     return fn ? fn(p,f,m) : (errno=ENOSYS, -1);
 }
+/* ★ __realpath_chk 是【三参数】(path, buf, buflen)；按两参数调用会把 buflen
+ *   变成调用约定里的残值。实测 x86_64 上残值是个小数字 → glibc 判定
+ *   "缓冲区小于 PATH_MAX" → __chk_fail → abort（aarch64 上残值恰好够大，
+ *   所以本机一直没暴露）。必须把 len 原样传下去。 */
+typedef char *(*fn_realpath_chk_t)(const char*, char*, size_t);
 char *__real___realpath_chk(const char *p, char *r, size_t len){
-    REAL_FN(fn_realpath_t, real_realpath_chk, "__realpath_chk");
-    if(real_realpath_chk_fn) { (void)len; return real_realpath_chk_fn(p,r); }
+    static fn_realpath_chk_t fn;
+    if(!fn){ void *p_=dlsym(RTLD_NEXT,"__realpath_chk"); memcpy(&fn,&p_,sizeof p_); }
+    if(fn) return fn(p,r,len);
     return __real_realpath(p,r);
 }
 #endif
