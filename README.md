@@ -4,7 +4,7 @@
 
 **Read and write qcow2 images offline — partitions, filesystems, and Windows boot. No mounting, no booting.**
 
-[English](README.md) | [中文](README_ZH.md)
+[**English**](README.md) | [中文 🇨🇳](README_ZH.md)
 
 [![License](https://img.shields.io/badge/license-GPL--2.0--or--later-blue)](LICENSE)
 [![C11](https://img.shields.io/badge/C-11-informational)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
