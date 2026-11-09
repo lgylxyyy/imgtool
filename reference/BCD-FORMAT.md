@@ -1,6 +1,6 @@
 # BCD（Boot Configuration Data）格式规格
 
-> 来源：`/workspace/images/Windows 10 UEFI.qcow2` 的 ESP
+> 来源：一张 Windows 10 UEFI 安装盘的 ESP
 > `\EFI\Microsoft\Boot\BCD`（28,672 字节）与 `\EFI\Microsoft\Recovery\BCD`（12,288 字节）
 > 本文件由实际解析得出，用于指导 C 写入器实现。
 

@@ -7,7 +7,7 @@ ntfs-3g + ntfsprogs 约 **99,000 行 C**，全部 vendor 进仓库会淹没我�
 ## 获取方式
 ```bash
 # 官方仓库（2026-09 仍活跃）
-git clone https://github.com/tuxera/ntfs-3g.git   # 本地工作区: /workspace/build/third_party/ntfs-3g
+git clone https://github.com/tuxera/ntfs-3g.git   # 建议放在 build/third_party/ntfs-3g
 # 或本沙箱可用的 tarball 方式（git clone 走 HTTPS 会遇到 TLS 限制）
 curl -sL https://codeload.github.com/tuxera/ntfs-3g/tar.gz/refs/heads/edge -o ntfs3g.tgz
 tar -xzf ntfs3g.tgz
@@ -23,17 +23,17 @@ make -j8          # 只要 mkntfs 与 libntfs-3g，FUSE 驱动可忽略
 - `ntfsprogs/.libs/mkntfs`        319,648 字节
 - `libntfs-3g/.libs/libntfs-3g.a` 2,728,028 字节
 
-## 宿主用 mkntfs 目标文件（`/workspace/build/mkntfs_obj`）
+## 宿主用 mkntfs 目标文件（`build/mkntfs_obj`）
 
 `IMG_WITH_NTFS=ON` 时 CMake 会 glob `../build/mkntfs_obj/mkntfs-*.o`，并把
 `ntfscp.o / ntfsls.o / ntfscat.o` 给 `imgntfscp` / `imgntfsfs` 用。
 **这 8 个 .o 是构建输入，不是可随手删的构建垃圾**（删了 → `features.mkntfs=false`，
 `fs.format --fs=ntfs` 报 `FEATURE-UNAVAILABLE`）。
 
-一条命令重建（源码树用 `/workspace/third_party/ntfs-3g`，已 configure 过）：
+一条命令重建（源码树用 `third_party/ntfs-3g`，已 configure 过）：
 
 ```bash
-imgtool/tools/build-mkntfs-obj.sh                    # → /workspace/build/mkntfs_obj
+tools/build-mkntfs-obj.sh                            # → build/mkntfs_obj
 cd imgtool/build && cmake .. -DCMAKE_BUILD_TYPE=Release -DIMG_WITH_NTFS=ON && make -j8
 ./tools/imgcmd --list | grep -o '"features":{[^}]*}'  # mkntfs 必须是 true
 ```

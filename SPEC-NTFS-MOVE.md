@@ -10,11 +10,11 @@
 | # | 来源 | 拿到什么 |
 |---|---|---|
 | A | **[MS-FSA] File System Algorithms**（用户提供的 2025-09-09 官方 docx，已全文抽取） | §2.1.5.15.12 `FileRenameInformation` 改名/移动的完整算法；§2.1.1.3/2.1.1.4 每 File/每 Link 的持久字段；§2.1.4.19 更新"重复信息"；§2.1.5.6.3.4 目录查询对 `.` / `..` 的规定；附录 `<65>` |
-| B | **libntfs-3g 源码**（本地 `/workspace/third_party/ntfs-3g`，2026.9 系） | `src/ntfs-3g.c: ntfs_fuse_rename()`；`libntfs-3g/dir.c: ntfs_link_i()/ntfs_delete()/ntfs_create_inode()`；`include/ntfs-3g/layout.h` 各结构偏移；`libntfs-3g/mst.c` 多扇区保护 |
-| C | **现场盘**：`.tmp/w10b.qcow2` → `qemu-img convert -O raw` | 这张就是用户 VM 启动过的那张盘（卷号 `2B00-726F` 与 TXT 逐字符相同）在"我搬完、Windows 未动手前"的状态 |
+| B | **libntfs-3g 源码**（仓库内 `third_party/ntfs-3g`，2026.9 系） | `src/ntfs-3g.c: ntfs_fuse_rename()`；`libntfs-3g/dir.c: ntfs_link_i()/ntfs_delete()/ntfs_create_inode()`；`include/ntfs-3g/layout.h` 各结构偏移；`libntfs-3g/mst.c` 多扇区保护 |
+| C | **现场盘**：`w10b.qcow2` → `qemu-img convert -O raw` | 这张盘由真实 Windows 虚拟机启动过（卷号 `2B00-726F` 与系统 TXT 逐字符相同），取的是「移动完成、Windows 未再写入」的状态 |
 | D | **独立解析器** `tests/ntfs-inventory.py`（纯 Python，不链接 imgtool/libntfs-3g） | 三方对账：目录索引项 ↔ MFT 记录 ↔ `$MFT` 的 `$BITMAP` |
 
-★ 按 AGENT-MEMORY 规则：**证明 Windows 行不行必须用真盘**；本文所有"盘上事实"都来自 C/D，不来自我自己造的验证盘。
+★ 原则：**证明 Windows 行不行必须用真盘**；本文所有「盘上事实」都来自 C/D，不来自自己造的验证盘。
 
 ---
 

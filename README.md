@@ -259,12 +259,11 @@ android-deps.sh     Android 第三方依赖编译（一次性）
 
 文档：
 
-- [`ANDROID-BUILD.md`](ANDROID-BUILD.md)：Android 交叉构建
-- [`ARMHF-BUILD.md`](ARMHF-BUILD.md)：armhf 32 位交叉构建
-- [`DESIGN-OUTPUT.md`](DESIGN-OUTPUT.md)：输出、日志、错误与尺寸校验契约
+- [`DESIGN-OUTPUT.md`](DESIGN-OUTPUT.md)：输出、日志、错误与尺寸校验契约（工具 ↔ App）
+- [`ANDROID-BUILD.md`](ANDROID-BUILD.md)：Android 交叉构建与产物体检
+- [`ARMHF-BUILD.md`](ARMHF-BUILD.md)：armhf 32 位交叉构建与验证
 - [`PARTITION-POLICY.md`](PARTITION-POLICY.md)：分区、格式化、克隆的政策决策
-- [`SPEC-NTFS-MOVE.md`](SPEC-NTFS-MOVE.md)：NTFS 改名与移动的实现差异
-- [`WORKPLAN-HARDEN.md`](WORKPLAN-HARDEN.md)：健壮性加固工作计划
+- [`SPEC-NTFS-MOVE.md`](SPEC-NTFS-MOVE.md)：NTFS 改名与移动的规范对照
 - [`THIRD_PARTY.md`](THIRD_PARTY.md)：第三方组件与版权声明
 
 ---

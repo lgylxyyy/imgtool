@@ -1,7 +1,7 @@
 # Android 交叉构建（aarch64 主机）
 
-> 本文件与 `cmake/android-arm64host.cmake`、`android-cross.sh`、`android-deps.sh`
-> 属于 **android-compat** 分支；`master` 保持可移植基线干净。
+> 本文件与 `cmake/android-arm64host.cmake`、`android-cross.sh`、`android-deps.sh` 配套。
+> 这些文件在 `main` 与 `android` 两个分支上一致；`android` 是给 App 出 `libimgtool.so` 的分支。
 
 ## 0. 一句话结论
 
@@ -11,11 +11,11 @@ sysroot（头文件与库桩，权威）** 拼成交叉工具链。NDK 自带的
 
 | 部件 | 来源 | 位置 |
 | --- | --- | --- |
-| Bionic 头/库桩/compiler-rt | Android NDK r28c（28.2.13676358） | `/workspace/android-ndk/android-ndk-r28c` |
+| Bionic 头/库桩/compiler-rt | Android NDK r28c（28.2.13676358） | `$NDK_ROOT`（`android-cross.sh` 可用环境变量 `NDK` 覆盖） |
 | 编译器/链接器 | apt `clang` `lld` 18.1.3（aarch64 原生） | `/usr/bin/clang`、`ld.lld` |
-| SDK 平台/build-tools | sdkmanager（android-34/35、build-tools 34/35.0.0/35.0.1） | `/workspace/android-sdk` |
+| SDK 平台/build-tools | sdkmanager（android-34/35、build-tools 34/35.0.0/35.0.1） | `$ANDROID_SDK` |
 | aapt2/aidl/zipalign/split-select | 社区 arm64 构建 `Commit451/android-arm-build-tools` | 已替换进 `build-tools/35.0.1`，原生可执行 |
-| Gradle | 8.11.1 | `/workspace/gradle` |
+| Gradle | 8.11.1 | `$GRADLE_HOME` |
 | adb/fastboot | apt 34.0.4（aarch64 原生；Google 的是 x86_64，不用） | `/usr/bin/adb` |
 
 ## 1. 用法
@@ -64,13 +64,13 @@ API=28 ./android-cross.sh
 AGP 默认从 Maven 取 x86_64 的 aapt2，arm64 主机必须写
 
 ```properties
-android.aapt2FromMavenOverride=/workspace/android-sdk/build-tools/35.0.1/aapt2
+android.aapt2FromMavenOverride=<ANDROID_SDK>/build-tools/35.0.1/aapt2
 ```
 
 原生 `ndkVersion` 走不通（NDK 宿主二进制是 x86_64）：APK 里的 .so 用本脚本预编译，
 以 `jniLibs/<abi>/` 形式打进包里，不要让 Gradle 去调 NDK 的 CMake toolchain。
 
-## 5. 真机（Redmi / Android 17 / SDK 37 / 4 KiB 页）实测出的两个坑
+## 5. 真机（Android 15+ / 4 KiB 页）实测出的两个坑
 
 跑法：`adb push` 交叉出来的 `bin/*` 到 `/data/local/tmp/img/`，`LD_LIBRARY_PATH=.` 直接执行。
 同一批测试在主机 17/17 全绿，真机却挂了 6 个 —— 两个原因都是**主机环境才有、安卓没有的东西**：
@@ -78,9 +78,10 @@ android.aapt2FromMavenOverride=/workspace/android-sdk/build-tools/35.0.1/aapt2
 ### 坑 A：库内写死 `/tmp`（Android 没有 /tmp）
 `img_bcd.c` 的 `img_bcd_open_mem/img_bcd_save_mem` 与 `img_cmds.c` 的 `bcd.create`
 用 `mkstemp("/tmp/...")` 建临时文件 → 安卓上必失败，表现是 `bcd.create` 报打不开。
-修法是新增 `img_tmpdir()`（`IMGTOOL_TMPDIR → TMPDIR → /tmp → "."`，逐个 `access(W|X)`
-取第一个真正可写的；全不可写返回 NULL 并出 `TMPDIR-UNAVAILABLE`）。
-**App 侧必须把 `IMGTOOL_TMPDIR` 指到自己的 cache 目录**，否则没有可写临时目录。
+修法是新增 `img_tmpdir()`，按 `IMGTOOL_TMPDIR → TMPDIR → /tmp` 取第一个真正可写的；
+全不可写返回 NULL 并出 `TMPDIR-UNAVAILABLE`。
+**App 侧必须把 `IMGTOOL_TMPDIR` 指到自己的私有目录**（`filesDir/tooltmp`），
+不要用 `cacheDir`：Android 在存储紧张时会自动清空 `cacheDir`，长任务写到一半会丢文件。
 
 ### 坑 B：Bionic 的 iconv 不支持 LATIN1（★ 影响最大）
 hivex 解节点名走 `iconv(3)`；BCD hive 里的节点名是 **Latin-1 压缩存储**
@@ -129,8 +130,8 @@ CLI `imgcmd bcd.create --img=W/a.qcow2` 在真机上成功往 GPT 盘 ESP 写出
 第 7 步是整条链的集中验证点：临时文件（`img_tmpdir`）+ hivex 读写 + Latin-1 iconv +
 FAT32 写入，四样在 App 沙箱里同时成立。
 
-装包注意：HyperOS 需要 `pm install -i com.google.android.packageinstaller`，见
-`docs/AGENT-MEMORY.md`。
+装包注意：部分 OEM 系统（如 HyperOS）需要用
+`pm install -i com.google.android.packageinstaller` 指定安装来源。
 
 ## 7. 打开 NTFS 格式化 + 端到端灌系统（2026-10-22 用户拍板"开源，GPL 可以带"）
 
@@ -149,7 +150,7 @@ FAT32 写入，四样在 App 沙箱里同时成立。
   之前图省事写了 `--without-ntfs-3g`，交叉出的 libwim 不支持 `WIMLIB_EXTRACT_FLAG_NTFS`，
   真机 `wim.apply` 9 毫秒就报"底层读写失败"
 
-### 真机端到端（Redmi / Android 17 / arm64-v8a，全新 20 GiB 盘）
+### 真机端到端（Android 15+ / arm64-v8a，全新 20 GiB 盘）
 
 | 步 | 命令 | 结果 |
 | --- | --- | --- |

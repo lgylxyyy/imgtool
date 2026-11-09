@@ -25,7 +25,7 @@ App 屏幕上那块 = 调同一个渲染函数塞进自己的控件，不重写�
 **用户决策：日志只记【开始做】和【完成做】，过程只给 App 显示，不落盘。**
 
 ```
-time="2026-10-15 18:39:01.448" level=INFO tool=imgmkfs event=session args=/workspace/images/x.qcow2
+time="2026-10-15 18:39:01.448" level=INFO tool=imgmkfs event=session args=/sdcard/images/x.qcow2
 time="2026-10-15 18:39:01.450" level=INFO logger=fat32 event=begin message="格式化 FAT32 分区" action=format lba=2048 size_bytes=134217728
 time="2026-10-15 18:39:01.526" level=INFO logger=fat32 event=done rc=0 action=format duration_ms=76
 time="2026-10-15 18:39:30.900" level=ERROR logger=cmd event=fail rc=-10 error_code=FAT-ENOSPC at=/EFI/x message="宿主剩余 196 MB，本次预计需要 286 MB"

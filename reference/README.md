@@ -65,4 +65,4 @@ imgcmd fat.export  --img=<qcow2> --lba=<ESP 起始 LBA> \
 它们不在仓库里了，但**工作区和本地备份里都有**：
 
 - 工作区：`reference/*.bin`（被 `.gitignore` 忽略）
-- 备份：`/workspace/backup-prerewrite/`
+- 备份：仓库外的本地备份目录（不入库）

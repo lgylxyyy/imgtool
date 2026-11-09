@@ -1,17 +1,15 @@
 # armhf（32 位）交叉构建与验证
 
-> 本文件属于 **android-compat 分支**（`/workspace/imgtool-android`）。
-> `master` 保持可移植基线干净；Android/32 位专属改动只在这里。
+> 用途：验证 32 位位宽（`size_t` / `long` / 64 位偏移）与 NTFS、mkntfs 的位宽正确性。
+> Android（Bionic / NDK）的构建见 [`ANDROID-BUILD.md`](ANDROID-BUILD.md)。
 
-## 为什么单独一份
+## 为什么用 glibc armhf 而不是真机
 
-用户 2026-10-19 定：
-> "如果要做安卓端兼容的话，就将现在的代码重新放一个位置。什么时候开始做兼容，什么时候放。"
+32 位移植的风险集中在位宽与偏移运算，用 glibc armhf + `qemu-arm-static` 就能覆盖，
+不必占用真机。Bionic 差异、SELinux、SAF 不在本文件范围。
 
-所以：
-- `/workspace/imgtool`（master）= 可移植基线，给其他设备移植用；
-- `/workspace/imgtool-android`（本目录，分支 `android-compat`）= 兼容改动；
-- 基线 tag：`portable-baseline-2026-10-19`。
+历史说明：2026-10-19 曾把 Android 兼容改动放在独立仓库与分支，2026-11-09 已合并回本仓库。
+现在只有 `main`（主线）与 `android`（App 发布）两个分支，两者内容一致。
 
 ## 1. 工具链
 
@@ -26,13 +24,13 @@ apt-get install -y libhivex0:armhf
 
 ## 2. 交叉编译 ntfs-3g（armhf，静态）
 
-源码在 `/workspace/third_party/ntfs-3g`。**不要原地 configure**（会污染长期源码区，
+源码在仓库的 `third_party/ntfs-3g`。**不要原地 configure**（会污染长期源码区，
 且 out-of-tree 会被已有的 config.status 拒绝）。复制到构建区再编：
 
 ```bash
-rm -rf /workspace/build-armhf/ntfs3g-src
-cp -a /workspace/third_party/ntfs-3g /workspace/build-armhf/ntfs3g-src
-cd /workspace/build-armhf/ntfs3g-src
+rm -rf build-armhf/ntfs3g-src
+cp -a third_party/ntfs-3g build-armhf/ntfs3g-src
+cd build-armhf/ntfs3g-src
 make distclean
 CC=arm-linux-gnueabihf-gcc CFLAGS="-O2 -pipe" ./configure \
   --host=arm-linux-gnueabihf --disable-nfconv --without-fuse \
@@ -48,8 +46,8 @@ make -j4 || true
 `IMG_WITH_NTFS=ON` 需要本 ABI 的 mkntfs 对象（不能混用宿主对象）：
 
 ```bash
-S=/workspace/build-armhf/ntfs3g-src/ntfsprogs
-D=/workspace/build-armhf/mkntfs_obj
+S=build-armhf/ntfs3g-src/ntfsprogs
+D=build-armhf/mkntfs_obj
 mkdir -p $D
 cp $S/mkntfs-{attrdef,boot,sd,utils}.o $S/{ntfscp,ntfsls,ntfscat}.o $D/
 arm-linux-gnueabihf-objcopy --redefine-sym main=mkntfs_main  $S/mkntfs-mkntfs.o $D/mkntfs-main.o
@@ -59,35 +57,37 @@ arm-linux-gnueabihf-objcopy --redefine-sym main=ntfscat_main $D/ntfscat.o
 ```
 
 > 与宿主版本的差异：这个版本的 automake 把 `mkntfs.c` 编成 `mkntfs-mkntfs.o`
-> （宿主是 `mkntfs-main.o`），只要符号改名正确即可，文件名不影响 CMake 的 `mkntfs-*.o` glob。
+> （宿主是 `mkntfs-main.o`），只要符号改名正确即可，文件名不影响 CMake 的 `mkntfs-*.o` 通配。
 
 ## 3. 构建 imgtool（armhf）
 
-`IMG_MKNTFS_OBJ_DIR` 是本次为交叉编译加的参数（默认仍是宿主 `../build/mkntfs_obj`）：
+`IMG_MKNTFS_OBJ_DIR` 是交叉编译专用参数（默认仍是宿主的 `build/mkntfs_obj`）。
+在仓库根目录执行：
 
 ```bash
-cd /workspace/imgtool-android
 cmake -S . -B build-armhf \
   -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc \
   -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=armv7l \
   -DCMAKE_BUILD_TYPE=Release \
   -DIMG_WITH_WIM=OFF -DIMG_WITH_ZLIB=OFF -DIMG_BUILD_TESTS=OFF \
   -DIMG_WITH_NTFS3G=ON \
-  -DNTFS3G_INC=/workspace/build-armhf/ntfs3g-src/include \
-  -DNTFS3G_LIB=/workspace/build-armhf/ntfs3g-src/libntfs-3g/.libs/libntfs-3g.a \
+  -DNTFS3G_INC=build-armhf/ntfs3g-src/include \
+  -DNTFS3G_LIB=build-armhf/ntfs3g-src/libntfs-3g/.libs/libntfs-3g.a \
   -DIMG_WITH_NTFS=ON \
-  -DNTFSDEV_INC=/workspace/build-armhf/ntfs3g-src/include \
-  -DNTFSDEV_LIB=/workspace/build-armhf/ntfs3g-src/libntfs-3g/.libs/libntfs-3g.a \
-  -DIMG_MKNTFS_OBJ_DIR=/workspace/build-armhf/mkntfs_obj \
+  -DNTFSDEV_INC=build-armhf/ntfs3g-src/include \
+  -DNTFSDEV_LIB=build-armhf/ntfs3g-src/libntfs-3g/.libs/libntfs-3g.a \
+  -DIMG_MKNTFS_OBJ_DIR=build-armhf/mkntfs_obj \
   -DHIVEX_INC=/usr/include \
   -DHIVEX_LIB=/usr/lib/arm-linux-gnueabihf/libhivex.so.0
 cmake --build build-armhf -j4
 ```
 
 说明：
-- `IMG_WITH_WIM=OFF`：宿主没有 armhf 的 wimlib；WIM 灌入不在本轮 32 位验证范围。
+
+- `IMG_WITH_WIM=OFF`：宿主通常没有 armhf 的 wimlib；WIM 写入不在 32 位验证范围。
 - `IMG_WITH_ZLIB=OFF`：同理（qcow2 压缩簇关闭；普通镜像读写不受影响）。
 - `HIVEX_LIB` 指到 armhf 的 `.so.0`（dev 包的 `.so` 符号链接没装，直接指实体）。
+- 路径都写相对仓库根目录的形式；在自己的机器上换成绝对路径也可以。
 
 ## 4. 验证
 
@@ -95,23 +95,22 @@ cmake --build build-armhf -j4
 bash tests/armhf-smoke.sh
 ```
 
-实测（2026-10-19，aarch64 宿主 + qemu-arm-static）：
+实测（aarch64 宿主 + `qemu-arm-static`）：
 
 | 项 | 结果 |
 |---|---|
-| 6GiB GPT 盘，RE 分区起始 **LBA 10483712（偏移 5,367,660,544 > 4GiB）** | ✅ |
-| FAT32（ESP）写 8MiB → 宿主抽回 md5 | ✅ 逐字节一致 |
-| NTFS（RE，>4GiB 偏移）arm32 进程内 mkntfs 格式化 | ✅ |
-| arm32 NTFS 写 8MiB → 上游 ntfsls 可见 → 宿主抽回 md5 | ✅ 逐字节一致 |
+| 6 GiB GPT 盘，恢复分区起始 **LBA 10483712（偏移 5,367,660,544 > 4 GiB）** | ✅ |
+| FAT32（ESP）写 8 MiB → 宿主抽回 md5 | ✅ 逐字节一致 |
+| NTFS（恢复分区，>4 GiB 偏移）arm32 进程内 mkntfs 格式化 | ✅ |
+| arm32 NTFS 写 8 MiB → 上游 ntfsls 可见 → 宿主抽回 md5 | ✅ 逐字节一致 |
 | 宿主 `qemu-img check` | ✅ No errors |
 
-这关闭了 `WORKPLAN-HARDEN` 里"32 位 NTFS 路径未实测"的缺口。
+这关闭了「32 位 NTFS 路径未实测」的缺口。
 
-## 5. 诚实边界
+## 5. 边界
 
 - 这是 **glibc armhf + qemu-user**，不是 Android Bionic/NDK 真机。
-  它验证的是 32 位 `size_t/long`、64 位偏移、NTFS/mkntfs 的位宽正确性；
+  它验证的是 32 位 `size_t`/`long`、64 位偏移、NTFS/mkntfs 的位宽正确性；
   **不**验证 Bionic 差异、SELinux、SAF、NDK 工具链。
-- Android NDK 构建仍未做（需要 NDK + 为各 ABI 编 ntfs-3g/hivex/wimlib）。
-  下一步在**本分支**里加 `android.toolchain.cmake` 与 `Application.mk` 等价配置。
-- `recovery_bcd_test` / WIM 直灌在 armhf 下未跑（缺 armhf wimlib）；与 32 位无关的功能缺口。
+- Android NDK 构建与真机验证见 [`ANDROID-BUILD.md`](ANDROID-BUILD.md)。
+- `recovery_bcd_test` 与 WIM 写入在 armhf 下未跑（缺 armhf wimlib）；与 32 位位宽无关。

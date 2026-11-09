@@ -261,12 +261,11 @@ android-deps.sh     One-time Android dependency build
 
 Docs:
 
-- [`ANDROID-BUILD.md`](ANDROID-BUILD.md): Android cross-compilation
-- [`ARMHF-BUILD.md`](ARMHF-BUILD.md): 32-bit armhf cross-compilation
-- [`DESIGN-OUTPUT.md`](DESIGN-OUTPUT.md): output, logging, error and size-check contract
+- [`DESIGN-OUTPUT.md`](DESIGN-OUTPUT.md): output, logging, error and size-check contract (tool ↔ app)
+- [`ANDROID-BUILD.md`](ANDROID-BUILD.md): Android cross-compilation and artifact checks
+- [`ARMHF-BUILD.md`](ARMHF-BUILD.md): 32-bit armhf cross-compilation and verification
 - [`PARTITION-POLICY.md`](PARTITION-POLICY.md): partition, format and clone policy decisions
 - [`SPEC-NTFS-MOVE.md`](SPEC-NTFS-MOVE.md): NTFS rename and move versus the specification
-- [`WORKPLAN-HARDEN.md`](WORKPLAN-HARDEN.md): robustness hardening workplan
 - [`THIRD_PARTY.md`](THIRD_PARTY.md): third-party components and notices
 
 ---

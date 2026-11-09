@@ -22,7 +22,7 @@
 
 1. **当时的脚本原文**：`reference/build-bios-full.sh:26`
    ```
-   $T/imgfixboot "$OUT" 2048 --tpl "/workspace/images/Windows 10 Xlite.qcow2" 2048
+   $T/imgfixboot "$OUT" 2048 --tpl "<素材目录>/Windows 10 Xlite.qcow2" 2048
    ```
    → 两天测试用的模板 = `Windows 10 Xlite.qcow2` 分区 2048 的 `$Boot`
 2. **三方 sha256 全等**（引导码段 `1d79bfa4…`）：模板 / Xlite 快照 / diskB 快照
