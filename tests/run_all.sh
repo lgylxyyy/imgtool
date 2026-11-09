@@ -17,6 +17,8 @@
 #   mbr_bcd_test         BIOS BCD 全对象批量改写（签名+偏移，5 处设备）
 #   reg-test.sh          注册表通用编辑（读/写/列/删/事务）
 #   diskfmt-test.sh      raw / VHD / VMDK 读写与 qemu 互验
+#   vhd-test.py          VHD 建盘、多块写入、重开与 qemu 互验
+#   wim-capture-test.sh  wim.capture 端到端（含临时目录清理）
 #   style-check.py       用户可见文本符合 STYLE-GUIDE
 #   genbcd-test.sh       imggenbcd UEFI BCD 定制（GUID 映射/4 参/反例）
 #   recovery_bcd_test    恢复条目（需 libhivex + 官方 ISO BCD 参考）
@@ -141,6 +143,7 @@ else skipped=$((skipped+1)); echo "  ⏭ 跳过 recovery_bcd_test（没编进构
 run "reg-test（注册表通用编辑：读/写/列/删/事务）"            bash "$ROOT/tests/reg-test.sh"
 run "diskfmt-test（raw / VHD / VMDK 读写 + qemu 互验）"      bash "$ROOT/tests/diskfmt-test.sh"
 run "vhd-test（VHD 建盘、多块写入、重开与 QEMU 互验）"         python3 "$ROOT/tests/vhd-test.py"
+run "wim-capture-test（捕获、临时目录清理、产物可读）"          bash "$ROOT/tests/wim-capture-test.sh"
 run "style-check（用户可见文本符合 STYLE-GUIDE）"           python3 "$ROOT/tests/style-check.py"
 
 # 依赖裁剪（默认跳过：要重编两套约 30 s；要跑：DEGRADED=1 tests/run_all.sh）

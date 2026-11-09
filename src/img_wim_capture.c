@@ -18,6 +18,7 @@
 #include "img_du.h"
 #include "img_path.h"
 #include "img_ntfs_fs.h"
+#include "img_types.h"
 
 #include <wimlib.h>
 #include <stdlib.h>
@@ -114,8 +115,7 @@ int img_wim_capture(const char *img_path, uint64_t lba, uint64_t part_bytes,
     img_xcopy_stats st; memset(&st,0,sizeof st);
     rc = img_xcopy_run(&src,&dst,&xo,prog,&st);
     if(rc != IMG_OK){
-        char cmd[1400]; snprintf(cmd,sizeof cmd,"rm -rf '%s'",tmpdir);
-        (void)system(cmd);
+        (void)img_tmpdir_remove(tmpdir);
         if(err&&errcap) snprintf(err,errcap,"抽取失败（%llu 文件后）：",
             (unsigned long long)st.files);
         return rc;
@@ -124,8 +124,7 @@ int img_wim_capture(const char *img_path, uint64_t lba, uint64_t part_bytes,
 
     /* ④ wimlib capture */
     if(wimlib_global_init(0) != 0){
-        char cmd[1400]; snprintf(cmd,sizeof cmd,"rm -rf '%s'",tmpdir);
-        (void)system(cmd);
+        (void)img_tmpdir_remove(tmpdir);
         if(err&&errcap) snprintf(err,errcap,"wimlib_global_init 失败");
         return IMG_EIO;
     }
@@ -138,8 +137,7 @@ int img_wim_capture(const char *img_path, uint64_t lba, uint64_t part_bytes,
     default:                  ct = WIMLIB_COMPRESSION_TYPE_XPRESS; break;
     }
     if(wimlib_create_new_wim(ct, &w) != 0){
-        char cmd[1400]; snprintf(cmd,sizeof cmd,"rm -rf '%s'",tmpdir);
-        (void)system(cmd);
+        (void)img_tmpdir_remove(tmpdir);
         if(err&&errcap) snprintf(err,errcap,"wimlib_create_new_wim 失败");
         return IMG_EIO;
     }
@@ -147,8 +145,7 @@ int img_wim_capture(const char *img_path, uint64_t lba, uint64_t part_bytes,
     if(wimlib_add_empty_image(w, opts->image_name ? opts->image_name : "Windows",
                               &new_idx) != 0){
         wimlib_free(w);
-        char cmd[1400]; snprintf(cmd,sizeof cmd,"rm -rf '%s'",tmpdir);
-        (void)system(cmd);
+        (void)img_tmpdir_remove(tmpdir);
         if(err&&errcap) snprintf(err,errcap,"wimlib_add_empty_image 失败");
         return IMG_EIO;
     }
@@ -157,8 +154,7 @@ int img_wim_capture(const char *img_path, uint64_t lba, uint64_t part_bytes,
 
     if(wimlib_add_tree(w, new_idx, tmpdir, (wimlib_tchar*)"/", add_flags) != 0){
         wimlib_free(w);
-        char cmd[1400]; snprintf(cmd,sizeof cmd,"rm -rf '%s'",tmpdir);
-        (void)system(cmd);
+        (void)img_tmpdir_remove(tmpdir);
         if(err&&errcap) snprintf(err,errcap,"wimlib_add_tree 失败");
         return IMG_EIO;
     }
@@ -167,8 +163,7 @@ int img_wim_capture(const char *img_path, uint64_t lba, uint64_t part_bytes,
     wimlib_free(w);
     if(wr != 0){
         unlink(out_wim);
-        char cmd[1400]; snprintf(cmd,sizeof cmd,"rm -rf '%s'",tmpdir);
-        (void)system(cmd);
+        (void)img_tmpdir_remove(tmpdir);
         if(err&&errcap) snprintf(err,errcap,"wimlib_write 失败（wimlib 错误码 %d）",wr);
         return IMG_EIO;
     }
@@ -176,7 +171,6 @@ int img_wim_capture(const char *img_path, uint64_t lba, uint64_t part_bytes,
     /* ⑤ 收尾 */
     struct stat sb;
     if(stat(out_wim,&sb)==0) out->bytes_out = (uint64_t)sb.st_size;
-    char cmd[1400]; snprintf(cmd,sizeof cmd,"rm -rf '%s'",tmpdir);
-    (void)system(cmd);
+    (void)img_tmpdir_remove(tmpdir);
     return IMG_OK;
 }

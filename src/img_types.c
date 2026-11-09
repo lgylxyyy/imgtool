@@ -264,6 +264,16 @@ static void host_rm_rf_dir(const char *path){
     rmdir(path);
 }
 
+/* 递归删除临时目录（公开给 wim.capture / recovery 用，替代 system("rm -rf")）。*/
+int img_tmpdir_remove(const char *path){
+    if(!path || !*path) return IMG_EINVAL;
+    struct stat st;
+    if(lstat(path,&st)!=0) return (errno==ENOENT)?IMG_OK:IMG_EIO;
+    if(S_ISDIR(st.st_mode)) host_rm_rf_dir(path);
+    else unlink(path);
+    return IMG_OK;
+}
+
 /* sweep 一次目录（内部共用） */
 static int tmp_sweep_one(const char *td){
     if(!td || !*td) return 0;

@@ -8,6 +8,7 @@
 #include "img_partition.h"
 #include "img_event.h"
 #include "img_wim_fs.h"
+#include "img_types.h"
 /* WIM 里的候选路径（两种约定都试）—— 即使 WIM 关闭也保留：populate 的默认值是 CAND[0] */
 static const char *const CAND[] = {
     "/Windows/System32/Recovery/Winre.wim",
@@ -122,9 +123,7 @@ int img_winre_extract_file(const char *wim_path, int index, const char *internal
         fclose(in); fclose(out); unlink(src);
     }
     /* 清空临时目录（可能有多层）*/
-    char cmd[1200];
-    snprintf(cmd,sizeof cmd,"rm -rf '%s'",dir);
-    if(system(cmd)!=0){ /* 清不掉不致命 */ }
+    (void)img_tmpdir_remove(dir);
     return IMG_OK;
 }
 

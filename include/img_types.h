@@ -180,6 +180,14 @@ const char *img_dev_placeholder(void);
 const char *img_tmpfile(const char *purpose, char *out, size_t cap);
 int         img_tmpfile_dir(const char *purpose, char *out, size_t cap);
 
+/* 递归删除一个临时目录（连同内容）。
+ * 用途：替代 system("rm -rf '<路径>'")。理由：
+ *   ① Android 上没有 shell，system() 不可靠；
+ *   ② 路径含单引号时 shell 拼接会出错；
+ *   ③ 工具自身边界是「不做 fork/exec」。
+ * 只能删本工具创建的目录：调用方传 img_tmpfile_dir() 的返回值。 */
+int         img_tmpdir_remove(const char *path);
+
 #ifdef __cplusplus
 }
 #endif
