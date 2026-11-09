@@ -8249,11 +8249,36 @@ static const img_arg A_REGLIST[] = {
     {"subkeys",    IMG_A_BOOL, false, "true","列子键", NULL},
     {"values",     IMG_A_BOOL, false, "true","列值", NULL},
 };
-typedef struct { img_result *out; int n; } reg_ls_ud;
+/* ★ reg.list 明细（2026-11-09）：App 要做注册表浏览器，只回 count 不够。
+ *   子项拼进 JSON 数组：{"name":"...","kind":"key"|"value","type":"REG_SZ","bytes":N} */
+enum { REGLS_CAP = 262144 };
+typedef struct {
+    img_result *out;
+    int n;
+    char *buf; size_t cap, len;
+    bool truncated;
+} reg_ls_ud;
 static void reg_ls_cb(void *ud, const char *name, bool is_key, img_reg_type type, size_t len){
     reg_ls_ud *u = (reg_ls_ud*)ud;
-    (void)u; (void)name; (void)is_key; (void)type; (void)len;
-    u->n++;
+    if(u->len + 160 >= u->cap - 2){ u->truncated = true; return; }
+    /* JSON 转义（名字里可能有引号/反斜杠/控制字符） */
+    char esc[600]; int k=0;
+    for(const unsigned char *p=(const unsigned char*)name; *p && k<(int)sizeof esc-8; p++){
+        if(*p=='"'||*p=='\\'){ esc[k++]='\\'; esc[k++]=(char)*p; }
+        else if(*p<0x20) k+=snprintf(esc+k,sizeof esc-(size_t)k,"\\u%04x",*p);
+        else esc[k++]=(char)*p;
+    }
+    esc[k]=0;
+    int m;
+    if(is_key)
+        m=snprintf(u->buf+u->len, u->cap-u->len, "%s{\"name\":\"%s\",\"kind\":\"key\"}",
+                   u->n?",":"", esc);
+    else
+        m=snprintf(u->buf+u->len, u->cap-u->len,
+                   "%s{\"name\":\"%s\",\"kind\":\"value\",\"type\":\"%s\",\"bytes\":%llu}",
+                   u->n?",":"", esc, img_reg_type_name(type), (unsigned long long)len);
+    if(m>0 && (size_t)m < u->cap-u->len){ u->len+=(size_t)m; u->n++; }
+    else u->truncated = true;
 }
 static int cmd_reg_list(img_ctx *ctx, const img_args *in, img_result *out){
     uint64_t lba = img_args_u64(in,"lba",0);
@@ -8286,7 +8311,12 @@ static int cmd_reg_list(img_ctx *ctx, const img_args *in, img_result *out){
             "这个分区可能不是 Windows 系统分区");
         return IMG_ESTATE;
     }
-    reg_ls_ud u = { out, 0 };
+    /* ★ img_result_raw 只存指针不拷贝 —— 缓冲必须活到命令返回。
+     *   用线程级缓冲 img_tbuf（ntfs.list 同款），不能 malloc 后 free。 */
+    char *jbuf = img_tbuf(IMG_TB_NTFS_LIST, REGLS_CAP);
+    if(!jbuf){ img_reg_close(r); return IMG_ENOMEM; }
+    reg_ls_ud u = { out, 0, jbuf+1, (size_t)REGLS_CAP-2, 0, false };
+    jbuf[0] = '[';
     rc = img_reg_enum(r, keypath, want_k, want_v, reg_ls_cb, &u, err, sizeof err);
     img_reg_close(r);
     if(rc != IMG_OK){
@@ -8296,6 +8326,13 @@ static int cmd_reg_list(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_str(out,"hive",img_reg_hive_name(hive));
     img_result_str(out,"key",keypath);
     img_result_u64(out,"count",(uint64_t)u.n);
+    /* 首字节已是 '['，回调从 jbuf+1 写；这里补闭合方括号。
+     * ★ 不能 free jbuf —— img_result_raw 只存指针，生命周期要到渲染之后。 */
+    jbuf[1 + u.len] = ']';
+    jbuf[2 + u.len] = 0;
+    if(!u.len){ jbuf[0]='['; jbuf[1]=']'; jbuf[2]=0; }
+    img_result_raw(out,"items",jbuf);
+    img_result_bool(out,"truncated",u.truncated);
     return IMG_OK;
 }
 
