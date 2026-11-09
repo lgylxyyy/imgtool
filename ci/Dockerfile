@@ -13,12 +13,14 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 编译与测试期用到的工具，一次装齐（缺一个就会让某组用例静默跳过）
+# 编译与测试期用到的工具，一次装齐（缺一个就会让某组用例静默跳过）。
+# ★ dev 包名是 ntfs-3g-dev；Ubuntu 里没有 libntfs-3g-dev（那是老的 2.x 命名，
+#   写错的话 apt 直接 exit 100，CI 第一步就挂）。
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake pkg-config git ca-certificates curl \
         autoconf automake libtool \
         zlib1g-dev libxml2-dev \
-        ntfs-3g libntfs-3g-dev libwim-dev libhivex-dev libarchive-dev liblzma-dev \
+        ntfs-3g ntfs-3g-dev libwim-dev libhivex-dev libarchive-dev liblzma-dev \
         p7zip-full zip unzip mtools dosfstools \
         qemu-utils xorriso \
         python3 \
