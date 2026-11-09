@@ -2,14 +2,14 @@
 
 # imgtool
 
-**Read and write qcow2 images offline — partitions, filesystems, and Windows boot. No mounting, no booting.**
+**Read and write qcow2 images offline: partitions, filesystems, and Windows boot. No mounting, no booting.**
 
 [**English**](README_EN.md) | [中文](README.md)
 
 [![License](https://img.shields.io/badge/license-GPL--2.0--or--later-blue)](LICENSE)
 [![C11](https://img.shields.io/badge/C-11-informational)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Android%20%7C%20arm64-informational)]()
-[![Commands](https://img.shields.io/badge/commands-76-informational)]()
+[![Commands](https://img.shields.io/badge/commands-77-informational)]()
 
 </div>
 
@@ -18,7 +18,7 @@
 FAT32 / NTFS, WIM/ESD, ISO, archives, Windows boot chain (MBR/VBR code, BCD,
 bootmgr, bootmgfw.efi, WinRE), and registry hives.
 
-> Related repository: [Icdqcow2](https://github.com/lgylxyyy/Icdqcow2) — the Android app that embeds this library.
+> Related repository: [Icdqcow2](https://github.com/lgylxyyy/Icdqcow2), the Android app that embeds this library.
 
 ---
 
@@ -138,7 +138,13 @@ To build the library for the app, check out `android` and run `./android-cross.s
 imgcmd <command> [--key=value ...]
 imgcmd --list                     # dump the command table (JSON)
 imgcmd --help=<command>           # usage for one command
+imgcmd sys.tmpdir                 # show the effective temporary directory
 ```
+
+`sys.tmpdir` reports the directory actually in use, which priority tier won
+(`env` / `tmpdir` / `hint` / `fallback`), the free space on that volume, and how
+many stale entries the sweep removed. Tasks that need temporary space, such as
+`wim.capture`, should check capacity against this path first.
 
 - Every argument is a string: `--img=/sdcard/a.qcow2`, `--recursive=true`
 - Results go to stdout (one JSON line); logs go to stderr
@@ -177,7 +183,7 @@ imgcmd boot.populate --img=/sdcard/win11.qcow2 --mode=uefi --sys-lba=<SYS> --esp
 imgcmd boot.check --img=/sdcard/win11.qcow2 --mode=uefi
 ```
 
-Full command table: `imgcmd --list` (76 commands).
+Full command table: `imgcmd --list` (77 commands).
 
 ---
 

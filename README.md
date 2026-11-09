@@ -2,14 +2,14 @@
 
 # imgtool
 
-**离线读写 qcow2 镜像内的分区、文件系统与 Windows 引导，不挂载、不开机。**
+**离线读写 qcow2 映像内的分区、文件系统与 Windows 引导，不挂载、不开机。**
 
 [English](README_EN.md) | [**中文**](README.md)
 
 [![License](https://img.shields.io/badge/license-GPL--2.0--or--later-blue)](LICENSE)
 [![C11](https://img.shields.io/badge/C-11-informational)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Android%20%7C%20arm64-informational)]()
-[![Commands](https://img.shields.io/badge/commands-76-informational)]()
+[![Commands](https://img.shields.io/badge/commands-77-informational)]()
 
 </div>
 
@@ -17,7 +17,7 @@
 当作裸磁盘直接操作：分区表、FAT32 / NTFS、WIM/ESD、ISO、压缩包、Windows 引导
 （MBR/VBR 码、BCD、bootmgr、bootmgfw.efi、WinRE）、注册表 hive。
 
-> 相关仓库：[Icdqcow2](https://github.com/lgylxyyy/Icdqcow2) —— 调用本库的 Android App。
+> 相关仓库：[Icdqcow2](https://github.com/lgylxyyy/Icdqcow2)，调用本库的 Android App。
 
 ---
 
@@ -100,12 +100,12 @@ Android 与宿主的行为差异（同一份代码内 `#ifdef __ANDROID__` 共 4
 
 | 领域 | 能力 |
 |---|---|
-| **镜像格式** | qcow2 建/扩/压/克隆；raw、VHD（动态盘）、VMDK（sparse）读写；按魔数自动识别 |
+| **映像格式** | qcow2 建/扩/压/克隆；raw、VHD（动态盘）、VMDK（sparse）读写；按魔数自动识别 |
 | **分区表** | MBR / GPT 读写、按角色自动布局（ESP + MSR + 系统 + 恢复）、增删改、属性位、导出/导入整表 |
 | **FAT32** | 列目录、读写文件、建目录、改名、删除、卷标、时间戳、8.3 短名 |
 | **NTFS** | 列目录、读写文件、递归复制/移动、删除、`du`、卷标、格式化（mkntfs） |
-| **WIM / ESD** | 列映像、估算展开体积、灌入分区、抽取单文件、**捕获**（qcow2 → 新 WIM） |
-| **ISO** | 浏览 ISO9660 / UDF、抽取内部文件（`install.wim` 可直接从 ISO 取） |
+| **WIM / ESD** | 列映像、估算展开体积、写入分区、提取单文件、**捕获**（qcow2 生成新 WIM） |
+| **ISO** | 浏览 ISO9660 / UDF、提取内部文件（`install.wim` 可直接从 ISO 读取） |
 | **压缩包** | zip / 7z / tar / tgz 读写；RAR / CAB 只读；统一 `copy` 命令覆盖解压与打包 |
 | **引导** | 写 MBR/VBR 引导码、铺 `bootmgr` / `bootmgfw.efi` / `boot.sdi` / 字体、生成 BCD（BIOS/UEFI 双体系）、32 位 UEFI 位数判定、引导自检 |
 | **恢复环境** | `winre.wim` 装入恢复分区或系统分区、写 `ReAgent.xml` 与恢复脚本 |
@@ -126,7 +126,7 @@ Android 与宿主的行为差异（同一份代码内 `#ifdef __ANDROID__` 共 4
 **设计边界**
 
 - 不启动虚拟机、不联网、不做在线挂载；
-- 镜像必须处于**关机**状态：本工具绕过文件系统驱动直接改元数据，并发写入必然损坏；
+- 映像必须处于**关机**状态：本工具直接修改文件系统元数据，并发写入必然损坏映像；
 - Android 上不做 `fork/exec`，全部为进程内调用。
 
 ---
@@ -137,7 +137,12 @@ Android 与宿主的行为差异（同一份代码内 `#ifdef __ANDROID__` 共 4
 imgcmd <命令> [--参数=值 ...]
 imgcmd --list                     # 导出命令表（JSON）
 imgcmd --help=<命令>              # 单条命令用法
+imgcmd sys.tmpdir                 # 查询当前生效的临时目录
 ```
+
+`sys.tmpdir` 返回实际使用的临时目录、命中的优先级档位（`env` / `tmpdir` /
+`hint` / `fallback`）、该卷剩余空间，以及本次清扫掉的残留数。
+`wim.capture` 等需要临时空间的任务，应先按此路径做容量检查。
 
 - 参数一律字符串形式：`--img=/sdcard/a.qcow2`、`--recursive=true`
 - 结果走 stdout（一行 JSON），日志走 stderr
@@ -165,7 +170,7 @@ host:/sdcard/x                    宿主路径（绝对路径亦可）
 # 1) 建盘（GPT + ESP + MSR + Windows）
 imgcmd img.create --out=/sdcard/win11.qcow2 --size-gb=64 --table=gpt
 
-# 2) 灌系统
+# 2) 写入映像
 imgcmd wim.apply --img=/sdcard/win11.qcow2 --lba=<SYS> \
     --wim=/sdcard/win11.iso --index=1 --format=on
 
@@ -176,7 +181,7 @@ imgcmd boot.populate --img=/sdcard/win11.qcow2 --mode=uefi --sys-lba=<SYS> --esp
 imgcmd boot.check --img=/sdcard/win11.qcow2 --mode=uefi
 ```
 
-完整命令表见 `imgcmd --list`（76 条）。
+完整命令表见 `imgcmd --list`（77 条）。
 
 ---
 
@@ -187,7 +192,7 @@ imgcmd boot.check --img=/sdcard/win11.qcow2 --mode=uefi
 
 char err[256];
 img_ctx *ctx = img_ctx_open("/sdcard/a.qcow2", true, false, err, sizeof err);
-if (!ctx) { /* 打不开，err 为说明文本 */ }
+if (!ctx) { /* 无法打开，err 为说明文本 */ }
 
 img_args *a = img_args_new();
 img_args_set(a, "lba", "2048");
@@ -221,9 +226,9 @@ img_result_free(r); img_args_free(a); img_ctx_close(ctx);
 | -10 | `IMG_EFULL` | 空间不足 |
 | -11 | `IMG_EEXISTS` | 已存在 |
 | -12 | `IMG_ESTATE` | 状态机不允许该操作 |
-| -13 | `IMG_ECANCELLED` | 用户取消 |
+| -13 | `IMG_ECANCELLED` | 已取消 |
 | -14 | `IMG_ETRUNC` | 数据被截断 |
-| -15 | `IMG_ERANGE` | 请求范围越界（偏移 / 长度超出镜像） |
+| -15 | `IMG_ERANGE` | 请求范围越界（偏移 / 长度超出映像） |
 | -16 | `IMG_ETIMEDOUT` | I/O 看门狗超时 |
 | -17 | `IMG_ECYCLE` | 会造环（目录搬进自己的子树） |
 | -18 | `IMG_ESAMEFILE` | 源与目标为同一文件 |
@@ -260,7 +265,7 @@ android-deps.sh     Android 第三方依赖编译（一次性）
 
 ## 工程约束
 
-- **镜像必须关机**：并发写入必然损坏元数据。
+- **映像必须关机**：并发写入必然损坏元数据。
 - **不静默降级**：可选依赖缺失时，对应命令返回 `FEATURE-UNAVAILABLE`，而非静默成功。
 - **写前校验**：NTFS/FAT 写入前校验名称合法性；分区操作前校验空间；hive 写入前备份。
 - **事务性写入**：注册表、BCD、归档重写均走「临时文件 → 校验 → rename」。
@@ -301,7 +306,7 @@ android-deps.sh     Android 第三方依赖编译（一次性）
 |---|---|---|
 | CMake | BSD-3-Clause | 构建 |
 | GCC / clang | GPL-3.0+（含运行时例外） | 编译 |
-| QEMU（`qemu-img check`） | GPL-2.0 | 镜像结构与格式独立校验 |
+| QEMU（`qemu-img check`） | GPL-2.0 | 映像结构与格式独立校验 |
 | gptfdisk（`sgdisk -v`） | GPL-2.0 | GPT 独立校验 |
 | util-linux（`fdisk`） | GPL-2.0+ | MBR 独立校验 |
 | mtools（`mdir`/`mcopy`） | GPL-2.0+ | FAT32 独立校验 |
