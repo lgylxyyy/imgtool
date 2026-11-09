@@ -51,3 +51,36 @@ jobs:
             -e IMGTOOL_TMPDIR=/tmp \
             imgtool-ci:ci \
             bash ci/run-tests.sh
+
+  debug-fat:
+    # 只在手动触发时跑：用 gdb 复现 FAT 的 buffer overflow 并打栈。
+    # 单独一个 workflow 文件会被 GitHub 判 0 job 失败，放进同一个文件反而正常。
+    if: github.event_name == 'workflow_dispatch'
+    name: 调试·FAT 崩溃栈
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 构建 CI 镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ci/Dockerfile
+          load: true
+          tags: imgtool-ci:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 在容器里用 gdb 复现 FAT 崩溃
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            -w /src \
+            -e IMGTOOL_TMPDIR=/tmp \
+            -e MODE=debug-fat \
+            imgtool-ci:ci \
+            bash ci/run-tests.sh
