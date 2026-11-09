@@ -117,11 +117,10 @@ Android 与宿主的行为差异（同一份代码内 `#ifdef __ANDROID__` 共 4
 |---|---|---|---|
 | qcow2 | ✅ | ✅ | ✅ |
 | raw（.img/.raw/.dd） | ✅ | ✅ | ✅ |
-| VHD（vpc 动态盘） | ✅ | ✅ | ⚠️ 需用 raw 转换，见下 |
+| VHD（vpc 动态盘） | ✅ | ✅ | ✅ |
 | VMDK（sparse） | ✅ | ✅ | ✅ |
 
-> VHD 建盘尚未支持（`img.create --format=vhd` 返回 `IMG-FORMAT-NOTSUP`）。
-> 建盘流程：`img.create --format=raw` → `qemu-img convert -f raw -O vpc`。
+> 使用 `img.create --format=vhd` 创建动态 VHD；MBR/GPT 分区表均受支持。
 
 **设计边界**
 

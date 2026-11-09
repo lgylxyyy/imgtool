@@ -118,11 +118,10 @@ To build the library for the app, check out `android` and run `./android-cross.s
 |---|---|---|---|
 | qcow2 | ✅ | ✅ | ✅ |
 | raw (.img / .raw / .dd) | ✅ | ✅ | ✅ |
-| VHD (vpc dynamic) | ✅ | ✅ | ⚠️ convert from raw, see below |
+| VHD (vpc dynamic) | ✅ | ✅ | ✅ |
 | VMDK (sparse) | ✅ | ✅ | ✅ |
 
-> Creating a VHD is not yet supported (`img.create --format=vhd` returns `IMG-FORMAT-NOTSUP`).
-> Workflow: `img.create --format=raw`, then `qemu-img convert -f raw -O vpc`.
+> Use `img.create --format=vhd` to create a dynamic VHD with an MBR or GPT partition table.
 
 **Design boundaries**
 

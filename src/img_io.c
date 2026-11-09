@@ -172,7 +172,9 @@ int img_io_sync(img_io *io){
 
 int img_io_truncate(img_io *io, uint64_t new_size){
     if(!io||!io->writable) return IMG_EINVAL;
-    return ftruncate(io->fd,(off_t)new_size)==0 ? IMG_OK : map_errno(errno);
+    if(ftruncate(io->fd,(off_t)new_size)!=0) return map_errno(errno);
+    io->size_valid = false;      /* 尺寸变了：缓存必须失效，否则 img_io_size 报旧值 */
+    return IMG_OK;
 }
 
 uint64_t img_io_size(img_io *io){

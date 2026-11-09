@@ -501,7 +501,7 @@ int img_reg_del_key(img_reg *r, const char *key_path, bool recursive,
         size_t nv = hivex_node_nr_values(r->h, node);
         if(nk > 0 || nv > 0){
             if(err&&errcap) snprintf(err,errcap,
-                "键非空（%zu 子键 / %zu 值）—— recursive=true 才能删",
+                "键非空（%zu 子键 / %zu 值），recursive=true 才能删",
                 nk, nv);
             return IMG_ESTATE;
         }

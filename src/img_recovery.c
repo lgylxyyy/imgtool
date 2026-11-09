@@ -87,12 +87,13 @@ int img_winre_extract_file(const char *wim_path, int index, const char *internal
     if(wimlib_open_wim(wim_path,0,&w)!=0){ if(err) snprintf(err,errcap,"WIM/ESD 无法打开"); return IMG_ENOENT; }
 
     /* 先抽到一个临时目录（wimlib 只按目录抽单文件），再搬到 dst */
-    const char *tmp=getenv("IMGTOOL_TMPDIR"); if(!tmp||!*tmp) tmp=getenv("TMPDIR");
-    if(!tmp||!*tmp){ const char *t2=img_tmpdir(); if(t2) tmp=t2; }
     char tmpl[512];
-    if(img_tmpfile_dir("winre",tmpl,sizeof tmpl)!=IMG_OK) return IMG_EIO;
-    char *dir=mkdtemp(tmpl);
-    if(!dir){ wimlib_free(w); if(err) snprintf(err,errcap,"建临时目录失败：%s",tmp); return IMG_EIO; }
+    if(img_tmpfile_dir("winre",tmpl,sizeof tmpl)!=IMG_OK){
+        wimlib_free(w);
+        if(err) snprintf(err,errcap,"建临时目录失败");
+        return IMG_EIO;
+    }
+    char *dir=tmpl; /* img_tmpfile_dir 已创建目录 */
 
     const wimlib_tchar *paths[1]={internal_path};
     int rc=wimlib_extract_paths(w,index,dir,paths,1,0);

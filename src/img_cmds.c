@@ -149,6 +149,9 @@ static int cmd_img_info(img_ctx *ctx, const img_args *in, img_result *out){
         return IMG_EFORMAT;
     }
     img_result_u64(out,"size_bytes",img_qcow2_size(q));
+    /* format：App 按扩展名猜格式并不可靠（实际按魔数判定）。
+     *   建盘后要显示实际格式，这里直接报探测结果。*/
+    img_result_str(out,"format",img_diskfmt_name(q->fmt));
     img_parttable_t *pt=NULL;
     if(img_ctx_parttable(ctx,&pt)==IMG_OK){
         img_result_str(out,"table", pt->table==IMG_TABLE_GPT?"GPT":(pt->table==IMG_TABLE_MBR?"MBR":"NONE"));
@@ -2357,11 +2360,9 @@ static int cmd_img_create(img_ctx *ctx, const img_args *in, img_result *out){
         if(rc != IMG_OK){ img_io_close(f); unlink(outp);
             img_result_fail(out,rc,"IMG-FORMAT",outp,"raw 创建失败",NULL); return rc; }
     } else if(!strcasecmp(fmt_s,"vhd") || !strcasecmp(fmt_s,"vpc")){
-        img_io_close(f); unlink(outp);
-        img_result_fail(out,IMG_ENOTSUP,"IMG-FORMAT-NOTSUP",outp,
-            "VHD 建盘暂不支持（读/写已完整支持：现有 VHD 可正常读写）",
-            "建 VHD 请先用 --format=raw 建盘，在 PC 上用 qemu-img convert -f raw -O vpc 转换");
-        return IMG_ENOTSUP;
+        rc = img_vhd_create(f, bytes);
+        if(rc != IMG_OK){ img_io_close(f); unlink(outp);
+            img_result_fail(out,rc,"IMG-FORMAT",outp,"VHD 创建失败",NULL); return rc; }
     } else if(!strcasecmp(fmt_s,"vmdk")){
         rc = img_vmdk_create(f, bytes);
         if(rc != IMG_OK){ img_io_close(f); unlink(outp);
@@ -2378,19 +2379,24 @@ static int cmd_img_create(img_ctx *ctx, const img_args *in, img_result *out){
     img_qcow2 *q=img_qcow2_open(f,&qo);
     if(!q||img_qcow2_write_init(q)!=IMG_OK){ img_io_close(f); unlink(outp);
         img_result_fail(out,IMG_EFORMAT,"IMG-FORMAT",outp,"qcow2 头无法写入去",NULL); return IMG_EFORMAT; }
-    /* ★ table=none：空盘。只留 qcow2 头，一个分区表都不写，
+    /* ★ table=none：空盘。只留容器头，一个分区表都不写，
      *   之后可以用 part.layout / 外部工具自己分区。*/
     if(no_tbl){
+        uint64_t empty_bytes = img_qcow2_size(q);
         img_qcow2_close(q); img_io_close(f);
         img_result_str(out,"format",fmt_s);
-    img_result_u64(out,"size_bytes",bytes);
+        img_result_u64(out,"size_bytes",empty_bytes ? empty_bytes : bytes);
         img_result_str(out,"table","none");
         img_result_u64(out,"parts_total",0);
         return IMG_OK;
     }
 
     img_parttable_t t; img_check_result_t err; memset(&t,0,sizeof t); memset(&err,0,sizeof err);
-    uint64_t disk_sectors = bytes/512u;
+    /* ★ 用容器**实际**容量排分区，不用请求值。
+     *   VHD 会把容量向上补齐到整柱面（与 qemu 一致），按请求值排版会让
+     *   GPT 备份表落在盘中间而不是盘尾，固件按盘尾去找就找不到。 */
+    uint64_t real_bytes = img_qcow2_size(q);
+    uint64_t disk_sectors = (real_bytes ? real_bytes : bytes)/512u;
     uint64_t extra_bytes[64];
     for(int i=0;i<nextra;i++) extra_bytes[i]=extra_mb[i]*MiB;
 
@@ -2481,7 +2487,10 @@ static int cmd_img_create(img_ctx *ctx, const img_args *in, img_result *out){
     int pn=img_parttable_json(&t,pj,sizeof pj);
     uint64_t used=0;
     for(int i=0;i<IMG_MAX_PARTITIONS;i++) if(t.parts[i].used) used++;
-    img_result_u64(out,"size_bytes",bytes);
+    /* size_bytes 报【容器实际容量】：VHD 会把容量向上补齐到整柱面，
+     *   报请求值会让 App 的空间预检少算一截。*/
+    img_result_str(out,"format",fmt_s);
+    img_result_u64(out,"size_bytes",real_bytes ? real_bytes : bytes);
     img_result_str(out,"table",gpt?"GPT":"MBR");
     img_result_u64(out,"parts_total",used);
     if(nextra>0){
@@ -6042,7 +6051,7 @@ static int cmd_boot_populate(img_ctx *ctx, const img_args *in, img_result *out){
                 /* 别人的：不覆盖，记一笔 -->
                  * 用 bp_add 报 ok=false 但【不计 missing/failed】，走专门的 conflict 输出 */
                 bp_add(&fl,fb,"\Windows\Boot\EFI\bootmgfw.efi",0,true,
-                       "已存在且不是 Windows 的 bootmgr —— 按策略不覆盖（efi_fallback_conflict=true）");
+                       "已存在且不是 Windows 的 bootmgr，按策略不覆盖（efi_fallback_conflict=true）");
                 img_result_bool(out,"efi_fallback_conflict",true);
                 img_result_bool(out,"efi_fallback_written",false);
             } else {
@@ -6747,15 +6756,15 @@ static int cmd_boot_tpl_apply(img_ctx *ctx, const img_args *in, img_result *out)
     bool not_applicable=false;
     if(tplfw[0] && strcasecmp(tplfw,uefi?"uefi":"bios")){
         not_applicable=true;
-        snprintf(why,sizeof why,"模板是 %s 的，这张盘是 %s —— 固件不符",tplfw,uefi?"uefi":"bios");
+        snprintf(why,sizeof why,"模板是 %s 的，这张盘是 %s，固件不符",tplfw,uefi?"uefi":"bios");
     } else if(tplarch[0] && strcmp(tplarch,"unknown") && diskarch[0] && strcmp(diskarch,"unknown")
               && strcasecmp(tplarch,diskarch)){
         not_applicable=true;
-        snprintf(why,sizeof why,"模板是 %s 的，这张盘是 %s —— 架构不符",tplarch,diskarch);
+        snprintf(why,sizeof why,"模板是 %s 的，这张盘是 %s，架构不符",tplarch,diskarch);
     } else if(tplfam[0] && strcmp(tplfam,"unknown") && diskfam[0] && strcmp(diskfam,"unknown")
               && strcmp(tplfam,diskfam)){
         not_applicable=true;
-        snprintf(why,sizeof why,"模板是 %s 族，这张盘是 %s 族 —— 跨版本族（BCD 元素不兼容）",tplfam,diskfam);
+        snprintf(why,sizeof why,"模板是 %s 族，这张盘是 %s 族，跨版本族（BCD 元素不兼容）",tplfam,diskfam);
     }
     /* ★ 硬校验要"证据充分"才放行：模板三样（family/arch/firmware）里，固件、架构
      *   与本盘不一致 → 拒；版本族不一致 → 拒。
@@ -6767,7 +6776,7 @@ static int cmd_boot_tpl_apply(img_ctx *ctx, const img_args *in, img_result *out)
         /* 同族：通过 */
     } else if(tplfam[0] && strcmp(tplfam,"unknown") && !strcmp(diskfam,"unknown")){
         not_applicable=true;
-        snprintf(why,sizeof why,"模板是 %s 族，但这张盘读不出系统版本（unknown）—— 不能确认适用",
+        snprintf(why,sizeof why,"模板是 %s 族，但这张盘读不出系统版本（unknown），不能确认适用",
                  tplfam);
     }
     if(not_applicable && !img_args_bool(in,"force",false)){
@@ -6938,7 +6947,7 @@ static int plan_repair_run(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_str(out,"boot_partition",boot_kind);
     if(!sys_lba){
         img_result_str(out,"verdict","no_os");
-        img_result_str(out,"note","没找到系统分区（没有 \\Windows\\System32\\winload.*）—— 盘是空的？装系统请走 wim.apply");
+        img_result_str(out,"note","没找到系统分区（没有 \\Windows\\System32\\winload.*），盘是空的？装系统请走 wim.apply");
         return IMG_OK;
     }
 
@@ -7509,7 +7518,7 @@ static int cmd_win_version(img_ctx *ctx, const img_args *in, img_result *out){
     if(v.consensus_build) img_result_u64(out,"consensus_build",(uint64_t)v.consensus_build);
     img_result_bool(out,"mismatch",v.mismatch==1);
     if(v.mismatch)
-        img_result_str(out,"note",img_t("多个证据源互相矛盾 —— 该映像被改过（精简/换版本），请勿依据文件名判断"));
+        img_result_str(out,"note",img_t("多个证据源互相矛盾，该映像被改过（精简/换版本），请勿依据文件名判断"));
     else if(v.n_vote<=1)
         img_result_str(out,"note",img_t("只有 1 个证据源可用（核心文件疑似被 WOF/CompactOS 压缩），结论可信度低"));
     return IMG_OK;
@@ -8086,8 +8095,8 @@ static int cmd_wim_file_version(img_ctx *ctx, const img_args *in, img_result *ou
         img_result_bool(out,"pe",ispe);
         img_result_bool(out,"has_version",false);
         img_result_str(out,"reason", ispe
-            ? "这是 PE，但没有 VS_VERSIONINFO（数据文件/资源被剥掉了）—— 不能拿它做版本比较"
-            : "不是 PE 文件（没有 MZ 头）—— 不能拿它做版本比较");
+            ? "这是 PE，但没有 VS_VERSIONINFO（数据文件/资源被剥掉了），不能拿它做版本比较"
+            : "不是 PE 文件（没有 MZ 头），不能拿它做版本比较");
     }
     free(m.b);
     return IMG_OK;
@@ -9403,7 +9412,7 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_BCDBUILD,(int)(sizeof A_BCDBUILD/sizeof A_BCDBUILD[0]), cmd_bcd_build, NULL, 0},
     {"bcd.create","1.0", "用内置模板建一张能启动的 BCD（Vista~11 / BIOS+UEFI / 32+64 位；不要参考盘）",
         A_BCDCREATE,(int)(sizeof A_BCDCREATE/sizeof A_BCDCREATE[0]), cmd_bcd_create, NULL, 0},
-    {"qc.verify","1.0", "qcow2 结构自检（别名/越界/坏 L2）—— 进程被杀后怀疑盘坏了就跑它",
+    {"qc.verify","1.0", "qcow2 结构自检（别名/越界/坏 L2），进程被杀后怀疑盘坏了就跑它",
         A_QCVERIFY,(int)(sizeof A_QCVERIFY/sizeof A_QCVERIFY[0]), cmd_qc_verify, NULL, 0},
     {"bcd.gen-uefi","1.0", "UEFI 换盘：按新盘 GUID 重写 BCD（= imggenbcd，同一份库实现）",
         A_BCDGEN,(int)(sizeof A_BCDGEN/sizeof A_BCDGEN[0]), cmd_bcd_gen_uefi, NULL, 0},
@@ -9455,7 +9464,7 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_ISOEXTRACT,(int)(sizeof A_ISOEXTRACT/sizeof A_ISOEXTRACT[0]), cmd_iso_extract, NULL, 0},
     {"sys.tmpdir","1.0", "查询当前生效的临时目录（路径、来源、剩余空间、清扫数）",
         NULL, 0, cmd_sys_tmpdir, NULL, 0},
-    {"cmd.list",  "1.0", "导出命令表（名字/参数规格/帮助）——App 可据此自动生成界面",
+    {"cmd.list",  "1.0", "导出命令表（名字/参数规格/帮助），App 可据此自动生成界面",
         NULL, 0, cmd_cmd_list, NULL, 0},
 };
 const int IMG_CMD_COUNT = (int)(sizeof IMG_CMD_TABLE/sizeof IMG_CMD_TABLE[0]);

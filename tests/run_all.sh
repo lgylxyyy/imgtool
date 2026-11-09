@@ -15,7 +15,9 @@
 #   bcd_test             BCD 读写（需 libhivex）
 #   ebr_test             MBR 扩展/逻辑分区：EBR 链写回读、链尾 entry 全零
 #   mbr_bcd_test         BIOS BCD 全对象批量改写（签名+偏移，5 处设备）
-#   boot-repair-test.sh  boot.repair 一键修复（诊断/修复/独立验证/幂等/反例）
+#   reg-test.sh          注册表通用编辑（读/写/列/删/事务）
+#   diskfmt-test.sh      raw / VHD / VMDK 读写与 qemu 互验
+#   style-check.py       用户可见文本符合 STYLE-GUIDE
 #   genbcd-test.sh       imggenbcd UEFI BCD 定制（GUID 映射/4 参/反例）
 #   recovery_bcd_test    恢复条目（需 libhivex + 官方 ISO BCD 参考）
 set -u
@@ -134,6 +136,12 @@ if [ -x "$ROOT/build/tests/recovery_bcd_test" ]; then
         5616a432-a581-0f42-8302-cff19ec2690f 08cb2fb9-d284-f948-9892-70ef8e7d70cd
   else skipped=$((skipped+1)); echo "  ⏭ 跳过 recovery_bcd_test（缺官方 ISO BCD 参考）"; fi
 else skipped=$((skipped+1)); echo "  ⏭ 跳过 recovery_bcd_test（没编进构建）"; fi
+
+# 本轮新增（P2 / P3 / 文案规范）
+run "reg-test（注册表通用编辑：读/写/列/删/事务）"            bash "$ROOT/tests/reg-test.sh"
+run "diskfmt-test（raw / VHD / VMDK 读写 + qemu 互验）"      bash "$ROOT/tests/diskfmt-test.sh"
+run "vhd-test（VHD 建盘、多块写入、重开与 QEMU 互验）"         python3 "$ROOT/tests/vhd-test.py"
+run "style-check（用户可见文本符合 STYLE-GUIDE）"           python3 "$ROOT/tests/style-check.py"
 
 # 依赖裁剪（默认跳过：要重编两套约 30 s；要跑：DEGRADED=1 tests/run_all.sh）
 if [ "${DEGRADED:-0}" = "1" ]; then

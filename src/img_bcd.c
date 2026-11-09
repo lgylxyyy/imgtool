@@ -911,7 +911,7 @@ int img_bcd_remap(img_bcd *b, const img_bcd_remap_req_t *req,
     bool have_do = (img_bcd_get_display_order_first(b, order, sizeof order)==IMG_OK);
     if(have_do) remap_trim_guid(order, obj, sizeof obj);
     if(!have_do && !req->esp_guid){
-        if(err) snprintf(err,errcap,"参考 BCD 没有 DisplayOrder，且未提供 ESP GUID —— 无从下手");
+        if(err) snprintf(err,errcap,"参考 BCD 没有 DisplayOrder，且未提供 ESP GUID，无从下手");
         return IMG_EFORMAT;
     }
 
@@ -1066,7 +1066,7 @@ int img_bcd_build(const img_bcd_build_req_t *rq, char *err, size_t errcap){
     }
     if(!os_guid[0]){
         img_bcd_close(b);
-        if(err) snprintf(err,errcap,"模板里既没有 bootmgr 的 default 也没有 DisplayOrder —— 换个模板");
+        if(err) snprintf(err,errcap,"模板里既没有 bootmgr 的 default 也没有 DisplayOrder，换个模板");
         return IMG_EFORMAT;
     }
 

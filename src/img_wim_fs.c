@@ -39,7 +39,7 @@ static const char *base_name(const char *p){
     const char *s=strrchr(p,'/');
     return s? (s+1) : p;
 }
-/* 递归删临时目录（extract 用；只删我们自己 mkdtemp 出来的那一个）*/
+/* 递归删除本工具创建的临时目录。 */
 static void rm_rf(const char *dir){
     DIR *d=opendir(dir);
     if(!d) return;
@@ -249,9 +249,11 @@ int img_wim_extract_dir(const char *wim_path,int index,const char *inner_path,
     const char *tmp=img_tmpdir();
     if(!tmp||!tmp[0]){ if(err) snprintf(err,errcap,"找不到可写临时目录（设 IMGTOOL_TMPDIR 或 TMPDIR）"); return IMG_ESTATE; }
     char tmpl[600];
-    if(img_tmpfile_dir("wimdir",tmpl,sizeof tmpl)!=IMG_OK) return IMG_EIO;
-    char *dir=mkdtemp(tmpl);
-    if(!dir){ if(err) snprintf(err,errcap,"建临时目录失败：%s",strerror(errno)); return IMG_EIO; }
+    if(img_tmpfile_dir("wimdir",tmpl,sizeof tmpl)!=IMG_OK){
+        if(err) snprintf(err,errcap,"建临时目录失败：%s",strerror(errno));
+        return IMG_EIO;
+    }
+    const char *dir=tmpl; /* img_tmpfile_dir 已创建目录，不能再次 mkdtemp */
 
     openwim o; rc=open_checked(wim_path,index,&o,err,errcap);
     if(rc!=IMG_OK){ rmdir(dir); return rc; }
@@ -295,9 +297,11 @@ int img_wim_extract_file(const char *wim_path,int index,const char *inner_path,
     const char *tmp=img_tmpdir();
     if(!tmp||!tmp[0]){ if(err) snprintf(err,errcap,"找不到可写临时目录（设 IMGTOOL_TMPDIR 或 TMPDIR）"); return IMG_ESTATE; }
     char tmpl[600];
-    if(img_tmpfile("wim",tmpl,sizeof tmpl)==NULL) return IMG_EIO;
-    char *dir=mkdtemp(tmpl);
-    if(!dir){ if(err) snprintf(err,errcap,"建临时目录失败：%s",strerror(errno)); return IMG_EIO; }
+    if(img_tmpfile_dir("wim",tmpl,sizeof tmpl)!=IMG_OK){
+        if(err) snprintf(err,errcap,"建临时目录失败：%s",strerror(errno));
+        return IMG_EIO;
+    }
+    const char *dir=tmpl;
 
     openwim o; rc=open_checked(wim_path,index,&o,err,errcap);
     if(rc!=IMG_OK){ rm_rf(dir); rmdir(dir); return rc; }

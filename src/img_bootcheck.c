@@ -411,7 +411,7 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
         bool act=false; uint64_t actlba=0;
         for(int i=0;i<4;i++) if(t.parts[i].used && t.parts[i].status==0x80){ act=true; actlba=t.parts[i].first_lba; }
         add(out,"mbr.active","有活动分区标记",IMG_CK_REQUIRED,act,
-            act? "活动分区 LBA %llu":"没有任何活动分区 — BIOS 无法选择引导盘",
+            act? "活动分区 LBA %llu":"没有任何活动分区，BIOS 无法选择引导盘",
             act?(unsigned long long)actlba:0ULL);
         bool has07=false;
         for(int i=0;i<4;i++) if(t.parts[i].used && is_ntfs_like(&t.parts[i])) has07=true;
@@ -429,7 +429,7 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
                 if((en[2] & 0x3F)==0) chsbad++;               /* ★ 扇区号=0 → 非法（Windows 拒）*/
             }
             add(out,"mbr.chs","MBR 分区项 CHS 合法性(Windows:扇区号1-based)",IMG_CK_REQUIRED, chsbad==0,
-                chsbad? "起始CHS扇区号=0 — Windows 判分区表损坏(磁盘管理显示未初始化/只认部分分区)" : "全部合法(真实CHS或fe ff ff哨兵)");
+                chsbad? "起始CHS扇区号=0，Windows 判分区表损坏(磁盘管理显示未初始化/只认部分分区)" : "全部合法(真实CHS或fe ff ff哨兵)");
         }
     }
     }
@@ -461,7 +461,7 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
                 out->is_uefi
                   ? (allnz?"检测到引导代码":"扇区1-9 全零（UEFI 不依赖此处，仅参考）")
                   : (allnz?"检测到引导代码"
-                          :"扇区1-9 全零 — mkntfs 不写引导代码，必须跑 imgfixboot 补上"));
+                          :"扇区1-9 全零，mkntfs 不写引导代码，必须跑 imgfixboot 补上"));
         }
     }
     if(ntp>=0){   /* ---- 系统文件：查 ntp ---- */
@@ -493,7 +493,7 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
             const char *ba = e1.found ? fat32_file_arch(q,lba,"EFI/Microsoft/Boot/bootmgfw.efi") : NULL;
             img_check_t *ck = add(out,"esp.bootmgfw","\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
                 IMG_CK_REQUIRED, e1.found,
-                e1.found? "存在，%u 字节": "不存在 — UEFI 未找到 Windows 启动管理器",
+                e1.found? "存在，%u 字节": "不存在，UEFI 未找到 Windows 启动管理器",
                 e1.size);
             ck->arch = ba ? strdup(ba) : NULL;    /* ★ REQ-54 */
             ck->size = e1.found ? e1.size : 0;
@@ -516,7 +516,7 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
                 e2.found? "\\EFI\\Boot\\bootx64.efi": "\\EFI\\Boot\\bootia32.efi",
                 IMG_CK_WARN,e2r.found,
                 e2r.found? "存在（通用回退入口，%u 字节）"
-                         : "不存在（bootx64.efi / bootia32.efi 都没有）— 只能从固件菜单选 Windows Boot Manager",
+                         : "不存在（bootx64.efi / bootia32.efi 都没有），只能从固件菜单选 Windows Boot Manager",
                 e2r.found? e2r.size : 0);
             ck->arch = fa ? strdup(fa) : NULL;    /* ★ REQ-54：真实 PE 位数 */
             ck->size = e2r.found ? e2r.size : 0;
@@ -666,6 +666,6 @@ int img_bootcheck_summary(const img_bootcheck_result_t *r, char *buf, int cap){
             req_ok, req_n, warn_ok, warn_n, r->count);
     return snprintf(buf,(size_t)cap,"%s · %s · 必需 %d/%d 通过 · 警告 %d/%d · 共 %d 项",
         r->is_uefi?"UEFI/GPT":"BIOS/MBR",
-        req_n && r->n_required_fail==0 ? "引导链完整" : "★ 有必需项未通过 — 很可能无法启动",
+        req_n && r->n_required_fail==0 ? "引导链完整" : "★ 有必需项未通过，很可能无法启动",
         req_ok, req_n, warn_ok, warn_n, r->count);
 }

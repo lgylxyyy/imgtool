@@ -65,17 +65,17 @@ int main(int argc,char**argv){
         int ok=0;
         uint8_t *wbuf=NULL; uint8_t *rbuf=NULL; size_t wcap=0,rcap=0;
         for(int i=0;i<ncase;i++){
-            if(cases[i].off + cases[i].len > vs){ printf("  ⏭  %s — 超出虚拟盘，跳过\n",cases[i].name); continue; }
+            if(cases[i].off + cases[i].len > vs){ printf("  ⏭  %s，超出虚拟盘，跳过\n",cases[i].name); continue; }
             if(cases[i].len>wcap){ free(wbuf); wbuf=malloc(cases[i].len); wcap=cases[i].len; }
             if(cases[i].len>rcap){ free(rbuf); rbuf=malloc(cases[i].len); rcap=cases[i].len; }
             if(!wbuf||!rbuf){ printf("  ❌ 内存\n"); break; }
             fill_pat(wbuf, cases[i].len, cases[i].seed);
 
             int rc = img_qcow2_write(q, cases[i].off, wbuf, cases[i].len);
-            if(rc){ printf("  ❌ %s — 写失败: %s\n", cases[i].name, img_strerror(rc)); continue; }
+            if(rc){ printf("  ❌ %s，写失败: %s\n", cases[i].name, img_strerror(rc)); continue; }
             memset(rbuf,0xAA,cases[i].len);
             rc = img_qcow2_read(q, cases[i].off, rbuf, cases[i].len);
-            if(rc){ printf("  ❌ %s — 读失败: %s\n", cases[i].name, img_strerror(rc)); continue; }
+            if(rc){ printf("  ❌ %s，读失败: %s\n", cases[i].name, img_strerror(rc)); continue; }
             if(memcmp(wbuf,rbuf,cases[i].len)==0){ printf("  ✅ %s  读回一致 (%zu 字节)\n",cases[i].name,cases[i].len); ok++; }
             else {
                 size_t bad=0; for(size_t k=0;k<cases[i].len;k++) if(wbuf[k]!=rbuf[k]) bad++;
