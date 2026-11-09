@@ -45,12 +45,12 @@ fi
 exit "$rc"
 WRAP
   chmod +x "$T/imgcmd"
-  for t in copy-test.py fileops-test.py xcopy-test.py ads-test.sh fat-fs-test.py; do
+  for t in fat-alias-test.py copy-test.py fileops-test.py xcopy-test.py ads-test.sh fat-fs-test.py; do
     echo
     echo "──── $t ────"
     case "$t" in
-      *.py) python3 "$ROOT/tests/$t" 2>&1 | grep -nE '崩溃|argv:|^#[0-9]+ |✅|❌|结果：' | tail -80 || true ;;
-      *)    bash    "$ROOT/tests/$t" 2>&1 | grep -nE '崩溃|argv:|^#[0-9]+ |✅|❌|结果：' | tail -80 || true ;;
+      *.py) python3 "$ROOT/tests/$t" 2>&1 | tail -120 || true ;;
+      *)    bash    "$ROOT/tests/$t" 2>&1 | tail -120 || true ;;
     esac
   done
   exit 0
