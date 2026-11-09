@@ -13,7 +13,8 @@ import hashlib, os, re, subprocess, sys, tempfile
 
 R = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 T = os.path.join(R, 'build', 'tools')
-REF = os.path.join(R, 'reference', 'ntfs-vbr.bin')
+REF_DIR = os.environ.get('IMGTOOL_REFERENCE_DIR', os.path.join(R, 'reference'))
+REF = os.path.join(REF_DIR, 'ntfs-vbr.bin')
 HDR = os.path.join(R, 'src', 'img_vbr_tpl.h')
 ok = bad = 0
 
@@ -23,6 +24,12 @@ def chk(desc, cond, extra=''):
     else:    bad += 1; print('  ❌ %s %s' % (desc, extra))
 
 def code(b): return b[0x54:0x1FE] + b[512:5120]
+
+# 微软参考件不随仓库分发：缺了就跳过，不算失败（见 reference/README.md）
+if not os.path.exists(REF):
+    print('════ 跳过 vbr-tpl-test（缺 reference/ntfs-vbr.bin，微软文件未随仓库分发）════')
+    print('     该文件是 Windows 卷 $Boot 前 10 扇区快照；有素材时用 IMGTOOL_REFERENCE_DIR 指过来。')
+    sys.exit(77)
 
 ref = open(REF, 'rb').read()
 chk('reference/ntfs-vbr.bin 恰好 5120 字节', len(ref) == 5120, len(ref))
@@ -71,19 +78,19 @@ chk('imgfixboot --verify 通过', r.returncode == 0 and '一致' in r.stdout, r.
 # ④ 源盘存证：两张当时的模板盘的 $Boot 前 10 扇区快照
 #    （2026-10-22 从 images/Windows 10 Xlite.qcow2 与 images/diskB-Windows-BIOS.qcow2 抽出）
 #    即使那两个 10GB 源盘被清理，也能用这里复核"当时的模板长什么样"。
-SRCS = [('reference/ntfs-vbr-xlite-source.bin',  'Xlite 源快照'),
-        ('reference/ntfs-vbr-diskb-source.bin', 'diskB 源快照')]
-for path, name in SRCS:
-    f = os.path.join(R, path)
+SRCS = [('ntfs-vbr-xlite-source.bin',  'Xlite 源快照'),
+        ('ntfs-vbr-diskb-source.bin', 'diskB 源快照')]
+for name_file, name in SRCS:
+    f = os.path.join(REF_DIR, name_file)
     if not os.path.exists(f):
-        chk('%s 存在' % name, False, path); continue
+        print('  ⏭ 跳过 %s（缺 reference/%s）' % (name, name_file)); continue
     b = open(f, 'rb').read()
     chk('%s 长度 5120' % name, len(b) == 5120, len(b))
     chk('%s 引导码段 == 模板' % name, code(b) == code(ref),
         '该源=%s 模板=%s' % (hashlib.sha256(code(b)).hexdigest()[:16],
                             hashlib.sha256(code(ref)).hexdigest()[:16]))
 # diskB 的整 5120 字节应与模板逐字节相同（模板就是从它抽的）
-db = os.path.join(R, 'reference/ntfs-vbr-diskb-source.bin')
+db = os.path.join(REF_DIR, 'ntfs-vbr-diskb-source.bin')
 if os.path.exists(db):
     chk('diskB 源快照整文件 == 模板（逐字节副本）', open(db, 'rb').read() == ref)
 

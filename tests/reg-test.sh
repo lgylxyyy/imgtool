@@ -1,8 +1,9 @@
 #!/bin/bash
 # reg-test.sh — 注册表通用编辑（P2）：reg.get / reg.set / reg.list / reg.del
 #
-# 素材：reference/bcd-reference-bios-win11.bin（BCD hive，格式与 SYSTEM 相同，
-#       用作替代品避免引入真 Windows 注册表 —— 版权与体积都不可接受）
+# 素材：一个结构真实的 hive。优先用 reference/bcd-reference-bios-win11.bin
+#       （微软 BCD 快照，格式与 SYSTEM 相同）；没有就用 tests/fixture.sh
+#       从内置模板现造一份 —— 微软文件不随仓库分发，别人克隆也必须能跑。
 #
 # 覆盖：
 #   ① reg.list 根键 / 子键
@@ -21,14 +22,28 @@ ok(){ echo "  ✅ $1"; }
 ng(){ echo "  ❌ $1"; fail=$((fail+1)); }
 jq_(){ python3 -c "import sys,json;d=json.load(sys.stdin);print($1)" 2>/dev/null; }
 
+. "$ROOT/tests/ref.sh"
+. "$ROOT/tests/fixture.sh"
+HIVE="$(ref_path bcd-reference-bios-win11.bin)"
+if [ -n "$HIVE" ]; then
+  echo "  素材：微软 BCD 快照（reference/bcd-reference-bios-win11.bin）"
+else
+  HIVE="$W/fixture-hive.bin"
+  if ! fixture_bcd_hive "$HIVE" mbr; then
+    echo "  ⏭ 跳过 reg-test（既无微软参考件，自造 hive 也失败）"
+    exit 77
+  fi
+  echo "  素材：自造 BCD hive（未找到微软参考件，用内置模板生成）"
+fi
+
 IMG="$W/t.qcow2"; LBA=2048
 echo "════ 0. 造盘 + 放 hive ════"
 $T img.create --out="$IMG" --size-gb=1 --table=mbr --sys-mb=256 --win-mb=0 >/dev/null 2>&1 || { echo "造盘失败"; exit 2; }
 $T fs.format --img="$IMG" --lba=$LBA --fs=ntfs >/dev/null 2>&1 || { echo "格式化失败"; exit 2; }
 $T ntfs.mkdir --img="$IMG" --lba=$LBA --path=/Windows/System32/config >/dev/null 2>&1
-if ! $T ntfs.put --img="$IMG" --lba=$LBA --src="$ROOT/reference/bcd-reference-bios-win11.bin" \
+if ! $T ntfs.put --img="$IMG" --lba=$LBA --src="$HIVE" \
       --dst=/Windows/System32/config/SYSTEM >/dev/null 2>&1; then
-  echo "放 hive 失败（缺 reference/*.bin？）"; exit 2
+  echo "放 hive 失败：$HIVE"; exit 2
 fi
 
 echo "════ 1. reg.list 根键 ════"

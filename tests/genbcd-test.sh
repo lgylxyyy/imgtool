@@ -12,8 +12,17 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T="$ROOT/build/tools"
 PT="$ROOT/build/tests/mbr_bcd_test"
-REF="$ROOT/reference/bcd-reference-uefi.bin"
+# 微软参考件不随仓库分发；缺了就跳过（见 reference/README.md）
+. "$ROOT/tests/ref.sh"
+REF="$(ref_path bcd-reference-uefi.bin)"
 W=$(mktemp -d /tmp/genbcdXXXXXX)
+if [ -z "$REF" ]; then
+  # 断言写的是真件里 GUID 出现的处数（系统 3 / ESP 2 / 磁盘 5），
+  # 自造 BCD 的处数不同，替代只会测出假失败 → 缺原件就跳过。
+  echo "  ⏭ 跳过 genbcd-test（缺 reference/bcd-reference-uefi.bin，微软文件未随仓库分发）"
+  echo "     有素材时用 IMGTOOL_REFERENCE_DIR 指过来再跑。"
+  exit 77
+fi
 pass=0; fail=0
 ok(){ echo "  ✅ $1"; pass=$((pass+1)); }
 ng(){ echo "  ❌ $1"; fail=$((fail+1)); }

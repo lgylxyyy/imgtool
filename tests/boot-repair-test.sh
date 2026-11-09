@@ -14,7 +14,19 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T="$ROOT/build/tools"
 PT="$ROOT/build/tests/mbr_bcd_test"
+# 微软参考件不随仓库分发；缺了就跳过，不算失败（见 reference/README.md）
+. "$ROOT/tests/ref.sh"
 W=$(mktemp -d /tmp/bootrepairXXXXXX)
+REF_BCD="$(ref_path bcd-reference-bios-win11.bin)"
+REF_MBR="$(ref_path mbr-code-bios.bin)"
+# 本用例断言按微软真件的结构写死（5 处设备对象、3 处指系统）。
+# 自造 hive 的对象数不同（实测 6/4），拿它替代只会测出假失败，
+# 所以缺原件时整体跳过，而不是换个输入硬跑。
+if [ -z "$REF_BCD" ] || [ -z "$REF_MBR" ]; then
+  echo "  ⏭ 跳过 boot-repair-test（缺微软参考件：BCD 快照或 MBR 引导码，未随仓库分发）"
+  echo "     有素材时用 IMGTOOL_REFERENCE_DIR 指过来再跑。"
+  exit 77
+fi
 pass=0; fail=0
 ok(){ echo "  ✅ $1"; pass=$((pass+1)); }
 ng(){ echo "  ❌ $1"; fail=$((fail+1)); }
@@ -26,7 +38,7 @@ $T/imglayout mk "$IMG" $((3*1024*1024*1024)) mbr >/dev/null 2>&1 &&
 $T/imgcmd part.layout --img="$IMG" --sr-mb=64 --sys-gb=1 --progress=none >/dev/null 2>&1 &&
 $T/imgntfsfs "$IMG" $SR format SYSTEM >/dev/null 2>&1 &&
 $T/imgntfsfs "$IMG" $SYS format WIN >/dev/null 2>&1 &&
-$T/imgntfsfs "$IMG" $SR put "$ROOT/reference/bcd-reference-bios-win11.bin" /Boot/BCD >/dev/null 2>&1 \
+$T/imgntfsfs "$IMG" $SR put "$REF_BCD" /Boot/BCD >/dev/null 2>&1 \
   || { echo "造盘失败"; exit 2; }
 echo "  盘=$IMG"
 
@@ -43,9 +55,9 @@ bcdok=$(jq_ "d['data']['diag.bcd_ok']" < "$W/diag.json")
 
 echo "════ 2. 完整修复 ════"
 $T/imgcmd boot.repair --img="$IMG" --sys-lba=$SYS --sr-lba=$SR --sig=11223344 \
-  --mbr-code="$ROOT/reference/mbr-code-bios.bin" \
+  --mbr-code="$REF_MBR" \
   --vbr-tpl="$IMG:$SYS" \
-  --bcd-ref="$ROOT/reference/bcd-reference-bios-win11.bin" > "$W/fix.json" 2>/dev/null
+  --bcd-ref="$REF_BCD" > "$W/fix.json" 2>/dev/null
 rc=$?
 [ $rc -eq 0 ] && ok "命令退出码 0" || ng "退出码 $rc"
 [ "$(jq_ "d['ok']" < "$W/fix.json")" = "True" ] && ok "ok=true" || ng "ok 不是 true"
@@ -91,9 +103,9 @@ nsys=$(grep -c "off=$((SYS*512))" "$W/bind.txt")
 
 echo "════ 5. 幂等：再跑一次 ════"
 $T/imgcmd boot.repair --img="$IMG" --sys-lba=$SYS --sr-lba=$SR --sig=11223344 \
-  --mbr-code="$ROOT/reference/mbr-code-bios.bin" \
+  --mbr-code="$REF_MBR" \
   --vbr-tpl="$IMG:$SYS" \
-  --bcd-ref="$ROOT/reference/bcd-reference-bios-win11.bin" > "$W/fix2.json" 2>/dev/null
+  --bcd-ref="$REF_BCD" > "$W/fix2.json" 2>/dev/null
 [ "$(jq_ "d['ok']" < "$W/fix2.json")" = "True" ] && ok "第二次仍 ok=true" || ng "第二次 ok=$(jq_ "d['ok']" < "$W/fix2.json")"
 
 echo "════ 6. 反用例：--bcd-ref 传垃圾文件 ════"

@@ -1,0 +1,61 @@
+# ci/github-workflow.yml —— 推送/PR 时在自建镜像里跑完整回归
+#
+# ★ 本文件放在 ci/ 而不是 .github/workflows/：往 .github/workflows/ 推送需要
+#   带 `workflow` 权限的 GitHub token，当前环境没有。启用方式二选一：
+#     · GitHub 网页 → Actions → New workflow → 粘贴本文件内容，路径填
+#       .github/workflows/ci.yml
+#     · 或用带 workflow 权限的 token 推一次：
+#       mkdir -p .github/workflows && cp ci/github-workflow.yml .github/workflows/ci.yml
+#       git add .github && git commit -m "ci: 启用工作流" && git push
+#
+# 为什么用自建镜像而不是现装依赖：
+#   完整测试需要 ntfs-3g、wimlib、hivex、libarchive、mkntfs 对象，
+#   还要 qemu-img/mtools/7z/xorrisofs。现装每次几分钟且会随系统升级漂移。
+#   这些库我们基本不升级，所以把环境固定在 ci/Dockerfile 里。
+#
+# 镜像用 buildx 的 GHA 缓存：日常不会重新下载，只有 Dockerfile 或基础镜像
+# 变了才重建。
+name: ci
+
+on:
+  push:
+    branches: [main, android]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-regression:
+    name: 完整回归（自建镜像）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 构建 CI 镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ci/Dockerfile
+          load: true
+          tags: imgtool-ci:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 编译并在镜像内跑全量回归
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            -w /src \
+            -e IMGTOOL_TMPDIR=/tmp \
+            imgtool-ci:ci \
+            bash ci/run-tests.sh

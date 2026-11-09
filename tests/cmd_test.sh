@@ -5,6 +5,8 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T="$ROOT/build/tools"
 # 外部素材与构建根统一由 scripts/env.sh 解析（环境变量 > imgtool.conf > 自动探测）
+. "$ROOT/tests/ref.sh"
+. "$ROOT/tests/fixture.sh"
 # shellcheck disable=SC1091
 . "$ROOT/scripts/env.sh"
 ASSETS="$IMGTOOL_IMAGES"
@@ -272,10 +274,19 @@ echo "════ 4f. 建盘流水线（img.create / fs.format / ntfs.put / ntf
     cnt=$($T/imgcmd boot.check --img="$P" --mode=uefi --progress=none 2>/dev/null | jq_ "d['data']['count']")
     [ "${cnt:-0}" -ge 11 ] && ok "boot.check 返回 $cnt 项（items 是合法 JSON 数组）" || ng "boot.check 异常：$(head -c 200 "$W/bc.json")"
 
-    $T/imgcmd bcd.gen-uefi --ref="$ROOT/reference/bcd-reference-uefi.bin" --out="$W/bcd_new.bin" \
-        --sys-guid="$SG" --disk-guid="$DG" --esp-guid="$EG" --progress=none > "$W/bg.json" 2>/dev/null
-    h=$(jq_ "d['data']['bindings_patched']" < "$W/bg.json")
-    [ "${h:-0}" -ge 3 ] && [ -s "$W/bcd_new.bin" ] && ok "bcd.gen-uefi 改到 $h 处设备并写出 BCD" || ng "bcd.gen-uefi 失败：$(head -c 200 "$W/bg.json")"
+    BCDREF="$(ref_path bcd-reference-uefi.bin)"
+    if [ -z "$BCDREF" ]; then
+        BCDREF="$W/fixture-uefi.bcd"
+        fixture_bcd_hive "$BCDREF" gpt >/dev/null 2>&1 || BCDREF=""
+    fi
+    if [ -n "$BCDREF" ]; then
+        $T/imgcmd bcd.gen-uefi --ref="$BCDREF" --out="$W/bcd_new.bin" \
+            --sys-guid="$SG" --disk-guid="$DG" --esp-guid="$EG" --progress=none > "$W/bg.json" 2>/dev/null
+        h=$(jq_ "d['data']['bindings_patched']" < "$W/bg.json")
+        [ "${h:-0}" -ge 3 ] && [ -s "$W/bcd_new.bin" ] && ok "bcd.gen-uefi 改到 $h 处设备并写出 BCD" || ng "bcd.gen-uefi 失败：$(head -c 200 "$W/bg.json")"
+    else
+        echo "  ⏭ 跳过 bcd.gen-uefi（无参考件且自造 BCD 失败）"
+    fi
 }
 
 echo "════ 4g. ISO 抽取（iso.ls / iso.extract；UDF 桥）════"

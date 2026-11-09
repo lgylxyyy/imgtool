@@ -269,7 +269,9 @@ include/            Public headers (img_*.h)
 src/                Implementation: qcow2 / raw / VHD / VMDK / partition tables / FAT32 /
                     NTFS / WIM / ISO / archives / BCD / boot / recovery / registry
 tools/              imgcmd, imgbc, imglayout, imgdump … (plus build-mkntfs-obj.sh)
-tests/              Shell, Python, and C regression tests
+tests/              Shell, Python, and C regression tests (skip when a fixture is absent, never fail)
+ci/Dockerfile       Image for the full regression (ntfs-3g / wimlib / hivex / qemu-img / mtools)
+ci/github-workflow.yml  CI workflow (copy to .github/workflows/ to enable)
 reference/          Boot reference material (archive only; binaries not tracked)
 legacy/             Early implementation, kept for reference, not built
 third_party/unrar/  Bundled RAR decoder

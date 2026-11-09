@@ -35,6 +35,10 @@ run(){ # $1=名字 $2...=命令
   if "$@" > /tmp/runall.out 2>&1; then
     echo "  ✅ $name"; pass=$((pass+1))
     tail -3 /tmp/runall.out | sed 's/^/     /'
+  elif [ $? -eq 77 ]; then
+    # 77 = 缺素材主动跳过（不是失败）；详情见 /tmp/runall.out
+    echo "  ⏭ $name（缺素材跳过）"; skipped=$((skipped+1))
+    grep -m2 '⏭\|素材' /tmp/runall.out | sed 's/^/     /' || true
   else
     echo "  ❌ $name（失败，末尾输出↓）"; fail=$((fail+1))
     tail -12 /tmp/runall.out | sed 's/^/     /'
@@ -103,12 +107,29 @@ run "ads-test（命名数据流：ntfs.copy / file.copy 必须保留）" "$ROOT/
 run "vbr-tpl-test（内置引导码模板三方一致性）" python3 "$ROOT/tests/vbr-tpl-test.py"
 run "fat-fs-test（FAT32 改名/移动/删除 34 条 + mtools 交叉验证）" python3 "$ROOT/tests/fat-fs-test.py"
 run "cancel_test（取消 7 条）"            "$ROOT/build/tests/cancel_test" "$W/a.qcow2" 2048 "$W/big.bin"
-if [ -x "$ROOT/build/tests/bcd_test" ]; then
-  run "bcd_test（BCD 读写）" "$ROOT/build/tests/bcd_test" "$ROOT/reference/bcd-reference-uefi.bin" "$W/bcd_out.bin"
+# 微软参考件（reference/*.bin）不随仓库分发：没有就跳过，不是失败
+. "$ROOT/tests/ref.sh"
+. "$ROOT/tests/fixture.sh"
+# 微软参考件不在仓库里：有就用原件，没有就用内置模板现造一份当输入。
+# 两者的差别是「能否证明与微软逐字节一致」，读改写逻辑本身都能测到。
+BCD_UEFI="$(ref_path bcd-reference-uefi.bin)"
+if [ -z "$BCD_UEFI" ]; then
+  BCD_UEFI="$W/fixture-uefi.bcd"; fixture_bcd_hive "$BCD_UEFI" gpt >/dev/null 2>&1 || BCD_UEFI=""
+fi
+BCD_BIOS="$(ref_path bcd-reference-bios-win11.bin)"
+if [ -z "$BCD_BIOS" ]; then
+  BCD_BIOS="$W/fixture-bios.bcd"; fixture_bcd_hive "$BCD_BIOS" mbr >/dev/null 2>&1 || BCD_BIOS=""
+fi
+if [ -x "$ROOT/build/tests/bcd_test" ] && [ -n "$BCD_UEFI" ]; then
+  run "bcd_test（BCD 读写）" "$ROOT/build/tests/bcd_test" "$BCD_UEFI" "$W/bcd_out.bin"
+elif [ -x "$ROOT/build/tests/bcd_test" ]; then
+  skipped=$((skipped+1)); echo "  ⏭ 跳过 bcd_test（无参考件且自造 hive 失败）"
 else skipped=$((skipped+1)); echo "  ⏭ 跳过 bcd_test（没编进构建）"; fi
-if [ -x "$ROOT/build/tests/mbr_bcd_test" ]; then
-  run "mbr_bcd_test（BIOS BCD 5 处设备批量改写）" \
-      "$ROOT/build/tests/mbr_bcd_test" "$ROOT/reference/bcd-reference-bios-win11.bin" "$W/mbr_bcd.bin"
+if [ -x "$ROOT/build/tests/mbr_bcd_test" ] && [ -n "$BCD_BIOS" ]; then
+  run "mbr_bcd_test（BIOS BCD 设备对象批量改写）" \
+      "$ROOT/build/tests/mbr_bcd_test" "$BCD_BIOS" "$W/mbr_bcd.bin"
+elif [ -x "$ROOT/build/tests/mbr_bcd_test" ]; then
+  skipped=$((skipped+1)); echo "  ⏭ 跳过 mbr_bcd_test（无参考件且自造 hive 失败）"
 else skipped=$((skipped+1)); echo "  ⏭ 跳过 mbr_bcd_test（没编进构建）"; fi
 if [ -x "$ROOT/build/tests/ebr_test" ]; then
   run "ebr_test（MBR 扩展/逻辑分区 EBR 链往返）" "$ROOT/build/tests/ebr_test"
@@ -124,7 +145,7 @@ run "boot-repair-test（BIOS 一键修复）" bash "$ROOT/tests/boot-repair-test
 run "genbcd-test（UEFI BCD 定制）"      bash "$ROOT/tests/genbcd-test.sh"
 if [ -x "$ROOT/build/tests/recovery_bcd_test" ]; then
   # 官方 ISO 的 BCD（微软真值）：已抽出来放进 reference/，16 KiB，随仓库走
-  ISOBCD="$ROOT/reference/iso-bcd-win11.bin"
+  ISOBCD="$(ref_path iso-bcd-win11.bin)"
   [ -f "$ISOBCD" ] || ISOBCD="$ROOT/../build/w128/iso/bcd"
   if [ ! -f "$ISOBCD" ]; then
     # 兜底：有官方 ISO 就现场抽 efi/microsoft/boot/bcd
@@ -136,11 +157,11 @@ if [ -x "$ROOT/build/tests/recovery_bcd_test" ]; then
       [ -f "$W/iso/bcd" ] && ISOBCD="$W/iso/bcd"
     fi
   fi
-  if [ -f "$ISOBCD" ]; then
+  if [ -n "$ISOBCD" ] && [ -f "$ISOBCD" ] && [ -n "$BCD_UEFI" ]; then
     run "recovery_bcd_test（恢复条目）" "$ROOT/build/tests/recovery_bcd_test" \
-        "$ROOT/reference/bcd-reference-uefi.bin" "$W/rec.bin" '\Recovery\WindowsRE\Winre.wim' "$ISOBCD" \
+        "$BCD_UEFI" "$W/rec.bin" '\Recovery\WindowsRE\Winre.wim' "$ISOBCD" \
         5616a432-a581-0f42-8302-cff19ec2690f 08cb2fb9-d284-f948-9892-70ef8e7d70cd
-  else skipped=$((skipped+1)); echo "  ⏭ 跳过 recovery_bcd_test（缺官方 ISO BCD 参考）"; fi
+  else skipped=$((skipped+1)); echo "  ⏭ 跳过 recovery_bcd_test（缺官方 ISO BCD 参考，微软文件未随仓库分发）"; fi
 else skipped=$((skipped+1)); echo "  ⏭ 跳过 recovery_bcd_test（没编进构建）"; fi
 
 # 本轮新增（P2 / P3 / 文案规范）
@@ -148,6 +169,7 @@ run "reg-test（注册表通用编辑：读/写/列/删/事务）"            ba
 run "diskfmt-test（raw / VHD / VMDK 读写 + qemu 互验）"      bash "$ROOT/tests/diskfmt-test.sh"
 run "vhd-test（VHD 建盘、多块写入、重开与 QEMU 互验）"         python3 "$ROOT/tests/vhd-test.py"
 run "wim-capture-test（捕获、临时目录清理、产物可读）"          bash "$ROOT/tests/wim-capture-test.sh"
+run "provenance-test（内置模板 == 微软原件；缺原件则跳过）"   bash "$ROOT/tests/provenance-test.sh"
 run "style-check（用户可见文本符合 STYLE-GUIDE）"           python3 "$ROOT/tests/style-check.py"
 
 # 依赖裁剪（默认跳过：要重编两套约 30 s；要跑：DEGRADED=1 tests/run_all.sh）
