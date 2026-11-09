@@ -1,0 +1,43 @@
+# .github/workflows/ci-debug-fat.yml —— 只用来复现 FAT 的 buffer overflow
+#
+# 单独成文件的原因：主工作流里加 workflow_dispatch.inputs 之后，
+# GitHub 把手动触发的运行直接判失败且不创建任何 job；把调试入口拆出来最简单。
+# 用法：Actions → ci-debug-fat → Run workflow（或 API 触发）。
+name: ci-debug-fat
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  debug-fat:
+    name: 复现 FAT 崩溃并打栈
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 构建 CI 镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ci/Dockerfile
+          load: true
+          tags: imgtool-ci:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 在容器里用 gdb 复现
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            -w /src \
+            -e IMGTOOL_TMPDIR=/tmp \
+            -e MODE=debug-fat \
+            imgtool-ci:ci \
+            bash ci/run-tests.sh
