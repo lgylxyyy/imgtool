@@ -257,8 +257,8 @@ android-cross.sh    Android 交叉编译入口
 android-deps.sh     Android 第三方依赖编译（一次性）
 ```
 
-文档：`ANDROID-BUILD.md``ARMHF-BUILD.md``DESIGN-OUTPUT.md`
-`PARTITION-POLICY.md``SPEC-NTFS-MOVE.md``WORKPLAN-HARDEN.md``THIRD_PARTY.md`
+文档：`ANDROID-BUILD.md`、`ARMHF-BUILD.md`、`DESIGN-OUTPUT.md`、
+`PARTITION-POLICY.md`、`SPEC-NTFS-MOVE.md`、`WORKPLAN-HARDEN.md`、`THIRD_PARTY.md`
 
 ---
 
