@@ -267,7 +267,7 @@ src/                实现：qcow2 / raw / VHD / VMDK / 分区表 / FAT32 / NTFS
 tools/              imgcmd、imgbc、imglayout、imgdump …（含 build-mkntfs-obj.sh）
 tests/              shell + python + C 回归（缺外部素材时自动跳过，不判失败）
 ci/Dockerfile       完整回归用的镜像（ntfs-3g / wimlib / hivex / qemu-img / mtools）
-ci/github-workflow.yml   CI 工作流（放到 .github/workflows/ 即启用）
+.github/workflows   CI：在自建镜像里跑全量回归
 reference/          引导参考件（仅存档，二进制不入库）
 legacy/             早期实现，留档、不参与构建
 third_party/unrar/  内置 RAR 解码器

@@ -1,12 +1,4 @@
-# ci/github-workflow.yml —— 推送/PR 时在自建镜像里跑完整回归
-#
-# ★ 本文件放在 ci/ 而不是 .github/workflows/：往 .github/workflows/ 推送需要
-#   带 `workflow` 权限的 GitHub token，当前环境没有。启用方式二选一：
-#     · GitHub 网页 → Actions → New workflow → 粘贴本文件内容，路径填
-#       .github/workflows/ci.yml
-#     · 或用带 workflow 权限的 token 推一次：
-#       mkdir -p .github/workflows && cp ci/github-workflow.yml .github/workflows/ci.yml
-#       git add .github && git commit -m "ci: 启用工作流" && git push
+# .github/workflows/ci.yml —— 推送/PR 时在自建镜像里跑完整回归
 #
 # 为什么用自建镜像而不是现装依赖：
 #   完整测试需要 ntfs-3g、wimlib、hivex、libarchive、mkntfs 对象，
