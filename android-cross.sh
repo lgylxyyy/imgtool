@@ -45,6 +45,15 @@ for abi in "${ABIS[@]}"; do
   STAGE="$(stage_prepare "$abi" "$triple" | tail -1)"
   b="$OUT/$abi"
   echo "=== $abi (API $API) → $b ==="
+  # 缓存自愈：CMakeCache.txt 记着构建时的源码绝对路径。源码换位置（换分支、
+  # 换 clone 目录、合并仓库）后复用同一 build 目录，CMake 会以
+  # "source does not match ... used to generate cache" 拒绝构建。
+  # 检测到不一致就删掉缓存重配（不影响 stage/ 里的依赖产物）。
+  cmake_src() { [ -f "$1/CMakeCache.txt" ] && sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$1/CMakeCache.txt"; }
+  if [ -f "$b/CMakeCache.txt" ] && [ "$(cmake_src "$b")" != "$SRC" ]; then
+    echo "  [cache] 源码路径已变更（$(cmake_src "$b") → $SRC），清除构建缓存"
+    rm -rf "$b"
+  fi
   cmake -S "$SRC" -B "$b" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_TOOLCHAIN_FILE="$SRC/cmake/android-arm64host.cmake" \
