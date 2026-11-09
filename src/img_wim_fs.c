@@ -162,14 +162,14 @@ int img_wim_extract_tree(const char *wim_path,int index,const char *inner_path,
                          const char *out_dir,img_prog *prog,char *err,size_t errcap){
     if(!wim_path||!inner_path||!out_dir) return IMG_EINVAL;
     if(inner_path[0]!='/') return IMG_EINVAL;
-    if(prog){ img_prog_phase(prog,IMG_PH_EXTRACT,"从 WIM/ESD 解出"); img_prog_op(prog,IMG_OP_READ); }
+    if(prog){ img_prog_phase(prog,IMG_PH_EXTRACT,"从 WIM/ESD 解压缩"); img_prog_op(prog,IMG_OP_READ); }
     openwim o; int rc=open_checked(wim_path,index,&o,err,errcap);
     if(rc!=IMG_OK) return rc;
     const wimlib_tchar *paths[1]={ (const wimlib_tchar*)inner_path };
     int wrc=wimlib_extract_paths(o.w,index,(const wimlib_tchar*)out_dir,paths,1,
                                  WIMLIB_EXTRACT_FLAG_NO_ACLS);
     wimlib_free(o.w);
-    if(wrc!=0){ if(err) snprintf(err,errcap,"解出失败：%s",wim_rc_str(wrc)); return IMG_EIO; }
+    if(wrc!=0){ if(err) snprintf(err,errcap,"解压缩失败：%s",wim_rc_str(wrc)); return IMG_EIO; }
     return IMG_OK;
 }
 
@@ -367,7 +367,7 @@ int img_wim_extract_file(const char *wim_path,int index,const char *inner_path,
 static int pe_machine_of(const char *path, uint16_t *mach, char *why, size_t whycap){
     unsigned char hdr[4096];
     FILE *f=fopen(path,"rb");
-    if(!f){ if(why) snprintf(why,whycap,"打不开临时文件"); return IMG_ENOENT; }
+    if(!f){ if(why) snprintf(why,whycap,"无法打开临时文件"); return IMG_ENOENT; }
     size_t got=fread(hdr,1,sizeof hdr,f);
     if(got<0x40 || hdr[0]!='M' || hdr[1]!='Z'){
         fclose(f); if(why) snprintf(why,whycap,"不是 MZ（%zu 字节）",got); return IMG_EFORMAT;
@@ -456,7 +456,7 @@ int img_wim_probe_arch(const char *wim_path, int index, char *out, size_t cap,
                          (src&&src[0])?src:"SysWOW64/wow64.dll");
         return IMG_OK;
     }
-    if(why) snprintf(why,whycap,"内容判不出（%s）",e[0]?e:"没有可用的系统文件");
+    if(why) snprintf(why,whycap,"内容无法识别（%s）",e[0]?e:"没有可用的系统文件");
     return last_rc;
 }
 
@@ -483,7 +483,7 @@ int img_wim_is_winre_self(const char *wim_path, bool *out_self, char *why, size_
     if(why && whycap) why[0]=0;
     if(!wim_path) return IMG_EINVAL;
     WIMStruct *w=NULL;
-    if(wimlib_open_wim(wim_path,0,&w)!=0){ if(why&&whycap) snprintf(why,whycap,"WIM 打不开"); return IMG_ENOENT; }
+    if(wimlib_open_wim(wim_path,0,&w)!=0){ if(why&&whycap) snprintf(why,whycap,"WIM 无法打开"); return IMG_ENOENT; }
     ws_ctx c={false};
     /* ★ 必须带 RECURSIVE：flags=0 时 wimlib 只回调根节点本身，看不到子项 ——
      *   那样任何映像都会被判成"根下没有 Windows"= self（踩过：WinPE 的 boot.wim 被当 payload）。*/

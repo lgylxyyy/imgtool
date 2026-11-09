@@ -174,14 +174,14 @@ int img_wim_apply(const char *wim_path, int image_idx,
     /* 里程碑：灌 WIM 是全流程最慢的一步，日志里必须能看到"开始/完成"和耗时，
      *   否则"卡在灌系统这步"和"灌到一半死了"在日志上分不出来。 */
     img_span wsp;
-    img_span_prep(&wsp,"wim","apply","灌入 WIM 到分区");
+    img_span_prep(&wsp,"wim","apply","写入 WIM 到分区");
     img_span_kv_str(&wsp,"wim",wim_path);
     img_span_kv_u64(&wsp,"index",(uint64_t)image_idx);
     img_span_kv_u64(&wsp,"part_lba",part_lba);
     img_span_begin(&wsp);
     if(prog){
         struct wimlib_wim_info wi; wimlib_get_wim_info(w,&wi);
-        img_prog_phase(prog, IMG_PH_EXTRACT, "灌入 WIM 到分区");
+        img_prog_phase(prog, IMG_PH_EXTRACT, "写入 WIM 到分区");
         img_prog_op(prog, IMG_OP_WRITE);
         (void)wi;
     }
@@ -209,6 +209,6 @@ int img_wim_apply(const char *wim_path, int image_idx,
         if(prog) img_prog_done(prog, img_strerror(frc));
         return frc;
     }
-    if(prog) img_prog_done(prog, "WIM 灌入完成");
+    if(prog) img_prog_done(prog, "WIM 写入入完成");
     return IMG_OK;
 }

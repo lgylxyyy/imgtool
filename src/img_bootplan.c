@@ -75,7 +75,7 @@ void img_boot_plan(const img_boot_plan_in_t *in, img_boot_plan_t *out){
         out->verdict = IMG_PLAN_DENIED;
         snprintf(out->reason, sizeof out->reason, "%s", "BOOT-ARCH-NO-UEFI");
         snprintf(out->detail, sizeof out->detail,
-                 img_t("%s 的 x86 版本没有 EFI 引导文件（镜像里无 \\Windows\\Boot\\EFI\\ 与 winload.efi），"
+                 img_t("%s 的 x86 版本没有 EFI 引导文件（映像里无 \\Windows\\Boot\\EFI\\ 与 winload.efi），"
                        "物理上无法 UEFI 启动；32 位 UEFI 最低需要 Windows 8 x86。请改用 MBR/BIOS 或换 x64 版本。"),
                  out->os_name);
         return;

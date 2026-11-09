@@ -282,7 +282,7 @@ int img_qcow2_write_init(img_qcow2 *q){
         if(sc.duplicate_refs || q->scan_oor){
             img_ev e;
             if(img_ev_init(&e, IMG_LV_WARN, "qcow2", "inconsistent", IMG_OK,
-                           "镜像里有别名/越界簇：写入前已把分配水位抬高，避免继续写坏"))
+                           "映像里有别名/越界簇：写入前已把分配水位抬高，避免继续写坏"))
             {
                 img_ev_u64(&e, "duplicate_refs", sc.duplicate_refs);
                 img_ev_u64(&e, "out_of_range", q->scan_oor);

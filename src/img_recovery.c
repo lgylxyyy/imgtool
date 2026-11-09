@@ -209,7 +209,7 @@ int img_recovery_populate(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
     if(is_self){
         struct stat sst;
         if(stat(winre_src,&sst)!=0 || !S_ISREG(sst.st_mode)){
-            if(err && errcap) snprintf(err,errcap,"裸 winre.wim 打不开：%s",winre_src);
+            if(err && errcap) snprintf(err,errcap,"裸 winre.wim 无法打开：%s",winre_src);
             return IMG_ENOENT;
         }
     }

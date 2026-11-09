@@ -326,7 +326,7 @@ int img_iso_open_io(img_iso **out, img_io *io, char *err, size_t errcap){
         if(unreadable)
             snprintf(err,errcap,
                 "ISO 文件能打开但一个扇区都没读出来（试了 %d 次，errno=%d %s）——"
-                "查权限/挂载，别怀疑镜像", rd_fail, errno, strerror(errno));
+                "查权限/挂载，别怀疑映像", rd_fail, errno, strerror(errno));
         else
             snprintf(err,errcap,
                 "不是 UDF 也不是 ISO9660（Windows 安装盘的 ISO9660 目录树是空的，install.wim 只在 UDF 里）");

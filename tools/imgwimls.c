@@ -73,7 +73,7 @@ int main(int argc,char**argv){
     if(r){ printf("❌ 无法打开: %s\n", wimlib_get_error_string(r)); return 1; }
     struct wimlib_wim_info wi;
     wimlib_get_wim_info(w,&wi);
-    printf("  镜像数 %u · 压缩 %s\n", wi.image_count,
+    printf("  映像数 %u · 压缩 %s\n", wi.image_count,
            wimlib_get_compression_type_string(wi.compression_type));
     for(unsigned i=1;i<=wi.image_count;i++){
         const char *nm=wimlib_get_image_name(w,(int)i);

@@ -123,7 +123,7 @@ int img_archive_format(const char *path, char *out, size_t cap, char *err, size_
 #endif
     struct archive *a=NULL;
     if(open_archive(path,&a,false)!=IMG_OK){
-        set_err(err,errcap,"打不开压缩包：%s",path);
+        set_err(err,errcap,"无法打开压缩包：%s",path);
         return IMG_EFORMAT;
     }
     struct archive_entry *e;       /* format 要读过 header 才定得下来 */
@@ -282,7 +282,7 @@ static int scan_archive(const char *path, bool cp936, img_archive_index **out,
     hb_start(&hb,&hth); hb_on=true;             /* 大包的 open 会一口气吞完中央目录 */
     if(open_archive(path,&a,cp936)!=IMG_OK){
         hb_stop(&hb,&hth);
-        set_err(err,errcap,"打不开压缩包（格式不认识或文件损坏）：%s",path);
+        set_err(err,errcap,"无法打开压缩包（格式不认识或文件损坏）：%s",path);
         return IMG_EFORMAT;
     }
     img_archive_index *ix=(*out);
@@ -562,7 +562,7 @@ int img_archive_index_walk(img_archive_index *ix, const char *prefix, bool recur
 static int open_for_read(const char *path, bool cp936, struct archive **out,
                          char *err, size_t errcap){
     if(open_archive(path,out,cp936)!=IMG_OK){
-        set_err(err,errcap,"打不开压缩包（格式不认识或文件损坏）：%s",path);
+        set_err(err,errcap,"无法打开压缩包（格式不认识或文件损坏）：%s",path);
         return IMG_EFORMAT;
     }
     return IMG_OK;
@@ -701,7 +701,7 @@ int img_archive_extract(const char *path, const char *inner, const char *dst,
         archive_read_free(a);
         if(!is_dir){    /* 当文件处理（找不到会在 read_entry 里报）*/
             FILE *fp=fopen(dst,"wb");
-            if(!fp){ set_err(err,errcap,"目标打不开：%s",dst); return IMG_EIO; }
+            if(!fp){ set_err(err,errcap,"目标无法打开：%s",dst); return IMG_EIO; }
             arc_fsink s={fp};
             uint64_t got=0;
             int rc2=img_archive_read_entry(path,want,false,arc_file_cb,&s,&got,prog,err,errcap);

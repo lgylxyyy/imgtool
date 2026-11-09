@@ -69,7 +69,7 @@ int img_win_finish(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes, bool dr
 
     hive_h *h = hivex_open(tmp, dry_run ? 0 : HIVEX_OPEN_WRITE);
     if(!h){
-        if(err) snprintf(err, errcap, "hivex 打不开 SYSTEM hive（文件损坏？）");
+        if(err) snprintf(err, errcap, "hivex 无法打开 SYSTEM hive（文件损坏？）");
         unlink(tmp);
         img_ntfs_umount(fs);
         return IMG_EFORMAT;

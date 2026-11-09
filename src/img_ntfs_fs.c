@@ -304,7 +304,7 @@ static int verify_dir_on_disk(img_ntfs_fs *fs, const char *abs_path, ntfs_inode 
     if(!opened || !isdir || !backlink){
         img_ev ev;
         if(img_ev_init(&ev,IMG_LV_ERROR,"ntfs","dir_verify_phantom",IMG_ECORRUPT,
-                       !opened ? "索引项指向的 MFT 记录打不开（盘上没这条记录）"
+                       !opened ? "索引项指向的 MFT 记录无法打开（盘上没这条记录）"
                      : !isdir  ? "索引项指向的 MFT 记录不是目录：幽灵目录，ntfs_create 没把记录落盘"
                                : "目录记录在，但没有同名且指回该父的 $FILE_NAME（记录被别的对象占用/写串）")){
             img_ev_str(&ev,"path",abs_path); img_ev_str(&ev,"parent",pdir);
@@ -497,7 +497,7 @@ static int verify_move_result(img_ntfs_fs *fs, const char *src_abs, const char *
     if(path_ino(fs,src_abs,&sink,&sdir)==IMG_OK && sink==want_ino){
         img_ev ev;
         if(img_ev_init(&ev,IMG_LV_WARN,"ntfs","move_verify_src_left",IMG_OK,
-                       "旧位置仍查到同一条记录（多半是大小写命中或 ntfs-3g 索引缓存，非致命）")){
+                       "旧位置仍查到同一条记录（通常是大小写命中或 ntfs-3g 索引缓存，非致命）")){
             img_ev_str(&ev,"src",src_abs); img_ev_str(&ev,"dst",dst_abs);
             img_ev_u64(&ev,"src_ino",sink); img_ev_emit(&ev);
         }

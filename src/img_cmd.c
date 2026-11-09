@@ -326,7 +326,7 @@ struct img_ctx {
 };
 img_ctx *img_ctx_open(const char *image_path, bool writable, bool check_size,
                       char *err, size_t errcap){
-    if(!image_path||!*image_path){ if(err) snprintf(err,errcap,"镜像路径为空"); return NULL; }
+    if(!image_path||!*image_path){ if(err) snprintf(err,errcap,"映像路径为空"); return NULL; }
     img_ctx *c=calloc(1,sizeof *c);
     if(!c) return NULL;
     snprintf(c->path,sizeof c->path,"%s",image_path);
@@ -337,7 +337,7 @@ img_ctx *img_ctx_open(const char *image_path, bool writable, bool check_size,
      *   过去会留下 0 字节垃圾镜像 + 报 QC-OPEN-FAIL（像"镜像损坏"）。现在直接 IMG-OPEN-FAIL。
      *   建盘是 imglayout mk / img_clone 的职责，它们仍用 img_io_open_path()。*/
     c->io=img_io_open_existing(c->path,writable);
-    if(!c->io){ if(err) snprintf(err,errcap,"无法打开镜像：%s（不存在或不是普通文件）",c->path); free(c); return NULL; }
+    if(!c->io){ if(err) snprintf(err,errcap,"无法打开映像：%s（不存在或不是普通文件）",c->path); free(c); return NULL; }
     return c;
 }
 void img_ctx_close(img_ctx *c){

@@ -160,7 +160,7 @@ static HANDLE rar_open(const char *path, int mode, unsigned int *flags,
     if(!h){
         if(pw && rx.OpenResult==ERAR_MISSING_PASSWORD) *pw=true;
         switch(rx.OpenResult){
-        case ERAR_EOPEN:            snprintf(err,cap,"RAR 打不开（路径/权限）：%s",path); break;
+        case ERAR_EOPEN:            snprintf(err,cap,"RAR 无法打开（路径/权限）：%s",path); break;
         case ERAR_BAD_ARCHIVE:      snprintf(err,cap,"不是 RAR 或文件被截断：%s",path); break;
         case ERAR_MISSING_PASSWORD: snprintf(err,cap,"这个 RAR 有密码（不支持解密，需要密码才能读）"); break;
         case ERAR_LARGE_DICT:       snprintf(err,cap,"RAR 字典太大（解压内存不够）"); break;

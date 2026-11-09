@@ -66,7 +66,7 @@ int main(int argc, char **argv){
     /* 打开镜像 + 挂载 NTFS */
     img_io_opts_t io={0}; io.writable=true;
     img_io *fh = img_io_open_path(img,&io);
-    if(!fh) die("镜像无法打开", IMG_ENOENT);
+    if(!fh) die("映像无法打开", IMG_ENOENT);
     img_qcow2_opts_t qo={0};
     img_qcow2 *q = img_qcow2_open(fh,&qo);
     if(!q || img_qcow2_write_init(q)!=IMG_OK) die("qcow2", IMG_EFORMAT);
@@ -84,7 +84,7 @@ int main(int argc, char **argv){
             /* 源 RE 分区 → 系统分区 Recovery 文件夹（内存直搬，无宿主临时文件）*/
             char wf[512]; snprintf(wf,sizeof wf,"%s",wr_from);
             char *colon=strrchr(wf,':');
-            if(!colon){ img_ntfs_umount(fs); die("--winre-from 要写成 镜像:lba", IMG_EINVAL); }
+            if(!colon){ img_ntfs_umount(fs); die("--winre-from 要写成 映像:lba", IMG_EINVAL); }
             *colon=0; uint64_t slba=strtoull(colon+1,NULL,0);
             img_io_opts_t io2={0};
             img_io *f2=img_io_open_path(wf,&io2);

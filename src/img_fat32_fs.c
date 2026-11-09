@@ -275,7 +275,7 @@ static void ent_83_name(const uint8_t *e, char out[12]){
 }
 
 /* ---------- LFN 累加器（dir_find 与 list_dir 共用） ----------
- * 为什么单独抽出来（2026-10-23 在真 Windows 的 ESP 上实测出的 bug）：
+ * 为什么单独提取来（2026-10-23 在真 Windows 的 ESP 上实测出的 bug）：
  *   LFN 在盘上是【倒序】存放的（ord=N…1），名字超过 13 字符就要占多个槽。
  *   旧写法每写一个字符顺手在下一个字节补结束符，于是最后处理的 ord=1
  *   把结束符补在了 buf[13] —— 正好【截断】已经填好的后半截。
@@ -313,7 +313,7 @@ static const char *lfn_value(lfn_acc *a){
 }
 
 /* 目录里是否已经存在某个 11 字节 8.3 名（跳过 LFN 项、卷标项与已删除项）
- * 返回 1=已存在 · 0=不存在 · -1=镜像损坏（簇链成环/读失败） */
+ * 返回 1=已存在 · 0=不存在 · -1=映像损坏（簇链成环/读失败） */
 static int dir_has_83(img_fat32_fs *fs, uint32_t dirclus, const uint8_t n83[11]){
     size_t csz = (size_t)fs->L.sectors_per_cluster * 512;
     uint8_t *buf = malloc(csz);
@@ -1375,7 +1375,7 @@ int img_fat32_rm(img_fat32_fs *fs, const char *abs_path){
 }
 
 /* 改名 / 移动（同一分区内）。目录也可移动：FAT 的父引用只有子目录里的 ".." 一项，
- * 搬完同步它就行（NTFS 侧不是这样，那边还有 $I30 索引 —— 见 img_ntfs_fs.c）。
+ * 搬完同步它即可（NTFS 侧不是这样，那边还有 $I30 索引 —— 见 img_ntfs_fs.c）。
  * 目标已存在 → IMG_EEXISTS（是否覆盖是政策，留给命令层/App）。
  * 顺序：① 先建新项（指向同一簇）② 目录换了父就改 ".." ③ 再删旧项。
  *   任何一步失败，数据都还在（最坏情况是出现两条同名项，方向可查、可恢复）。*/

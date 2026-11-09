@@ -221,7 +221,7 @@ int img_ptfile_load(const char *path, img_ptfile_t *out,
     if(!path||!out) return bad(code,codecap,at,atcap,why,whycap,"path","没有文件路径");
 
     FILE *f=fopen(path,"rb");
-    if(!f) return bad(code,codecap,at,atcap,why,whycap,"in","打不开这个文件（不存在/没权限）");
+    if(!f) return bad(code,codecap,at,atcap,why,whycap,"in","无法打开这个文件（不存在/没权限）");
     if(fseek(f,0,SEEK_END)!=0){ fclose(f); return bad(code,codecap,at,atcap,why,whycap,"in","读不了文件大小"); }
     long sz=ftell(f);
     /* 128 条分区 × 约 300 字节 + 900 字节 mbrCode ≈ 40 KB；给 1 MiB 富余 */
@@ -276,7 +276,7 @@ int img_ptfile_load(const char *path, img_ptfile_t *out,
             long long ss=0;
             if(!jnum(&j,&ss)){ free(txt); return bad(code,codecap,at,atcap,why,whycap,"sectorSize","sectorSize 不是数字"); }
             if(ss!=512){ free(txt); return bad(code,codecap,at,atcap,why,whycap,"sectorSize",
-                ss==4096?"本版只支持 512 字节扇区（4K 盘还没做）":"sectorSize 只支持 512"); }
+                ss==4096?"该版本只支持 512 字节扇区（4K 盘还没做）":"sectorSize 只支持 512"); }
         } else if(!strcmp(key,"diskSectors")){
             long long ds=0;
             if(jnum(&j,&ds) && ds>0) out->disk_sectors=(uint64_t)ds;

@@ -645,7 +645,7 @@ int img_log_cli(int argc, char **argv, const char *tool){
         else return 0;                                          /* 没要日志：什么都不做 */
     }
     if(!path && plain){
-        /* 默认放镜像旁边：<argv[1]>.imgtool.log（无法获取参数就用 cwd 下的名字）*/
+        /* 默认放映像旁边：<argv[1]>.imgtool.log（无法获取参数就用 cwd 下的名字）*/
         const char *seed = (argc>1 && argv[1] && argv[1][0]!='-') ? argv[1] : "imgtool";
         static char def[480];
         snprintf(def,sizeof def,"%s.imgtool.log",seed);

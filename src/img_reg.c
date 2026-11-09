@@ -125,7 +125,7 @@ static hive_node_h walk(img_reg *r, const char *key_path){
 
 img_reg *img_reg_open(const char *img_path, uint64_t lba, uint64_t part_bytes,
                       img_reg_hive hive, bool writable, char *err, size_t errcap){
-    if(!img_path || !*img_path){ if(err&&errcap) snprintf(err,errcap,"镜像路径为空"); return NULL; }
+    if(!img_path || !*img_path){ if(err&&errcap) snprintf(err,errcap,"映像路径为空"); return NULL; }
     if(hive < 0 || hive >= IMG_REG_HIVE__COUNT){
         if(err&&errcap) snprintf(err,errcap,"未知 hive：%d",(int)hive); return NULL;
     }
@@ -196,7 +196,7 @@ img_reg *img_reg_open(const char *img_path, uint64_t lba, uint64_t part_bytes,
     /* ② hivex 打开 */
     r->h = hivex_open(r->tmp, writable ? HIVEX_OPEN_WRITE : 0);
     if(!r->h){
-        if(err&&errcap) snprintf(err,errcap,"hivex 打不开 %s（文件损坏或不是合法 hive）", HIVE_FILES[hive]);
+        if(err&&errcap) snprintf(err,errcap,"hivex 无法打开 %s（文件损坏或不是合法 hive）", HIVE_FILES[hive]);
         unlink(r->tmp);
         free(r); img_ntfs_umount(fs); img_ctx_close(ctx); return NULL;
     }
@@ -221,7 +221,7 @@ void img_reg_close(img_reg *r){
         /* ④ 读回校验：重开确认能打开（结构没坏） */
         hive_h *chk = hivex_open(r->tmp, 0);
         if(!chk){
-            snprintf(r->err, sizeof r->err, "写回校验失败（commit 后 hive 打不开）");
+            snprintf(r->err, sizeof r->err, "写回校验失败（commit 后 hive 无法打开）");
             commit_ok = false;
         } else {
             hivex_close(chk);

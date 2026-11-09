@@ -986,7 +986,7 @@ static int arch_dst_prepare(xctx *c){
         snprintf(d->aw_err,sizeof d->aw_err,"%s",err[0]?err:"这个包只能读，不能写（RAR/ISO 请用 7z 或 archive.create）");
         return IMG_EREADONLY;
     }else if(rc!=IMG_OK){
-        snprintf(d->aw_err,sizeof d->aw_err,"%s",err[0]?err:"原包打不开");
+        snprintf(d->aw_err,sizeof d->aw_err,"%s",err[0]?err:"原包无法打开");
         return rc;
     }
     if(!img_aw_writable(f)){
@@ -999,7 +999,7 @@ static int arch_dst_prepare(xctx *c){
     if(exists && c->o->conflict==IMG_COPY_OVERWRITE){
         rc=img_aw_names_load(d->loc.img,&d->ns,err,sizeof err);
         if(rc!=IMG_OK){
-            snprintf(d->aw_err,sizeof d->aw_err,"%s",err[0]?err:"原包打不开（已损坏？）");
+            snprintf(d->aw_err,sizeof d->aw_err,"%s",err[0]?err:"原包无法打开（已损坏？）");
             return (rc==IMG_ENOENT)?IMG_ENOENT:IMG_EFORMAT;
         }
         rc=arch_plan_node(c,d->ns,c->s->root,d->loc.path,0,true,&sk);

@@ -98,7 +98,7 @@ static int normalize_inner(const char *in, char *out, size_t cap, char *why, siz
 enum { CT_QCOW2=1, CT_ISO=2, CT_WIM=3, CT_ARCHIVE=4 };
 static int detect_container(const char *path, int *type, char *why, size_t cap){
     int fd=open(path,O_RDONLY);
-    if(fd<0){ setwhy2(why,cap,"打不开容器文件：",path); return IMG_ENOENT; }
+    if(fd<0){ setwhy2(why,cap,"无法打开容器文件：",path); return IMG_ENOENT; }
     unsigned char b[8];
     ssize_t n=pread(fd,b,8,0);
     if(n==8 && b[0]=='Q' && b[1]=='F' && b[2]=='I' && b[3]==0xfb){
@@ -180,7 +180,7 @@ typedef struct { img_io *io; img_qcow2 *q; } qopen;
 static int qc_open_ro(const char *path, qopen *o, char *why, size_t cap){
     o->io=NULL; o->q=NULL;
     o->io=img_io_open_existing(path,false);
-    if(!o->io){ setwhy2(why,cap,"打不开镜像：",path); return IMG_ENOENT; }
+    if(!o->io){ setwhy2(why,cap,"无法打开映像：",path); return IMG_ENOENT; }
     img_qcow2_opts_t opt={0};
     opt.read_only=true;
     o->q=img_qcow2_open(o->io,&opt);
@@ -205,7 +205,7 @@ static int resolve_part(img_path *p, const char *sel, char *why, size_t cap){
         char *end=NULL; long idx=strtol(sel+1,&end,10);
         if(!end || *end || idx<1 || idx>n){
             qc_close(&o);
-            snprintf(why,cap,"分区 %s 不存在（本镜像共 %d 个已用分区）",sel,n);
+            snprintf(why,cap,"分区 %s 不存在（本映像共 %d 个已用分区）",sel,n);
             return IMG_ENOENT;
         }
         lba=parts[idx-1].lba;

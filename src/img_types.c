@@ -17,7 +17,7 @@ const char *img_strerror(int e){
     case IMG_ESTATE:     return "当前状态不允许该操作";
     case IMG_ECANCELLED: return "已取消";
     case IMG_ETRUNC:     return "数据被截断";
-    case IMG_ERANGE:     return "请求范围越界（偏移/长度超出镜像）";
+    case IMG_ERANGE:     return "请求范围越界（偏移/长度超出映像）";
     case IMG_ECYCLE:     return "会造出目录环（搬进自己或自己的子树）";
     case IMG_ESAMEFILE:  return "源和目标是同一个文件";
     case IMG_ENAMETOOLONG:return "文件名超过长度上限";

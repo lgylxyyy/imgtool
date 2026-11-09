@@ -174,7 +174,7 @@ int img_aw_fmt_of_existing(const char *path, img_aw_fmt *out, char *err, size_t 
     int fd=open(path,O_RDONLY);
     if(fd<0){
         if(errno==ENOENT) return IMG_ENOENT;      /* 不存在 = 新建，不是错误 */
-        if(err&&errcap) snprintf(err,errcap,"打不开压缩包：%s",path);
+        if(err&&errcap) snprintf(err,errcap,"无法打开压缩包：%s",path);
         return IMG_ENOENT;
     }
     unsigned char b[8]={0};
@@ -311,7 +311,7 @@ static int aw_take_existing(img_aw *w, const char *const *skip, int n_skip, bool
     archive_read_support_filter_all(r);
     archive_read_support_format_all(r);
     if(archive_read_open_filename(r,w->dst,128*1024)!=ARCHIVE_OK){
-        if(err&&errcap) snprintf(err,errcap,"原包打不开（已损坏？）：%s",archive_error_string(r)?archive_error_string(r):"格式错误");
+        if(err&&errcap) snprintf(err,errcap,"原包无法打开（已损坏？）：%s",archive_error_string(r)?archive_error_string(r):"格式错误");
         archive_read_free(r);
         return IMG_EFORMAT;
     }
@@ -582,7 +582,7 @@ int img_aw_add_host_file(img_aw *w, const char *inner, const char *host_path,
                          char *err, size_t errcap){
     int fd=open(host_path,O_RDONLY);
     if(fd<0){
-        if(err&&errcap) snprintf(err,errcap,"源文件打不开：%s",host_path);
+        if(err&&errcap) snprintf(err,errcap,"源文件无法打开：%s",host_path);
         return IMG_ENOENT;
     }
     aw_hostrd h={fd};
@@ -644,7 +644,7 @@ int img_aw_names_load(const char *path, img_aw_names **out, char *err, size_t er
     archive_read_support_format_all(r);
     if(archive_read_open_filename(r,path,128*1024)!=ARCHIVE_OK){
         if(errno==ENOENT){ archive_read_free(r); return IMG_ENOENT; }
-        if(err&&errcap) snprintf(err,errcap,"原包打不开：%s",archive_error_string(r)?archive_error_string(r):path);
+        if(err&&errcap) snprintf(err,errcap,"原包无法打开：%s",archive_error_string(r)?archive_error_string(r):path);
         archive_read_free(r);
         return IMG_EFORMAT;
     }

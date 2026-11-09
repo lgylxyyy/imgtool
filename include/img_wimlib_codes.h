@@ -53,7 +53,7 @@ static const img_wimlib_code_t IMG_WIMLIB_CODES[] = {
     {47, "WIMLIB_ERR_OPEN", "打开失败（路径不存在或无权限）"},
     {48, "WIMLIB_ERR_OPENDIR", "打开目录失败"},
     {49, "WIMLIB_ERR_PATH_DOES_NOT_EXIST", "路径不存在"},
-    {50, "WIMLIB_ERR_READ", "读失败（I/O 错误或镜像被截断）"},
+    {50, "WIMLIB_ERR_READ", "读失败（I/O 错误或映像被截断）"},
     {51, "WIMLIB_ERR_READLINK", "写失败（目标卷满了/只读/被标脏）"},
     {52, "WIMLIB_ERR_RENAME", NULL},
     {54, "WIMLIB_ERR_REPARSE_POINT_FIXUP_FAILED", NULL},
