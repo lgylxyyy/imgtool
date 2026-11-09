@@ -8750,6 +8750,42 @@ static int parse_or_fail(const char *spec, img_path *p, const char *which,
 }
 
 /* ================= du（REQ-40）：一条命令算递归大小/项数 ================= */
+/* ================= sys.tmpdir（REQ-61 §3）=================
+ * 回吐当前生效的临时目录：路径、命中的哪一档、所在卷的剩余空间、
+ * 本次命令开头 sweep 收走的残留数。App 用它做空间预检与报障。
+ */
+static int cmd_sys_tmpdir(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx; (void)in;
+    /* env 可能被调用方二次改写，而 img_tmpdir() 有进程级缓存 ——
+       先重解析再比对，changed 如实反映这次解析是否变了（REQ-61 §3.1）。*/
+    const char *prev = img_tmpdir();
+    char prev_path[512]; snprintf(prev_path,sizeof prev_path,"%s",prev?prev:"");
+    img_tmpdir_reset();
+    const char *td = img_tmpdir();
+    if(!td || !*td){
+        img_result_fail(out,IMG_ESTATE,"TMPDIR-UNAVAILABLE",NULL,
+            "没有可写临时目录","设置 IMGTOOL_TMPDIR 指向可写目录后重试");
+        return IMG_ESTATE;
+    }
+    uint64_t free_b=0, total_b=0;
+    int frc = img_tmpdir_free_bytes(&free_b,&total_b);
+
+    img_result_str(out,"path",td);
+    img_result_str(out,"source",img_tmpdir_source());
+    img_result_bool(out,"writable",true);
+    if(frc==IMG_OK){
+        img_result_u64(out,"free_bytes",free_b);
+        img_result_u64(out,"free_mb",free_b/1048576ULL);
+        img_result_u64(out,"total_bytes",total_b);
+    } else {
+        img_result_str(out,"free_error",img_strerror(frc));
+    }
+    img_result_u64(out,"stale_removed",(uint64_t)(img_cmd_last_sweep()>0?img_cmd_last_sweep():0));
+    img_result_bool(out,"changed", td && strcmp(prev_path,td)?true:false);
+    if(strcmp(prev_path,td)) img_result_str(out,"path_before",prev_path);
+    return IMG_OK;
+}
+
 static const img_arg A_DU[] = {
     {"src",       IMG_A_STR, true,  NULL,     "统一路径（host:/… / 镜像!p3:/… / ISO!:/… / WIM!1:/… / 包!:/…）", NULL},
     {"limit",     IMG_A_U64, false, "2000000","最多看多少条目；超了停下并回 truncated=true（不报错）", NULL},
@@ -9417,6 +9453,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_ISOLS,(int)(sizeof A_ISOLS/sizeof A_ISOLS[0]), cmd_iso_ls, NULL, 0},
     {"iso.extract","1.0", "从 ISO 里抽文件到本地（流式 1 MiB；App 不必自己装 ISO 库）",
         A_ISOEXTRACT,(int)(sizeof A_ISOEXTRACT/sizeof A_ISOEXTRACT[0]), cmd_iso_extract, NULL, 0},
+    {"sys.tmpdir","1.0", "查询当前生效的临时目录（路径、来源、剩余空间、清扫数）",
+        NULL, 0, cmd_sys_tmpdir, NULL, 0},
     {"cmd.list",  "1.0", "导出命令表（名字/参数规格/帮助）——App 可据此自动生成界面",
         NULL, 0, cmd_cmd_list, NULL, 0},
 };

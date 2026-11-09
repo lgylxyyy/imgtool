@@ -107,6 +107,9 @@ typedef struct img_cmd {
 const img_cmd *img_cmd_find(const char *name);
 const img_cmd *img_cmd_table(int *out_count);
 /* 查表 → 校验参数 → 计时 → 调 handler；返回 IMG_OK 或错误码（结果都写进 out） */
+/* 本进程最近一次命令开头的临时目录清扫删除数（sys.tmpdir 用） */
+int img_cmd_last_sweep(void);
+
 int img_cmd_exec(const char *name, img_ctx *ctx, const img_args *in, img_result *out);
 /* 导出命令表（含参数规格/帮助/校验提示）→ App 可用它自动生成界面、也能生成 --help */
 int img_cmd_list_json(char *buf, int cap);

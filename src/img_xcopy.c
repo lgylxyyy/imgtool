@@ -1466,6 +1466,11 @@ int img_xmove_run(const img_xloc *src, const img_xloc *dst,
     if(dst->kind==IMG_XK_ISO || dst->kind==IMG_XK_WIM) return IMG_EREADONLY;
 
     if(loc_same_volume(src,dst)){
+        /* ★ REQ-61 §2：st_dev 相同不代表能 rename —— Android 上
+         *   /data/user/0/<pkg>/files 与 /storage/emulated/0/Android/data/<pkg>/files
+         *   是 bind mount：同 st_dev、跨挂载点，rename 必 EXDEV。
+         *   此时退出同卷分支，落到下面的「复制 → 校验 → 删源」。 */
+        bool exdev = false;
         xep se,de; memset(&se,0,sizeof se); memset(&de,0,sizeof de);
         img_ctx *shared=NULL;
         bool same_img=false;
@@ -1577,7 +1582,10 @@ int img_xmove_run(const img_xloc *src, const img_xloc *dst,
                         char pdir[4096]; parent_of(target,pdir,sizeof pdir);
                         if(pdir[0]) host_mkdir_p(pdir,0755);
                     }
-                    if(rename(se.root,target)!=0) rc=(errno==ENOENT)?IMG_ENOENT:IMG_EIO;
+                    if(rename(se.root,target)!=0){
+                        if(errno==EXDEV){ exdev=true; rc=IMG_OK; goto mv_done; }
+                        rc=(errno==ENOENT)?IMG_ENOENT:IMG_EIO;
+                    }
                 } else {
                     rc=IMG_ENOTSUP;
                 }
@@ -1600,11 +1608,14 @@ int img_xmove_run(const img_xloc *src, const img_xloc *dst,
             }
         }
 mv_done:
-        if(getenv("IMG_XCOPY_DEBUG")) fprintf(stderr,"[mv] final rc=%d\n",rc);
+        if(getenv("IMG_XCOPY_DEBUG")) fprintf(stderr,"[mv] final rc=%d exdev=%d\n",rc,(int)exdev);
         ep_close(&se); ep_close(&de);
         if(shared) img_ctx_close(shared);
+        if(exdev) goto xcross;          /* 端点已关，走跨卷兜底 */
         return rc;
     }
+
+xcross:
 
     /* ---- 跨卷 / 跨镜像 / 宿主↔镜像：复制 → 校验 → 删源 ---- */
     if(src->kind==IMG_XK_HOST && !o.allow_host_delete) return IMG_EREFUSED;

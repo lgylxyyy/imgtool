@@ -72,7 +72,8 @@ const char *img_op_name(img_op_t o){
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
-#include <sys/stat.h>        /* stat/lstat/S_ISDIR（P1-6 统一临时文件） */
+#include <sys/stat.h>
+#include <sys/statvfs.h>        /* stat/lstat/S_ISDIR（P1-6 统一临时文件） */
 #include <sys/types.h>
 /* ---- P1-6（2026-11-08）：统一临时目录策略 ----
  * 优先级：IMGTOOL_TMPDIR → TMPDIR → <镜像同目录>/.imgtool-tmp。
@@ -92,31 +93,40 @@ static int mk_ok(const char *d){
     return access(d,W_OK|X_OK)==0;
 }
 static void host_rm_rf_dir(const char *path);   /* 见文件尾（P1-6） */
+/* ★ REQ-61 §3：来源标签（env / tmpdir / hint / fallback），供 sys.tmpdir 照实回报。
+ *   cached 从函数级 static 提到文件级，才能被 img_tmpdir_reset() 清掉。 */
+static char  g_tmp_cached[512];
+static char  g_tmp_source[16] = "none";
+const char *img_tmpdir_source(void){ img_tmpdir(); return g_tmp_source; }
+void img_tmpdir_reset(void){ g_tmp_cached[0]=0; g_tmp_source[0]=0; }
+
 const char *img_tmpdir(void){
-    static char cached[512];
+    char *cached = g_tmp_cached;
     if(cached[0]) return cached;
     const char *cand[4]; int nc = 0;
+    const char *tag[4];
     const char *e1 = getenv("IMGTOOL_TMPDIR"), *e2 = getenv("TMPDIR");
-    if(e1 && *e1) cand[nc++] = e1;
-    if(e2 && *e2) cand[nc++] = e2;
+    if(e1 && *e1){ cand[nc]=e1; tag[nc++]="env"; }
+    if(e2 && *e2){ cand[nc]=e2; tag[nc++]="tmpdir"; }
     /* 镜像同目录/.imgtool-tmp：hint 给了才试 */
     static char hintdir[1152];
     if(g_tmp_hint_done && g_tmp_hint[0]){
         size_t L=strlen(g_tmp_hint);
         while(L && g_tmp_hint[L-1]=='/') L--;
         snprintf(hintdir,sizeof hintdir,"%.*s/.imgtool-tmp",(int)L,g_tmp_hint);
-        cand[nc++] = hintdir;
+        cand[nc]=hintdir; tag[nc++]="hint";
     }
-    cand[nc++] = "/tmp";
+    cand[nc]="/tmp"; tag[nc++]="fallback";
     for(int i = 0; i < nc; i++){
         size_t L = strlen(cand[i]);
         while(L && cand[i][L-1] == '/') L--;
         if(!L) continue;
         if(L >= sizeof cached - 16) continue;
         memcpy(cached, cand[i], L); cached[L] = 0;
-        if(mk_ok(cached)) return cached;
+        if(mk_ok(cached)){ snprintf(g_tmp_source,sizeof g_tmp_source,"%s",tag[i]); return cached; }
         cached[0] = 0;
     }
+    g_tmp_source[0]=0;
     return NULL;
 }
 
@@ -265,10 +275,11 @@ static void host_rm_rf_dir(const char *path){
 }
 
 /* sweep 一次目录（内部共用） */
-static void tmp_sweep_one(const char *td){
-    if(!td || !*td) return;
+static int tmp_sweep_one(const char *td){
+    if(!td || !*td) return 0;
     DIR *d=opendir(td);
-    if(!d) return;
+    if(!d) return 0;
+    int removed=0;
     struct dirent *de;
     char victim[1200];
     while((de=readdir(d))){
@@ -281,14 +292,17 @@ static void tmp_sweep_one(const char *td){
         if(lstat(victim,&st)!=0) continue;
         if(S_ISDIR(st.st_mode)) host_rm_rf_dir(victim);
         else unlink(victim);
+        removed++;
     }
     closedir(d);
+    return removed;
 }
 /* ★ sweep 遍历【所有候选】而不是 img_tmpdir() 的缓存结果：
  *   hint 在命令解析时才设置，而 img_tmpdir() 有 static 缓存——
  *   第一条命令 sweep 时 hint 还没来。直接把每个可能的目录都扫一遍，
  *   哪个目录里藏着死 pid 的 imgtool-tmp-* 都能收走。 */
-void img_tmpdir_sweep(void){
+int img_tmpdir_sweep(void){
+    int total=0;
     const char *cand[6]; int nc=0;
     const char *e1=getenv("IMGTOOL_TMPDIR"), *e2=getenv("TMPDIR");
     if(e1 && *e1) cand[nc++]=e1;
@@ -301,5 +315,20 @@ void img_tmpdir_sweep(void){
         cand[nc++]=hintdir;
     }
     cand[nc++]="/tmp";
-    for(int i=0;i<nc;i++) tmp_sweep_one(cand[i]);
+    for(int i=0;i<nc;i++) total += tmp_sweep_one(cand[i]);
+    return total;
+}
+
+/* REQ-61 §3：临时目录所在卷的剩余空间（sys.tmpdir 用）。*/
+int img_tmpdir_free_bytes(uint64_t *out_free, uint64_t *out_total){
+    if(out_free) *out_free=0;
+    if(out_total) *out_total=0;
+    const char *td = img_tmpdir();
+    if(!td || !*td) return IMG_ESTATE;
+    struct statvfs vb;
+    if(statvfs(td,&vb)!=0) return IMG_EIO;
+    uint64_t bs=(uint64_t)vb.f_frsize ? (uint64_t)vb.f_frsize : (uint64_t)vb.f_bsize;
+    if(out_free)  *out_free  = (uint64_t)vb.f_bavail * bs;
+    if(out_total) *out_total = (uint64_t)vb.f_blocks * bs;
+    return IMG_OK;
 }

@@ -180,4 +180,10 @@ const char *img_dev_placeholder(void);
 const char *img_tmpfile(const char *purpose, char *out, size_t cap);
 int         img_tmpfile_dir(const char *purpose, char *out, size_t cap);   /* mkdtemp 目录 */
 void        img_tmpdir_hint(const char *dir);     /* 命令层填：镜像所在目录（可 NULL 清除） */
-void        img_tmpdir_sweep(void);               /* 清掉已死 pid 的 imgtool-tmp-* */
+/* REQ-61 §3：口径自查用。sweep 返回本次收走的条目数；
+   source 回报命中的哪一档（env / tmpdir / hint / fallback）；
+   reset 让下一次 img_tmpdir() 重新解析（env 中途变更时用）。 */
+int         img_tmpdir_sweep(void);
+const char *img_tmpdir_source(void);
+void        img_tmpdir_reset(void);
+int         img_tmpdir_free_bytes(uint64_t *out_free, uint64_t *out_total);
