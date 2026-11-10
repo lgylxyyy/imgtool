@@ -16,6 +16,7 @@ typedef struct {
 } img_trim_opts_t;
 
 typedef struct {
+    char     code[40];                /* 失败时的稳定错误码（空=成功）；见 REQ-66 §6 */
     char     fs[8];                   /* "ntfs" / "fat32" */
     uint64_t fs_cluster_bytes;        /* 客户机分配单元（NTFS/FAT 簇） */
     uint64_t host_cluster_bytes;      /* qcow2 簇 */

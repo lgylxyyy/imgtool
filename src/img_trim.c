@@ -65,32 +65,58 @@ int img_trim(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
     const bool punch = opts ? opts->punch   : true;
 
     /* ---------------- 门禁 ---------------- */
+    if(!q->writable){
+        snprintf(out->code, sizeof out->code, "TRIM-READONLY");
+        if(err&&errcap) snprintf(err,errcap,"映像是只读打开的");
+        return IMG_EREADONLY;
+    }
     if(q->fmt != DISK_FMT_QCOW2){
+        snprintf(out->code, sizeof out->code, "TRIM-NOT-QCOW2");
         if(err&&errcap) snprintf(err,errcap,"只有 qcow2 能原地清理（当前是 %s）",
                                  img_diskfmt_name(q->fmt));
         return IMG_ENOTSUP;
     }
     if(q->h.nb_snapshots){
+        snprintf(out->code, sizeof out->code, "TRIM-NOTSUP");
         if(err&&errcap) snprintf(err,errcap,"映像里有 %u 个快照：释放簇会改掉快照的历史数据，先合并或删除快照",
                                  q->h.nb_snapshots);
         return IMG_ENOTSUP;
     }
     if(q->h.backing_file_offset){
+        snprintf(out->code, sizeof out->code, "TRIM-NOTSUP");
         if(err&&errcap) snprintf(err,errcap,"映像是 backing 链的一层：我们读不到底层数据，空闲位图会算错");
         return IMG_ENOTSUP;
     }
     if(q->h.incompatible & IMG_QCOW2_INCOMPAT_DIRTY){
+        snprintf(out->code, sizeof out->code, "TRIM-STATE");
         if(err&&errcap) snprintf(err,errcap,"映像被标记为脏（上次没有正常关闭），先用 qemu-img check 修");
         return IMG_ESTATE;
     }
     if(q->h.incompatible & IMG_QCOW2_INCOMPAT_CORRUPT){
+        snprintf(out->code, sizeof out->code, "TRIM-STATE");
         if(err&&errcap) snprintf(err,errcap,"映像被标记为损坏，先用 qemu-img check 修");
         return IMG_ESTATE;
     }
     if(q->refcount_bits != 16 && q->refcount_bits != 32){
+        snprintf(out->code, sizeof out->code, "TRIM-NOTSUP");
         if(err&&errcap) snprintf(err,errcap,"refcount 位宽是 %u 位（只支持 16/32），不敢改",
                                  q->refcount_bits);
         return IMG_ENOTSUP;
+    }
+
+    /* 一致性自检：别名/越界/坏 L2 上再动元数据，只会把问题放大 */
+    {
+        img_qcow2_scan_t sc;
+        int src = img_qcow2_scan(q, &sc);
+        if(src != IMG_OK || sc.duplicate_refs || sc.out_of_range || sc.bad_l2){
+            snprintf(out->code, sizeof out->code, "TRIM-NEEDS-VERIFY");
+            if(err&&errcap) snprintf(err,errcap,
+                "映像自身不一致（别名 %llu / 越界 %llu / 坏 L2 %llu）：先用 qc.verify 看清楚",
+                (unsigned long long)sc.duplicate_refs,
+                (unsigned long long)sc.out_of_range,
+                (unsigned long long)sc.bad_l2);
+            return IMG_ESTATE;
+        }
     }
 
     const uint64_t cs = q->h.cluster_size;
@@ -168,6 +194,7 @@ int img_trim(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
         }
         fsname = "fat32";
     } else {
+        snprintf(out->code, sizeof out->code, "TRIM-FS-UNSUPPORTED");
         if(err&&errcap) snprintf(err,errcap,"这个分区既不是 NTFS 也不是 FAT32");
         return IMG_ENOTSUP;
     }

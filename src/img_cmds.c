@@ -8543,6 +8543,7 @@ static int cmd_img_trim(img_ctx *ctx, const img_args *in, img_result *out){
     img_span_end(&sp,rc);
     if(rc != IMG_OK){
         const char *code = (rc==IMG_ECANCELLED) ? "CMD-CANCELLED"
+                         : (r.code[0])          ? r.code
                          : (rc==IMG_ENOTSUP)    ? "TRIM-NOTSUP"
                          : (rc==IMG_ESTATE)     ? "TRIM-STATE"
                                                 : "TRIM-FAIL";
@@ -8561,6 +8562,10 @@ static int cmd_img_trim(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_u64(out,"compressed_clusters_skipped", r.compressed_skipped);
     img_result_u64(out,"alloc_before", r.alloc_before);
     img_result_u64(out,"alloc_after", r.alloc_after);
+    /* 打洞全失败 = 宿主不支持（/sdcard 常见）。不致命，但要如实报 */
+    img_result_bool(out,"punch_ok", r.punch_failed == 0);
+    if(r.punch_failed && !r.host_bytes_punched)
+        img_result_str(out,"punch_note","宿主文件系统不支持打洞，簇已释放但文件没变小");
     return IMG_OK;
 }
 
