@@ -678,10 +678,19 @@ static int dst_set_times(xep *d, const char *path, const img_src_meta *meta){
     return IMG_ENOTSUP;
 }
 
+/* ★ REQ-68：跨文件累计口径（wim.capture 的抽取阶段用；total_bytes==0 表示关闭）*/
+typedef struct {
+    uint64_t done;          /* 已完成的字节（前面所有文件之和）*/
+    uint64_t files;         /* 已开始的文件数 */
+    uint64_t total_bytes;   /* 整棵树的总字节（固定不变）*/
+    uint64_t total_files;
+} xagg;
+
 /* 写一个文件（目标已解析成完整路径）。out_* 可为 NULL。 */
 static int dst_write_file(xep *d, const char *final, const img_stream *src,
                           const img_src_meta *meta, const img_xcopy_opts *o,
-                          img_prog *prog, bool existed, uint64_t *out_size, bool *out_replaced){
+                          xagg *agg, img_prog *prog,
+                          bool existed, uint64_t *out_size, bool *out_replaced){
     if(out_size) *out_size=meta->size;
     if(out_replaced) *out_replaced=existed;
     if(d->loc.kind==IMG_XK_ARCHIVE){
@@ -729,8 +738,21 @@ static int dst_write_file(xep *d, const char *final, const img_stream *src,
         uint8_t *buf=(uint8_t*)malloc(CH);
         int rc=buf?IMG_OK:IMG_ENOMEM;
         uint64_t off=0;
-        if(prog){ img_prog_phase(prog,IMG_PH_EXTRACT,"复制文件");
-                  img_prog_op(prog,IMG_OP_WRITE); img_prog_bytes(prog,0,meta->size); }
+        /* ★ REQ-68：聚合模式把"当前文件已拷"报成"整棵树已拷"，
+         *   这样 totalBytes 全程不变（App 的 ETA 才不会被单文件大小带跑）。*/
+        const bool agg_on = (agg && agg->total_bytes > 0);
+        uint64_t base = agg ? agg->done : 0;
+        if(prog){
+            img_prog_phase(prog,IMG_PH_EXTRACT,"复制文件");
+            img_prog_op(prog,IMG_OP_WRITE);
+            if(agg_on){
+                agg->files++;
+                img_prog_count(prog, agg->files, agg->total_files);
+                img_prog_bytes(prog, base, agg->total_bytes);
+            }else{
+                img_prog_bytes(prog,0,meta->size);
+            }
+        }
         while(rc==IMG_OK && off<meta->size){
             if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
             size_t want=(size_t)((meta->size-off<CH)?(meta->size-off):CH);
@@ -746,7 +768,8 @@ static int dst_write_file(xep *d, const char *final, const img_stream *src,
             }
             if(rc!=IMG_OK) break;
             off+=got;
-            if(prog) img_prog_bytes(prog,off,meta->size);
+            if(prog) img_prog_bytes(prog, agg_on ? base+off : off,
+                                    agg_on ? agg->total_bytes : meta->size);
         }
         free(buf);
         if(close(fd)!=0 && rc==IMG_OK) rc=IMG_EIO;
@@ -754,6 +777,7 @@ static int dst_write_file(xep *d, const char *final, const img_stream *src,
         if(rc!=IMG_OK){ unlink(tmp); return rc; }
         if(rename(tmp,final)!=0){ unlink(tmp); return IMG_EIO; }
         if(o->preserve_times) (void)dst_set_times(d,final,meta);
+        if(agg) agg->done = base + meta->size;
         return IMG_OK;
     }
     return IMG_ENOTSUP;
@@ -845,6 +869,7 @@ typedef struct {
     img_prog *prog;
     img_xcopy_stats *st;
     int max_depth;
+    xagg agg;                  /* REQ-68：跨文件累计（total_bytes>0 时启用）*/
 } xctx;
 
 static int copy_node(xctx *c, const char *spath, const char *dpath, int depth, bool top);
@@ -1118,7 +1143,7 @@ static int copy_file(xctx *c, const char *spath, const char *dpath, bool top){
     if(rc!=IMG_OK){ c->st->side=1; return rc; }
     if(c->prog) img_prog_item(c->prog,spath);
     bool replaced=false;
-    rc=dst_write_file(c->d,target,&st,&meta,c->o,c->prog,existed,NULL,&replaced);
+    rc=dst_write_file(c->d,target,&st,&meta,c->o,&c->agg,c->prog,existed,NULL,&replaced);
     src_close_stream(c->s,holder);
     if(rc!=IMG_OK){ c->st->side=2; return rc; }
     /* NTFS → NTFS 保留命名数据流（ADS）；FAT/宿主没有这个概念，只能丢弃。*/
@@ -1147,9 +1172,12 @@ static int copy_file(xctx *c, const char *spath, const char *dpath, bool top){
 static int x_excluded(const img_xcopy_opts *o, const char *name){
     if(!o || !name || !*name) return 0;
     if(o->skip_trashed && !strncmp(name,".trashed-",9)) return 1;
-    for(int i=0;i<o->n_exclude;i++)
-        if(fnmatch(o->exclude[i],name,0)==0) return 2;
-    return 0;
+    /* ★ REQ-67：与 wim.capture / archive.create 共用 img_name_match_any()，
+     *   规则只写一处（含"无通配时大小写不敏感"）。*/
+    const char *pv[IMG_XCOPY_EXCL_MAX];
+    int n=0;
+    for(int i=0;i<o->n_exclude && i<IMG_XCOPY_EXCL_MAX;i++) pv[n++]=o->exclude[i];
+    return img_name_match_any(pv,n,name) ? 2 : 0;
 }
 
 static int copy_dir(xctx *c, const char *spath, const char *dpath, int depth, bool top){
@@ -1331,6 +1359,8 @@ int img_xcopy_run(const img_xloc *src, const img_xloc *dst,
     {
         xctx c; memset(&c,0,sizeof c);
         c.s=&se; c.d=&de; c.o=&o; c.prog=prog; c.st=st; c.max_depth=o.max_depth;
+        /* REQ-68：聚合口径（copy 命令不传 → total_bytes=0 不启用）*/
+        c.agg.total_bytes=o.agg_bytes_total; c.agg.total_files=o.agg_files_total;
         /* ★ REQ-41：目标是压缩包 → 先开临时包（可能已把旧条目搬进来），复制走同一套
          *   copy_node；成功才 rename，失败/取消临时文件删掉、原包字节不变。*/
         if(de.loc.kind==IMG_XK_ARCHIVE){
@@ -1517,6 +1547,7 @@ int img_xmove_run(const img_xloc *src, const img_xloc *dst,
         img_xcopy_opts co={ o.conflict, o.recursive, o.preserve_times, o.create_parents, false, o.max_depth, false, {{0}}, 0 };
         xctx c; memset(&c,0,sizeof c);
         c.s=&se; c.d=&de; c.o=&co; c.prog=prog; c.max_depth=o.max_depth;
+        c.agg.total_bytes=co.agg_bytes_total; c.agg.total_files=co.agg_files_total;
         img_xcopy_stats tmp; memset(&tmp,0,sizeof tmp); c.st=&tmp;
 
         img_src_meta meta; bool isdir=false;

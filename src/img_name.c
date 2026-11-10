@@ -1,7 +1,32 @@
 /* img_name.c — Windows 文件名合法性（规则见 img_name.h） */
 #include "img_name.h"
+#include <fnmatch.h>
 #include <stdio.h>
 #include <string.h>
+
+static int ascii_fold(int c){
+    return (c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c;
+}
+static int ieq(const char *a, const char *b){
+    if(!a || !b) return 0;
+    while(*a && *b){
+        if(ascii_fold((unsigned char)*a) != ascii_fold((unsigned char)*b)) return 0;
+        a++; b++;
+    }
+    return *a == 0 && *b == 0;
+}
+
+int img_name_match_any(const char *const *pats, int n, const char *name){
+    if(!pats || n <= 0 || !name || !*name) return 0;
+    for(int i = 0; i < n; i++){
+        const char *p = pats[i];
+        if(!p || !*p) continue;
+        if(fnmatch(p, name, 0) == 0) return 1;
+        /* 无通配的名字：NTFS/FAT 语义是不区分大小写 */
+        if(!strpbrk(p, "*?[" ) && ieq(p, name)) return 1;
+    }
+    return 0;
+}
 
 static bool bad_char(unsigned char c){
     if(c < 0x20) return true;              /* 控制字符：Win32 一律不接受 */

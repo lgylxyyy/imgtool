@@ -16,6 +16,7 @@
 #include "img_text.h"
 #include "img_event.h"
 #include <stdio.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>   /* isatty / write */
@@ -306,6 +307,10 @@ static void json_esc(const char *s, char *out, size_t cap){
     }
     out[k]=0;
 }
+/* ★ 2026-11-10（REQ-68 §3.3）：Ctrl-C = 取消，不是"直接死"。
+ *   取消标志由各检查点协作式退出；wim.capture 的 wimlib 回调也会读它。*/
+static void on_sigint(int sig){ (void)sig; img_cancel(); }
+
 static void on_progress_json(void *ud, const img_progress_t *p){
     (void)ud;
     if(!p) return;
@@ -315,11 +320,14 @@ static void on_progress_json(void *ud, const img_progress_t *p){
     int n=snprintf(line,sizeof line,
         "{\"ev\":\"progress\",\"phase\":\"%s\",\"op\":\"%s\","
         "\"cur\":%llu,\"total\":%llu,\"cur_bytes\":%llu,\"total_bytes\":%llu,\"pct\":%d,"
+        "\"overall_pct\":%d,\"overall_cur_bytes\":%llu,\"overall_total_bytes\":%llu,"
         "\"item\":\"%s\"",
         ph?ph:"", op?op:"",
         (unsigned long long)p->cur,(unsigned long long)p->total,
         (unsigned long long)p->cur_bytes,(unsigned long long)p->total_bytes,
-        p->pct, it);
+        p->pct,
+        p->overall_pct, (unsigned long long)p->overall_cur_bytes,
+        (unsigned long long)p->overall_total_bytes, it);
     if(p->eta_s>=0 && n>0 && n<(int)sizeof line-16)
         n+=snprintf(line+n,sizeof line-(size_t)n,",\"eta_s\":%d",p->eta_s);
     if(n>0 && n<(int)sizeof line-4) n+=snprintf(line+n,sizeof line-(size_t)n,"}\n");
@@ -493,6 +501,7 @@ int main(int argc, char **argv){
     /* ★ 先判命令存在，再打开 --img：否则旧命令名 + 不存在的镜像会报
      *   IMG-OPEN-FAIL，看起来像"镜像坏了"，而不是"命令没了"。
      *   放在 ui/卡片上下文初始化之后，保证卡片也有建议文案。*/
+    signal(SIGINT, on_sigint);
     if(!img_cmd_find(cmd)){
         img_result r; img_result_begin(&r,cmd);
         img_result_fail(&r,IMG_ENOENT,"CMD-NOTFOUND",cmd,"没有这个命令",

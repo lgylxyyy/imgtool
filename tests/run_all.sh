@@ -58,6 +58,7 @@ run "limits-test（尺寸口径/extra-mb/part.add·remove·resize/win-mb/extende
 run "compact-label-test（紧凑另存 img.compact + 只改卷标 48 条）" python3 "$ROOT/tests/compact-label-test.py"
 run "format_twice_test（同进程连续两次格式化 NTFS，不许崩）" "$ROOT/build/tests/format_twice_test"
 [ -x "$ROOT/build/tests/wimcodes_test" ] && run "wimcodes_test（wimlib 错误码 → 枚举名/中文；REQ-48 §1）" "$ROOT/build/tests/wimcodes_test"
+[ -x "$ROOT/build/tests/progress_test" ] && run "progress_test（进度/ETA 口径：换阶段清零、字节优先；REQ-68）" "$ROOT/build/tests/progress_test"
 run "parttable-test（分区表导出/应用 + 空 MBR 30 条）" python3 "$ROOT/tests/parttable-test.py"
 run "iso-wim-test（ISO 直灌 + 多 install.wim + 恢复分区 + arch + wim.ls 40 条）" python3 "$ROOT/tests/iso-wim-test.py"
 run "soload-test（共享库必须 dlopen 得动；REQ-18 门禁）" python3 "$ROOT/tests/soload-test.py"
@@ -172,6 +173,7 @@ run "vhd-fault-test（N6-3：任意一步失败后映像仍可用、已提交数
 run "vhd-test（VHD 建盘、多块写入、重开与 QEMU 互验）"         python3 "$ROOT/tests/vhd-test.py"
 run "bigdir-wim-test（REQ-65：单目录 >256 条、宽树估算不截断）" python3 "$ROOT/tests/bigdir-wim-test.py"
 run "wim-capture-test（捕获、临时目录清理、产物可读）"          bash "$ROOT/tests/wim-capture-test.sh"
+run "wim-exclude-test（REQ-67：--exclude 同口径 + extract/pack/write 三段进度）" python3 "$ROOT/tests/wim-exclude-test.py"
 run "provenance-test（内置模板 == 微软原件；缺原件则跳过）"   bash "$ROOT/tests/provenance-test.sh"
 run "style-check（用户可见文本符合 STYLE-GUIDE）"           python3 "$ROOT/tests/style-check.py"
 

@@ -8492,6 +8492,23 @@ static int cmd_reg_del(img_ctx *ctx, const img_args *in, img_result *out){
 }
 
 /* ================= wim.capture（P4）：qcow2 → WIM ================= */
+/* --exclude 的逗号列表 → 定长数组（copy / wim.capture 共用一份解析，
+ * 免得一处改了另一处没改）。返回条数；空白会被裁掉，超长条目丢弃。*/
+static int parse_excl_csv(const char *s, char (*out)[128], int cap){
+    int n=0;
+    const char *p=s;
+    while(p && *p && n<cap){
+        const char *c=strchr(p,',');
+        size_t len=c?(size_t)(c-p):strlen(p);
+        while(len && (*p==' '||*p=='\t')){ p++; len--; }
+        while(len && (p[len-1]==' '||p[len-1]=='\t')) len--;
+        if(len && len<128){ memcpy(out[n],p,len); out[n][len]=0; n++; }
+        if(!c) break;
+        p=c+1;
+    }
+    return n;
+}
+
 static const img_arg A_WIMCAP[] = {
     {"img",        IMG_A_STR,  true,  NULL, "源映像（qcow2 / vhd / vmdk / raw）", NULL},
     {"lba",        IMG_A_U64,  true,  NULL, "系统分区（NTFS）起始 LBA", chk_lba},
@@ -8502,6 +8519,8 @@ static const img_arg A_WIMCAP[] = {
     {"desc",       IMG_A_STR,  false, NULL, "映像描述", NULL},
     {"capture-acl",IMG_A_BOOL, false, "true","保留 ACL（默认 true）", NULL},
     {"estimate",   IMG_A_BOOL, false, "false","只估算（不抽文件、不打 WIM）", NULL},
+    {"exclude",    IMG_A_STR,  false, NULL, "逗号分隔的 basename 通配（* ? []）；estimate 与实捕同口径", NULL},
+    {"exclude-default", IMG_A_BOOL, false, "true","默认排掉 pagefile.sys / hiberfil.sys / swapfile.sys", NULL},
 };
 static int cmd_wim_capture(img_ctx *ctx, const img_args *in, img_result *out){
     /* ★ 必须显式闸：wimlib 关掉时 img_wim_capture.c 不参与编译，
@@ -8526,23 +8545,9 @@ static int cmd_wim_capture(img_ctx *ctx, const img_args *in, img_result *out){
             pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
     if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在",NULL); return IMG_EINVAL; }
 
-    if(est_only){
-        uint64_t bytes=0, files=0; char err[256]="";
-        rc = img_wim_capture_estimate(img_ctx_path(ctx), lba, pb, sub, &bytes, &files, err, sizeof err);
-        if(rc != IMG_OK){
-            img_result_fail(out,rc,"WIM-ESTIMATE-FAIL",img_ctx_path(ctx),err,NULL);
-            return rc;
-        }
-        img_result_u64(out,"bytes_needed",bytes);
-        img_result_u64(out,"files",files);
-        img_result_u64(out,"bytes_needed_mb",(bytes+1048575)/1048576);
-        return IMG_OK;
-    }
-
-    if(!outw || !*outw){
-        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","out","必须给输出 WIM 路径",NULL);
-        return IMG_EINVAL;
-    }
+    /* ★ REQ-67：压缩类型与排除规则只解析一次，estimate 与实捕都读同一个 o ——
+     *   上一版 estimate 走 img_du、实捕走 img_xcopy，各有一套口径，
+     *   于是出现"算 11.7 GB、实捕 7.8 GB"。*/
     img_wim_comp c = IMG_WIM_COMP_XPRESS;
     if(!strcasecmp(comp,"none")) c = IMG_WIM_COMP_NONE;
     else if(!strcasecmp(comp,"lzx")) c = IMG_WIM_COMP_LZX;
@@ -8551,13 +8556,35 @@ static int cmd_wim_capture(img_ctx *ctx, const img_args *in, img_result *out){
         img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","comp","只接受 none|xpress|lzx|lzms",NULL);
         return IMG_EINVAL;
     }
-
     img_wim_capture_opts_t o;
     memset(&o,0,sizeof o);
     o.comp = c;
     o.image_name = img_args_get(in,"name");
     o.image_desc = img_args_get(in,"desc");
     o.capture_acl = img_args_bool(in,"capture-acl",true);
+    o.use_default_exclude = img_args_bool(in,"exclude-default",true);
+    o.n_exclude = parse_excl_csv(img_args_get(in,"exclude"), o.exclude, IMG_WIM_EXCL_MAX);
+
+    if(est_only){
+        uint64_t bytes=0, files=0, excl=0; char err[256]="";
+        rc = img_wim_capture_estimate(img_ctx_path(ctx), lba, pb, sub, &o,
+                                      &bytes, &files, &excl, err, sizeof err);
+        if(rc != IMG_OK){
+            img_result_fail(out,rc,"WIM-ESTIMATE-FAIL",img_ctx_path(ctx),err,NULL);
+            return rc;
+        }
+        img_result_u64(out,"bytes_needed",bytes);
+        img_result_u64(out,"files",files);
+        img_result_u64(out,"bytes_needed_mb",(bytes+1048575)/1048576);
+        img_result_u64(out,"excluded",excl);
+        img_result_bool(out,"exclude_default",o.use_default_exclude);
+        return IMG_OK;
+    }
+
+    if(!outw || !*outw){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","out","必须给输出 WIM 路径",NULL);
+        return IMG_EINVAL;
+    }
 
     img_wim_capture_result_t r;
     char err[256]="";
@@ -8566,6 +8593,11 @@ static int cmd_wim_capture(img_ctx *ctx, const img_args *in, img_result *out){
     rc = img_wim_capture(img_ctx_path(ctx), lba, pb, sub, outw, &o, &r, img_cmd_prog(), err, sizeof err);
     img_span_end(&sp,rc);
     if(rc != IMG_OK){
+        /* ★ REQ-68 §3.3：取消走既有约定 CMD-CANCELLED，别报成"捕获失败" */
+        if(rc == IMG_ECANCELLED){
+            img_result_fail(out,rc,"CMD-CANCELLED",outw,err[0]?err:"已取消",NULL);
+            return rc;
+        }
         const char *code = (rc==IMG_ENOTSUP)?"WIM-CAP-NOTSUP"
                          : (rc==IMG_ESTATE)  ?"WIM-CAP-SRC-BAD"
                                              :"WIM-CAP-FAIL";
@@ -8578,6 +8610,8 @@ static int cmd_wim_capture(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_u64(out,"files",r.files);
     img_result_u64(out,"dirs",r.dirs);
     img_result_u64(out,"skipped",r.skipped);   /* REQ-65 Q1：跳过的重解析点个数 */
+    img_result_u64(out,"excluded",r.excluded); /* REQ-67：被 --exclude/默认名单排掉的条目数 */
+    img_result_bool(out,"exclude_default",o.use_default_exclude);
     img_result_u64(out,"bytes_in",r.bytes_in);
     img_result_u64(out,"bytes_out",r.bytes_out);
     img_result_u64(out,"tmpdir_need",r.tmpdir_need);
@@ -8885,27 +8919,13 @@ static int cmd_copy(img_ctx *ctx, const img_args *in, img_result *out){
     if(o.max_depth<1) o.max_depth=32;
     if(o.max_depth>256) o.max_depth=256;
     const char *ex=img_args_get(in,"exclude");
-    if(ex && *ex){
-        const char *p=ex;
-        while(*p && o.n_exclude<16){
-            const char *c=strchr(p,',');
-            size_t n=c?(size_t)(c-p):strlen(p);
-            while(n && (*p==' '||*p=='\t')){ p++; n--; }
-            while(n && (p[n-1]==' '||p[n-1]=='\t')) n--;
-            if(n && n<sizeof o.exclude[0]){
-                memcpy(o.exclude[o.n_exclude],p,n); o.exclude[o.n_exclude][n]=0;
-                o.n_exclude++;
-            }
-            if(!c) break;
-            p=c+1;
-        }
-    }
+    if(ex && *ex) o.n_exclude = parse_excl_csv(ex, o.exclude, IMG_XCOPY_EXCL_MAX);
     const char *exf=img_args_get(in,"exclude-from");
     if(exf && *exf){
         FILE *fp=fopen(exf,"r");
         if(!fp){ img_result_fail(out,IMG_ENOENT,"SRC-NOTFOUND",exf,"排除清单无法打开",NULL); return IMG_ENOENT; }
         char line[256];
-        while(fgets(line,sizeof line,fp) && o.n_exclude<16){
+        while(fgets(line,sizeof line,fp) && o.n_exclude<IMG_XCOPY_EXCL_MAX){
             char *nl=strchr(line,'\n'); if(nl) *nl=0;
             char *p0=line; while(*p0==' '||*p0=='\t') p0++;
             size_t n=strlen(p0);

@@ -15,6 +15,7 @@
 #include "img_iso.h"
 #include "img_wim_fs.h"
 #include "img_archive.h"
+#include "img_name.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -44,6 +45,7 @@ typedef struct {
     bool          follow;
     img_prog     *prog;
     img_du_stats *st;
+    const img_du_opts *o;      /* REQ-67：排除规则（可为 NULL）*/
 } ducx;
 
 typedef struct { char path[2048]; int depth; } du_dirq;
@@ -77,6 +79,24 @@ static void du_join(const char *dir, const char *name, char *out, size_t cap){
     else snprintf(out,cap,"%s/%s",dir,name?name:"");
 }
 
+/* REQ-67：命中的条目直接不计数（目录也不入栈 → 整棵子树不算）。
+ * 与 copy / wim.capture 用同一个匹配器，口径不会分叉。*/
+static int du_excl(ducx *c, const char *name){
+    if(!c->o || c->o->n_exclude <= 0 || !name || !*name) return 0;
+    if(img_name_match_any(c->o->exclude, c->o->n_exclude, name)){
+        c->st->excluded++;
+        return 1;
+    }
+    return 0;
+}
+
+/* basename（最后一个 '/' 之后）；没有 '/' 时返回原串 */
+static const char *du_base(const char *path){
+    if(!path) return "";
+    const char *s = strrchr(path, '/');
+    return s ? s+1 : path;
+}
+
 /* ---------- 宿主 ---------- */
 static int du_host(ducx *c, const char *path, int depth){
     DIR *d=opendir(path);
@@ -85,6 +105,7 @@ static int du_host(ducx *c, const char *path, int depth){
     int rc=IMG_OK;
     while((de=readdir(d))){
         if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue;
+        if(du_excl(c,de->d_name)) continue;
         if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
         if(du_hit(c)){ c->st->truncated=true; break; }
         char full[4096]; du_join(path,de->d_name,full,sizeof full);
@@ -120,6 +141,7 @@ typedef struct {
 static void du_ntfs_cb(void *ud, const img_ntfs_ent_t *e){
     du_ntfs_ctx *x=(du_ntfs_ctx*)ud;
     if(x->rc!=IMG_OK) return;
+    if(du_excl(x->c, e->name?e->name:"")) return;      /* REQ-67 */
     if(img_cancelled()){ x->rc=IMG_ECANCELLED; return; }
     if(du_hit(x->c)){ x->c->st->truncated=true; return; }
     char full[2048]; du_join(x->cur,e->name?e->name:"",full,sizeof full);
@@ -150,6 +172,7 @@ typedef struct {
 static void du_fat_cb(void *ud, const img_fat32_ent_t *e){
     du_fat_ctx *x=(du_fat_ctx*)ud;
     if(x->rc!=IMG_OK) return;
+    if(du_excl(x->c, e->name?e->name:"")) return;      /* REQ-67 */
     if(img_cancelled()){ x->rc=IMG_ECANCELLED; return; }
     if(du_hit(x->c)){ x->c->st->truncated=true; return; }
     char full[2048]; du_join(x->cur,e->name?e->name:"",full,sizeof full);
@@ -180,6 +203,7 @@ static void du_iso_cb(void *ud, const char *name, bool is_dir, uint64_t size, ui
     (void)mtime;
     du_iso_ctx *x=(du_iso_ctx*)ud;
     if(x->rc!=IMG_OK) return;
+    if(du_excl(x->c, name)) return;                     /* REQ-67 */
     if(img_cancelled()){ x->rc=IMG_ECANCELLED; return; }
     if(du_hit(x->c)){ x->c->st->truncated=true; return; }
     char full[2048]; du_join(x->cur,name,full,sizeof full);
@@ -203,6 +227,7 @@ static void du_wim_cb(void *ud, const char *name, const char *full, bool is_dir,
     (void)name;(void)attrs;(void)depth;(void)mtime;
     du_wim_ctx *u=(du_wim_ctx*)ud;
     if(!u) return;
+    if(du_excl(u->c, du_base(full))) return;            /* REQ-67 */
     if(du_hit(u->c)){ u->c->st->truncated=true; return; }
     if(full && u->self && !strcasecmp(full,u->self)) return;   /* --src 自己不算一项 */
     du_tick(u->c,full);
@@ -216,6 +241,7 @@ typedef struct { ducx *c; const char *self; } du_arc_ctx;
 static void du_arc_cb(void *ud, const img_archive_ent *e){
     du_arc_ctx *u=(du_arc_ctx*)ud;
     if(!u || !e) return;
+    if(du_excl(u->c, du_base(e->path))) return;         /* REQ-67 */
     if(u->c->limit && u->c->st->scanned>=u->c->limit){ u->c->st->truncated=true; return; }
     if(u->self && !strcmp(e->path,u->self)) return;
     du_tick(u->c,e->path);
@@ -225,12 +251,18 @@ static void du_arc_cb(void *ud, const img_archive_ent *e){
 
 int img_du_run(const img_path *p, uint64_t limit, int max_depth, bool follow,
                img_prog *prog, img_du_stats *st, char *err, size_t errcap){
+    return img_du_run_ex(p, limit, max_depth, follow, NULL, prog, st, err, errcap);
+}
+
+int img_du_run_ex(const img_path *p, uint64_t limit, int max_depth, bool follow,
+                  const img_du_opts *o, img_prog *prog, img_du_stats *st,
+                  char *err, size_t errcap){
     if(err&&errcap) err[0]=0;
     if(!p||!st) return IMG_EINVAL;
     memset(st,0,sizeof *st);
     ducx c; memset(&c,0,sizeof c);
     c.p=(img_path*)p; c.limit=limit; c.max_depth=max_depth; c.follow=follow;
-    c.prog=prog; c.st=st;
+    c.prog=prog; c.st=st; c.o=o;
     if(prog){ img_prog_phase(prog,IMG_PH_BROWSE,"统计大小"); img_prog_op(prog,IMG_OP_SCAN); }
 
     switch(p->kind){

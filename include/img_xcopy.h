@@ -51,6 +51,8 @@ typedef struct {
     char      path[2048];  /* 文件系统内绝对路径 / 宿主绝对路径 */
 } img_xloc;
 
+#define IMG_XCOPY_EXCL_MAX 24      /* --exclude 名单上限（默认 3 条 + 用户 16 条够用）*/
+
 typedef struct {
     int  conflict;         /* IMG_COPY_FAIL / OVERWRITE / RENAME（见 img_ntfs_fs.h） */
     bool recursive;        /* 源是目录时必须为 true */
@@ -62,8 +64,12 @@ typedef struct {
      * 只作用于【递归进入的子项】的 basename；顶层 --src 自身永远不参与排除
      * （用户手动选中 .trashed-* 导出时，必须能复制出去）。大小写敏感。*/
     bool skip_trashed;                 /* .trashed-* 前缀跳过（copy 默认 true；move 恒 false）*/
-    char exclude[16][128];             /* basename 通配（fnmatch：* ? []）*/
+    char exclude[IMG_XCOPY_EXCL_MAX][128];   /* basename 通配（fnmatch：* ? []）*/
     int  n_exclude;
+    /* ★ REQ-68：跨文件累计口径（wim.capture 的抽取阶段用）。
+     *   0 = 关闭，保持 copy 命令"按单文件报"的现有行为。*/
+    uint64_t agg_bytes_total;
+    uint64_t agg_files_total;
 } img_xcopy_opts;
 
 typedef struct {

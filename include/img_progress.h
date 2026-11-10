@@ -14,7 +14,11 @@ typedef struct img_prog img_prog;
 img_prog *img_prog_new(img_progress_cb cb, void *ud, int throttle_ms);
 void      img_prog_free(img_prog *p);
 
-/* 设置当前阶段/操作（变化时会【立即】触发一次上报） */
+/* 设置当前阶段/操作（变化时会【立即】触发一次上报）
+ * ★ 2026-11-10（REQ-67 + 释放进度）：phase 变化会把 cur/total/cur_bytes/total_bytes
+ *   【归零】并重置速率窗口。原因：以前换阶段只换名字，数值留着 ——
+ *   wim.apply 里格式化阶段留下的 3/3 被 extract 拿去用，第一帧就报 pct=100
+ *   （App 显示成"直接跳到 95%"），随后又掉回 2%。调用方约定：先 phase，再设数值。 */
 void img_prog_phase(img_prog *p, img_phase_t ph, const char *msg);
 void img_prog_op(img_prog *p, img_op_t op);
 
@@ -32,6 +36,10 @@ void img_prog_bytes_kind(img_prog *p, const char *kind,
 
 /* 手动强制上报（如里程碑） */
 void img_prog_emit(img_prog *p);
+
+/* 阶段收尾：把当前 phase 的 pct 补到 100 并发一条（REQ-68 §3.2）。
+ * 在"换 phase"之前调；不改变 total 口径，只把 cur 顶到 total。 */
+void img_prog_seal(img_prog *p, const char *msg);
 
 /* 必发的 100% 完成事件（模块退出时调用） */
 void img_prog_done(img_prog *p, const char *msg);

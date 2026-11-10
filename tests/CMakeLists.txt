@@ -59,6 +59,10 @@ target_link_libraries(thread_test PRIVATE imgtool)
 add_executable(cancel_test cancel_test.c)
 target_link_libraries(cancel_test PRIVATE imgtool)
 
+# 进度/ETA 口径（REQ-67：阶段清零、字节优先、ETA 同单位）
+add_executable(progress_test progress_test.c)
+target_link_libraries(progress_test PRIVATE imgtool)
+
 if(IMG_WITH_WIM)
   add_executable(wim_apply_test wim_apply_test.c)
   target_link_libraries(wim_apply_test PRIVATE imgtool)   # 原来写在外层，WIM=OFF 时链接不存在的目标

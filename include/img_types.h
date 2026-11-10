@@ -101,6 +101,8 @@ typedef enum {
     IMG_PH_BCD        = 10,   /* BCD 操作 */
     IMG_PH_EXTRACT    = 11,   /* 解压 WIM/ISO */
     IMG_PH_COPY       = 12,   /* 拷贝文件 */
+    IMG_PH_PACK       = 13,   /* 打包（扫描源树、建索引）—— wim.capture 第二段 */
+    IMG_PH_WRITE      = 14,   /* 写出成品（压缩落盘）—— wim.capture 第三段 */
 } img_phase_t;
 
 typedef enum {

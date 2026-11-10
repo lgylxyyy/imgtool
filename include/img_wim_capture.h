@@ -30,11 +30,19 @@ typedef enum {
     IMG_WIM_COMP_LZMS        /* LZMS（ESD 用，压缩率最高，慢）*/
 } img_wim_comp;
 
-typedef struct {    img_wim_comp comp;
+#define IMG_WIM_EXCL_MAX 16
+
+typedef struct {
+    img_wim_comp comp;
     const char  *image_name;    /* 映像名（默认 "Windows"）*/
     const char  *image_desc;    /* 映像描述（可 NULL）*/
     bool         capture_acl;   /* 是否保留 ACL（默认 true）*/
     uint64_t     tmpdir_need;   /* 输出：估算需要的临时空间（字节）*/
+    /* ★ 2026-11-10（REQ-67）：估算与实捕必须同一套排除规则，否则
+     *   "算 11.7 GB、实捕 7.8 GB" 又会回来。*/
+    bool         use_default_exclude;              /* 默认 true：排掉 pagefile/hiberfil/swapfile */
+    char         exclude[IMG_WIM_EXCL_MAX][128];   /* basename 通配（* ? []）*/
+    int          n_exclude;
 } img_wim_capture_opts_t;
 
 typedef struct {
@@ -44,6 +52,7 @@ typedef struct {
     uint64_t bytes_out;         /* WIM 字节 */
     uint64_t tmpdir_need;       /* 估算需要的临时空间（= bytes_in）*/
     uint64_t skipped;      /* 跳过的重解析点（junction/符号链接）个数 */
+    uint64_t excluded;     /* 被 --exclude 规则排除的条目数（REQ-67）*/
 } img_wim_capture_result_t;
 
 /* 从 qcow2 的某个 NTFS 分区捕获成 WIM。
@@ -60,10 +69,18 @@ int img_wim_capture(const char *img_path, uint64_t lba, uint64_t part_bytes,
                     img_wim_capture_result_t *out,
                     img_prog *prog, char *err, size_t errcap);
 
-/* 估算捕获需要多少临时空间（只读，扫 NTFS 全树，不抽文件）*/
+/* 估算捕获需要多少临时空间（只读，扫 NTFS 全树，不抽文件）
+ * ★ opts 里的排除规则必须与实捕一致（REQ-67），否则两次口径不同。 */
 int img_wim_capture_estimate(const char *img_path, uint64_t lba, uint64_t part_bytes,
-                             const char *src_subdir, uint64_t *out_bytes,
-                             uint64_t *out_files, char *err, size_t errcap);
+                             const char *src_subdir,
+                             const img_wim_capture_opts_t *opts,
+                             uint64_t *out_bytes, uint64_t *out_files,
+                             uint64_t *out_excluded,
+                             char *err, size_t errcap);
+
+/* 内置默认可省文件（REQ-67 Q3）：Windows 开机自己重建，写进 WIM 毫无意义。
+ * 返回静态名单，*n 为条数。 */
+const char *const *img_wim_default_exclude(int *n);
 
 const char *img_wim_comp_name(img_wim_comp c);
 

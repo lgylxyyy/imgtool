@@ -36,6 +36,15 @@ const char *img_name_status_id(img_name_status s);
 /* 中文短原因，直接放进 err.at 给用户看；非法名字会被截断到 64 字节。 */
 const char *img_name_reason(img_name_status s, const char *name);
 
+/* ★ 2026-11-10（REQ-67）：--exclude 的【唯一实现】。
+ *   copy / archive.create / wim.capture 以前各写一遍，语义迟早分叉；
+ *   现在都走这里，写一条规则只改一处。
+ *   · 逐个 pattern 做 fnmatch(pat, name, 0)：支持 * ? []
+ *   · pattern 里没有通配符时，再按 ASCII 大小写不敏感比一次
+ *     （NTFS/FAT 上 pagefile.sys 与 PageFile.Sys 是同一个文件）
+ *   返回 1 = 命中（应排除），0 = 不命中。 */
+int img_name_match_any(const char *const *pats, int n, const char *name);
+
 #ifdef __cplusplus
 }
 #endif

@@ -45,6 +45,8 @@ const char *img_phase_name(img_phase_t p){
     case IMG_PH_BCD:       return "bcd";
     case IMG_PH_EXTRACT:   return "extract";
     case IMG_PH_COPY:      return "copy";
+    case IMG_PH_PACK:      return "pack";
+    case IMG_PH_WRITE:     return "write";
     default:               return "?";
     }
 }

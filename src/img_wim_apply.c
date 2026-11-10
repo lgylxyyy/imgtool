@@ -21,7 +21,7 @@
 #include "img_wimlib_codes.h"
 
 /* wimlib 进度 → img_prog */
-struct cb_ctx { img_prog *p; };
+struct cb_ctx { img_prog *p; uint64_t total_bytes; };
 static enum wimlib_progress_status on_progress(enum wimlib_progress_msg msg,
                                                union wimlib_progress_info *info, void *ctx){
     /* ★ 第一件事：喂看门狗。
@@ -46,16 +46,26 @@ static enum wimlib_progress_status on_progress(enum wimlib_progress_msg msg,
     case WIMLIB_PROGRESS_MSG_EXTRACT_STREAMS:
         img_prog_phase(c->p, IMG_PH_EXTRACT, "解压文件数据");
         img_prog_op(c->p, IMG_OP_DECOMPRESS);
-        img_prog_bytes(c->p, info->extract.completed_bytes, info->extract.total_bytes);
-        /* REQ-49 §3：这就是"解压+写入"的总工作量 → 直接当全局进度（单调） */
-        img_prog_overall(c->p, info->extract.completed_bytes, info->extract.total_bytes);
+        {
+            /* wimlib 的 total_bytes 是"上限"，可能随时间变小；固定分母才不会有
+             * 一根条子 3 分钟不动最后突然跳满。 */
+            uint64_t tot = c->total_bytes ? c->total_bytes : info->extract.total_bytes;
+            uint64_t cur = info->extract.completed_bytes;
+            if(tot && cur > tot) cur = tot;
+            img_prog_bytes(c->p, cur, tot);
+            /* REQ-49 §3：解压+写入的真实工作量 → 当全局进度（单调） */
+            img_prog_overall(c->p, cur, tot);
+        }
         img_prog_count(c->p, info->extract.completed_streams, info->extract.total_streams);
         break;
     case WIMLIB_PROGRESS_MSG_EXTRACT_IMAGE_END:
-        if(info->extract.total_bytes){
-            img_prog_bytes(c->p, info->extract.total_bytes, info->extract.total_bytes);
-            img_prog_overall(c->p, info->extract.total_bytes, info->extract.total_bytes);
-            img_prog_count(c->p, info->extract.total_streams, info->extract.total_streams);
+        {
+            uint64_t tot = c->total_bytes ? c->total_bytes : info->extract.total_bytes;
+            if(tot){
+                img_prog_bytes(c->p, tot, tot);
+                img_prog_overall(c->p, tot, tot);
+                img_prog_count(c->p, info->extract.total_streams, info->extract.total_streams);
+            }
         }
         break;
     default: break;
@@ -186,11 +196,20 @@ int img_wim_apply(const char *wim_path, int image_idx,
     img_span_kv_u64(&wsp,"index",(uint64_t)image_idx);
     img_span_kv_u64(&wsp,"part_lba",part_lba);
     img_span_begin(&wsp);
+    /* ★ 2026-11-10（释放进度偏差）：先把分母定下来。
+     *   以前阶段一开始 total_bytes=0、cur/total 还留着上一阶段（格式化）的 3/3，
+     *   第一帧就报 pct=100 —— App 看到"进度条瞬间冲到 95% 又掉回 2%"。
+     *   分母用 WIM 自己记的 TOTALBYTES（未压缩口径，与 wimlib 的 completed_bytes 同单位）。*/
+    uint64_t total_bytes = 0;
+    {
+        const char *p = wimlib_get_image_property(w, image_idx, "TOTALBYTES");
+        if(p) total_bytes = strtoull(p, NULL, 10);
+    }
     if(prog){
-        struct wimlib_wim_info wi; wimlib_get_wim_info(w,&wi);
         img_prog_phase(prog, IMG_PH_EXTRACT, "写入 WIM 到分区");
         img_prog_op(prog, IMG_OP_WRITE);
-        (void)wi;
+        img_prog_bytes(prog, 0, total_bytes);
+        img_prog_overall(prog, 0, total_bytes);
     }
     int ef = WIMLIB_EXTRACT_FLAG_NTFS;
     if(opts){
@@ -198,7 +217,7 @@ int img_wim_apply(const char *wim_path, int image_idx,
         if(opts->no_attrs) ef |= WIMLIB_EXTRACT_FLAG_NO_ATTRIBUTES;
         if(opts->wimboot)  ef |= WIMLIB_EXTRACT_FLAG_WIMBOOT;
     }
-    struct cb_ctx cc = { .p = prog };
+    struct cb_ctx cc = { .p = prog, .total_bytes = total_bytes };
     wimlib_register_progress_function(w, on_progress, &cc);
 
     r = wimlib_extract_image(w, image_idx, dummy, ef);
