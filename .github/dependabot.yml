@@ -1,0 +1,23 @@
+# Dependabot —— 只盯 GitHub Actions 的版本
+#
+# 为什么不配 C 依赖：imgtool 用的是系统包（libwim/libhivex/ntfs-3g…），
+# 没有 CMake FetchContent、没有 vcpkg/conan 清单，Dependabot 没有可解析的
+# 依赖文件。第三方的 unrar/qemu 片段是直接 vendored 进仓库的源码，
+# 也不在它的管理范围里 —— 这部分靠 THIRD_PARTY.md 里记的版本与人工升级。
+#
+# C 侧的安全风险靠两条兜：CodeQL（自己写的代码）和 Dependabot 告警
+# （只对能解析的生态生效）。真要覆盖第三方库，得另做 SBOM。
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns: ["*"]
