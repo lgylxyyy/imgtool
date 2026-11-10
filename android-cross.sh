@@ -70,7 +70,15 @@ for abi in "${ABIS[@]}"; do
   so=$(find "$b" -maxdepth 1 -name 'libimgtool.so' | head -1)
   [ -n "$so" ] || { echo "!! $abi 没产出 libimgtool.so"; exit 1; }
   printf '    ELF      %s\n' "$(readelf -h "$so" | awk -F: '/Class/{gsub(/ /,"",$2);printf "%s ",$2} /Machine/{gsub(/^ +/,"",$2);printf "%s",$2}')"
-  printf '    LOAD对齐 %s\n' "$(readelf -lW "$so" | awk '/LOAD/{print $NF}' | sort -u | tr '\n' ' ')"
+  ALIGN="$(readelf -lW "$so" | awk '/LOAD/{print $NF}' | sort -u | tr '\n' ' ')"
+  printf '    LOAD对齐 %s\n' "$ALIGN"
+  # ★ 2026-11-10：arm64 的 .so 必须每个 PT_LOAD 都 16 KB 对齐，否则 Android 16
+  #   装机会弹「此应用不满足 16 KB 页大小要求」（libimgapp 就是缺这个参数）。
+  #   这里当场失败 —— 别等装到手机上才发现。
+  if [ "$abi" = "arm64-v8a" ] && [ "$ALIGN" != "0x4000 " ]; then
+    echo "  ❌ arm64 的 LOAD 对齐是 [$ALIGN]，要求 0x4000（16 KB）" >&2
+    exit 1
+  fi
   printf '    NEEDED   %s\n' "$(readelf -d "$so" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | tr '\n' ' ')"
   printf '    导出     %s 个符号\n' "$(nm -D --defined-only "$so" | grep -cE ' [TWtw] ')"
 done
