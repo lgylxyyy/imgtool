@@ -176,7 +176,13 @@
 
 #if defined(__linux) || defined(__FreeBSD__)
 #include <sys/time.h>
+/* ★ 2026-11-10（本地改动，非上游）：bionic 的 lutimes 是 API 26 才有的符号，
+ *   按 API 21 编译时连声明都没有 → "use of undeclared identifier 'lutimes'"
+ *   （干净重建必挂；以前能出 .so 是因为 build 目录里有旧对象）。
+ *   低于 26 时退回"不给符号链接设时间"，RAR 解包其它行为不变。*/
+#if !defined(__ANDROID__) || (defined(__ANDROID_API__) && __ANDROID_API__ >= 26)
 #define USE_LUTIMES
+#endif
 #endif
 
 #define ENABLE_ACCESS
