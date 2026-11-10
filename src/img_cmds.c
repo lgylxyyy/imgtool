@@ -7498,7 +7498,14 @@ static int cmd_win_version(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_str(out,"registry.edition_id",v.edition_id);
     img_result_str(out,"registry.current_version",v.current_version);
     img_result_u64(out,"registry.current_build",(uint64_t)v.current_build);
-    if(v.display_version[0]) img_result_str(out,"registry.display_version",v.display_version);
+    /* 这四项【恒定输出】：读不到就是空串 / 0，不省略字段 ——
+     * App 要拿"有没有这个字段"判断会更啰嗦，而且省略和"值恰好为空"混在一起没法区分。
+     * DisplayVersion(1903+) 与 ReleaseId(1511~1809) 互补，Windows 自己写的，比任何对照表都准；
+     * InstallationType 用来区分同一 build（26100 既是 Win11 24H2 也是 Server 2025）。*/
+    img_result_str(out,"registry.display_version",v.display_version);
+    img_result_str(out,"registry.release_id",v.release_id);
+    img_result_u64(out,"registry.ubr",(uint64_t)v.ubr);
+    img_result_str(out,"registry.installation_type",v.installation_type);
     if(v.build_lab[0]) img_result_str(out,"registry.build_lab",v.build_lab);
 
     if(v.kernel_file_version[0]){
@@ -8219,7 +8226,7 @@ static int cmd_reg_get(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_str(out, "key", keypath);
     img_result_str(out, "name", v.name ? v.name : "");
     img_result_str(out, "type", img_reg_type_name(v.type));
-    img_result_u64(out, "bytes", (uint64_t)v.len);
+    img_result_u64(out, "bytes", (uint64_t)v.raw_len);
 
     /* 按类型给出可读值 */
     switch(v.type){

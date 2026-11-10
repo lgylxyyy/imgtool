@@ -71,8 +71,9 @@ typedef enum {
 typedef struct {
     char         *name;       /* 值名（"" = 默认值） */
     img_reg_type  type;
-    uint8_t      *data;       /* 原始字节（REG_SZ 时含结尾 NUL，已转为 UTF-8） */
-    size_t        len;        /* data 字节数 */
+    uint8_t      *data;       /* 原始字节（REG_SZ 时已转为 UTF-8，见 img_reg_get） */
+    size_t        len;        /* data 字节数（REG_SZ 转换后 = UTF-8 字节数） */
+    size_t        raw_len;    /* 值在 hive 里的原始字节数（REG_SZ 是 UTF-16LE，含 NUL） */
 } img_reg_value;
 
 /* ---- 打开/关闭（一次操作打开一次，内部抽出 hive 到临时文件）---- */

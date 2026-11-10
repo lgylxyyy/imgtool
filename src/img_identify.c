@@ -162,6 +162,21 @@ static int hive_str(hive_h *h, hive_node_h node, const char *name, char *out, si
     return 0;
 }
 
+/* 读一个 REG_DWORD（UBR 这种）；没有/类型不对返回 -1，不报错 */
+static int hive_dword(hive_h *h, hive_node_h node, const char *name, uint32_t *out){
+    if(out) *out=0;
+    hive_value_h v=hivex_node_get_value(h,node,name);
+    if(!v) return -1;
+    hive_type t=0; size_t len=0;
+    if(hivex_value_type(h,v,&t,&len)<0) return -1;
+    if(t!=hive_t_REG_DWORD || len!=4) return -1;
+    char *d=hivex_value_value(h,v,&t,&len);
+    if(!d) return -1;
+    uint32_t dw=0; memcpy(&dw,d,4); free(d);
+    if(out) *out=dw;
+    return 0;
+}
+
 /* build 的"代" = 发布桶，不是 build/10。
  * ★ 实测教训：Win11 26300 的盘里注册表写 26300、内核等文件是 26100（24H2 基线），
  *   用 build/10 会得到 2630 与 2610 两个"代" → 误报 mismatch=true。
@@ -264,6 +279,9 @@ int img_win_version(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
                 hive_str(h,n,"EditionID",out->edition_id,sizeof out->edition_id);
                 hive_str(h,n,"BuildLab",out->build_lab,sizeof out->build_lab);
                 hive_str(h,n,"DisplayVersion",out->display_version,sizeof out->display_version);
+                hive_str(h,n,"ReleaseId",out->release_id,sizeof out->release_id);
+                hive_str(h,n,"InstallationType",out->installation_type,sizeof out->installation_type);
+                hive_dword(h,n,"UBR",&out->ubr);
                 hive_str(h,n,"CurrentVersion",out->current_version,sizeof out->current_version);
                 char cb[32]="";
                 hive_str(h,n,"CurrentBuild",cb,sizeof cb);

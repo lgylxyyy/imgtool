@@ -16,6 +16,7 @@
 #   ebr_test             MBR 扩展/逻辑分区：EBR 链写回读、链尾 entry 全零
 #   mbr_bcd_test         BIOS BCD 全对象批量改写（签名+偏移，5 处设备）
 #   reg-test.sh          注册表通用编辑（读/写/列/删/事务）
+#   winver-registry-test.sh  win.version 的四个"Windows 自己写"的字段（REQ-72）
 #   diskfmt-test.sh      raw / VHD / VMDK 读写与 qemu 互验
 #   vhd-test.py          VHD 建盘、多块写入、重开与 qemu 互验
 #   wim-capture-test.sh  wim.capture 端到端（含临时目录清理）
@@ -168,6 +169,7 @@ else skipped=$((skipped+1)); echo "  ⏭ 跳过 recovery_bcd_test（没编进构
 
 # 本轮新增（P2 / P3 / 文案规范）
 run "reg-test（注册表通用编辑：读/写/列/删/事务）"            bash "$ROOT/tests/reg-test.sh"
+run "winver-registry-test（REQ-72：DisplayVersion/ReleaseId/UBR/InstallationType 恒在）" bash "$ROOT/tests/winver-registry-test.sh"
 run "diskfmt-test（raw / VHD / VMDK 读写 + qemu 互验）"      bash "$ROOT/tests/diskfmt-test.sh"
 run "qcow2-zstd-test（qcow2 的 zstd 压缩簇：qemu-img 造、我们读）" python3 "$ROOT/tests/qcow2-zstd-test.py"
 run "vhd-fault-test（N6-3：任意一步失败后映像仍可用、已提交数据不丢）" python3 "$ROOT/tests/vhd-fault-test.py"

@@ -26,6 +26,54 @@
 
 static void *memdup_own(const void *src, size_t n);   /* 定义在文件尾 */
 
+/* ============ UTF-8 ⇄ UTF-16LE（REG_SZ 系列在 hive 里存的是 UTF-16LE）============
+ * ★ 2026-11-11 修：以前 reg.set --type=sz 把 UTF-8 字节原样塞进 hive，reg.get 又把
+ *   UTF-16 当 char* 打印（只出第一个字符 "W"）。两边都错，所以自造的往返用例看不出问题，
+ *   真机上 Windows 读到的是乱码。hivex 只搬字节，不做编码转换，这一步必须自己做。
+ */
+static size_t utf8_to_utf16le(const char *s, uint8_t *out, size_t cap){
+    size_t j = 0;
+    const uint8_t *p = (const uint8_t*)s;
+    while(p && *p){
+        uint32_t c;
+        if(p[0] < 0x80){ c = p[0]; p += 1; }
+        else if((p[0] & 0xE0) == 0xC0 && p[1]){ c = ((uint32_t)(p[0]&0x1F)<<6)|(p[1]&0x3F); p += 2; }
+        else if((p[0] & 0xF0) == 0xE0 && p[1] && p[2]){ c = ((uint32_t)(p[0]&0x0F)<<12)|((uint32_t)(p[1]&0x3F)<<6)|(p[2]&0x3F); p += 3; }
+        else if((p[0] & 0xF8) == 0xF0 && p[1] && p[2] && p[3]){ c = ((uint32_t)(p[0]&0x07)<<18)|((uint32_t)(p[1]&0x3F)<<12)|((uint32_t)(p[2]&0x3F)<<6)|(p[3]&0x3F); p += 4; }
+        else { c = '?'; p += 1; }
+        if(c >= 0x10000){
+            c -= 0x10000;
+            uint16_t hi = (uint16_t)(0xD800 + (c >> 10)), lo = (uint16_t)(0xDC00 + (c & 0x3FF));
+            if(j + 4 > cap) break;
+            out[j++] = (uint8_t)(hi & 0xFF); out[j++] = (uint8_t)(hi >> 8);
+            out[j++] = (uint8_t)(lo & 0xFF); out[j++] = (uint8_t)(lo >> 8);
+        } else {
+            if(j + 2 > cap) break;
+            out[j++] = (uint8_t)(c & 0xFF); out[j++] = (uint8_t)(c >> 8);
+        }
+    }
+    if(j + 2 <= cap){ out[j++] = 0; out[j++] = 0; }   /* 末尾 NUL（长度含它）*/
+    return j;
+}
+
+static size_t utf16le_to_utf8(const uint8_t *src, size_t nbytes, char *out, size_t cap){
+    size_t j = 0;
+    for(size_t i = 0; i + 1 < nbytes; i += 2){
+        uint32_t c = (uint32_t)src[i] | ((uint32_t)src[i+1] << 8);
+        if(c >= 0xD800 && c <= 0xDBFF && i + 3 < nbytes){
+            uint32_t c2 = (uint32_t)src[i+2] | ((uint32_t)src[i+3] << 8);
+            if(c2 >= 0xDC00 && c2 <= 0xDFFF){ c = 0x10000 + ((c - 0xD800) << 10) + (c2 - 0xDC00); i += 2; }
+        }
+        if(!c) break;
+        if(c < 0x80){ if(j+1 >= cap) break; out[j++] = (char)c; }
+        else if(c < 0x800){ if(j+2 >= cap) break; out[j++] = (char)(0xC0|(c>>6)); out[j++] = (char)(0x80|(c&0x3F)); }
+        else if(c < 0x10000){ if(j+3 >= cap) break; out[j++] = (char)(0xE0|(c>>12)); out[j++] = (char)(0x80|((c>>6)&0x3F)); out[j++] = (char)(0x80|(c&0x3F)); }
+        else { if(j+4 >= cap) break; out[j++] = (char)(0xF0|(c>>18)); out[j++] = (char)(0x80|((c>>12)&0x3F)); out[j++] = (char)(0x80|((c>>6)&0x3F)); out[j++] = (char)(0x80|(c&0x3F)); }
+    }
+    out[j] = 0;
+    return j;
+}
+
 struct img_reg {
     img_ctx     *ctx;      /* 自己打开的镜像上下文（关的时候一起关） */
     img_ntfs_fs *fs;
@@ -276,6 +324,7 @@ int img_reg_get(img_reg *r, const char *key_path, const char *value_name,
     out->name = strdup(key ? key : "");
     out->type = from_hive_type(t);
     out->len  = len;
+    out->raw_len = len;      /* hive 里的原始字节数（REG_SZ = UTF-16LE 字节数）*/
     if(len){
         out->data = (uint8_t*)malloc(len);
         if(!out->data){
@@ -286,6 +335,32 @@ int img_reg_get(img_reg *r, const char *key_path, const char *value_name,
         memcpy(out->data, data, len);
     }
     free(data);
+
+    /* REG_SZ 系列：hive 里是 UTF-16LE，按头文件契约转回 UTF-8。
+     * MULTI_SZ 的多个条目用 '\n' 连接（用法上限就是给人看的）。 */
+    if(out->data && (out->type == IMG_REG_SZ || out->type == IMG_REG_EXPAND_SZ ||
+                     out->type == IMG_REG_MULTI_SZ)){
+        char *u8 = (char*)malloc(out->len + 1);
+        if(u8){
+            size_t n = 0;
+            if(out->type == IMG_REG_MULTI_SZ){
+                const uint8_t *p = out->data; size_t left = out->len;
+                while(left >= 2 && (p[0] || p[1]) && n + 1 < out->len + 1){
+                    size_t used = 0;
+                    while(used + 1 < left && (p[used] || p[used+1])) used += 2;
+                    n += utf16le_to_utf8(p, used, u8 + n, out->len + 1 - n);
+                    p += used + 2; left -= used + 2;
+                    if(left >= 2 && (p[0] || p[1]) && n + 1 < out->len + 1) u8[n++] = '\n';
+                }
+                u8[n] = 0;
+            } else {
+                n = utf16le_to_utf8(out->data, out->len, u8, out->len + 1);
+            }
+            free(out->data);
+            out->data = (uint8_t*)u8;
+            out->len  = n;
+        }
+    }
     return IMG_OK;
 }
 
@@ -393,10 +468,26 @@ int img_reg_set(img_reg *r, const char *key_path, const char *value_name,
         sv.value = (char*)be;
     }
 
+    /* REG_SZ / REG_EXPAND_SZ / REG_MULTI_SZ：hive 里必须是 UTF-16LE（含结尾 NUL）。
+     * 调用方按契约传 UTF-8，这里转一次；长度用字节数，不是字符数。 */
+    uint8_t *enc = NULL;
+    if((type == IMG_REG_SZ || type == IMG_REG_EXPAND_SZ || type == IMG_REG_MULTI_SZ) && data){
+        size_t src_len = strlen((const char*)data);
+        size_t cap = src_len * 2 + 4;
+        enc = (uint8_t*)malloc(cap);
+        if(!enc) return IMG_ENOMEM;
+        size_t n = utf8_to_utf16le((const char*)data, enc, cap);
+        if(type == IMG_REG_MULTI_SZ && n + 2 <= cap){ enc[n++] = 0; enc[n++] = 0; }
+        sv.value = (char*)enc;
+        sv.len   = n;
+    }
+
     if(hivex_node_set_value(r->h, cur, &sv, 0) < 0){
+        free(enc);
         if(err&&errcap) snprintf(err,errcap,"写值失败：%s", sv.key);
         return IMG_EIO;
     }
+    free(enc);
     r->changed = true;
     return IMG_OK;
 }

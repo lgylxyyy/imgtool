@@ -56,9 +56,15 @@ v=$($T reg.get --img="$IMG" --lba=$LBA --path='SYSTEM\Setup\TestD' 2>/dev/null |
 [ "$v" = "42" ] && ok "DWORD 往返 42" || ng "DWORD 往返失败（读到 $v）"
 
 echo "════ 3. reg.set / reg.get 字符串（含中文）════"
+# ★ 2026-11-11：hive 里的 REG_SZ 是 UTF-16LE，不是 UTF-8。以前写的时候直接塞 UTF-8、
+#   读的时候当 char* 打印，自造往返看不出问题（两边同样错），真机上 Windows 读到乱码。
+#   这里除了值，还核【字节数】= (字符数+1)*2 —— 中文 2 个字符 + 空格 + 5 个字母 = 8 字符
+#   → 18 字节；UTF-8 则是 11 字节。
 $T reg.set --img="$IMG" --lba=$LBA --path='SYSTEM\Setup\TestS' --type=sz --value='中文 hello' >/dev/null 2>&1
 v=$($T reg.get --img="$IMG" --lba=$LBA --path='SYSTEM\Setup\TestS' 2>/dev/null | jq_ "d['data']['value']")
 [ "$v" = "中文 hello" ] && ok "字符串往返（中文）" || ng "字符串往返失败（读到 $v）"
+b=$($T reg.get --img="$IMG" --lba=$LBA --path='SYSTEM\Setup\TestS' 2>/dev/null | jq_ "d['data']['bytes']")
+[ "${b:-0}" -ge 16 ] && ok "REG_SZ 按 UTF-16LE 存（${b} 字节，UTF-8 会是 11）" || ng "REG_SZ 字节数 ${b}：像是按 UTF-8 存的"
 
 echo "════ 4. reg.del 删值 ════"
 $T reg.del --img="$IMG" --lba=$LBA --path='SYSTEM\Setup' --value=TestD >/dev/null 2>&1

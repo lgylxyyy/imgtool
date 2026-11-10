@@ -42,6 +42,9 @@ typedef struct {
     char edition_id[64];
     char build_lab[96];
     char display_version[64];/* Win10+ 的 21H2 之类；Win7 为空 */
+    char release_id[32];     /* 老系统（1511~1809）用：1709 / 1607；1903+ 改用 DisplayVersion */
+    uint32_t ubr;            /* 补丁修订号（UBR）：26100.3800 → 3800；读不到 0 */
+    char installation_type[32];/* Client / Server（同一 build 区分 Win11 与 Server 2025）*/
     char current_version[32];/* 6.1 / 10.0 */
     int  current_build;      /* 7601 / 19044 / 28000 */
 
