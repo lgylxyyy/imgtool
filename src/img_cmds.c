@@ -8797,7 +8797,10 @@ static int cmd_sys_tmpdir(img_ctx *ctx, const img_args *in, img_result *out){
         img_result_str(out,"free_error",img_strerror(frc));
     }
     img_result_u64(out,"stale_removed",(uint64_t)(img_cmd_last_sweep()>0?img_cmd_last_sweep():0));
-    img_result_bool(out,"changed", td && strcmp(prev_path,td)?true:false);
+    /* ★ td 在这里一定非 NULL：上面 if(!td || !*td) 已经 return 了。
+     *   原来写成 `td && strcmp(...)`，那半个判空是死代码（CodeQL:
+     *   cpp/redundant-null-check-simple）。*/
+    img_result_bool(out,"changed", strcmp(prev_path,td)?true:false);
     if(strcmp(prev_path,td)) img_result_str(out,"path_before",prev_path);
     return IMG_OK;
 }
