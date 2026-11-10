@@ -13,7 +13,8 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SRC/scripts/env.sh"
 imgtool_need "Android NDK" "${IMGTOOL_NDK:-}" "设 NDK / ANDROID_NDK_HOME，或运行 ./configure-local.sh" || exit 1
 NDK="$IMGTOOL_NDK"
-API="${API:-21}"
+# 与 android-cross.sh 保持一致（原因见那里的注释：stdin/stdout 要 23，hasmntopt 要 26）
+API="${API:-26}"
 OUT="${OUT:-$IMGTOOL_BUILD_ROOT/android}"
 SRC_DL="${SRC_DL:-$IMGTOOL_DEPS_ROOT/src}"
 NTFS3G_SRC="${NTFS3G_SRC:-$IMGTOOL_DEPS_ROOT/third_party/ntfs-3g}"

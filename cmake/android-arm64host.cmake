@@ -63,7 +63,9 @@ if(NOT IMG_ANDROID_ABI)
   set(IMG_ANDROID_ABI "arm64-v8a")
 endif()
 if(NOT IMG_ANDROID_API)
-  set(IMG_ANDROID_API "21")            # 与 NDK 默认 minSdk 一致
+  # 26 而不是 NDK 默认的 21：stdin/stdout(__INTRODUCED_IN(23))、hasmntopt(26)
+  # 是 wimlib/ntfs-3g 引用的 bionic 符号，21 的 libc 桩里没有（见 android-cross.sh 注释）
+  set(IMG_ANDROID_API "26")
 endif()
 
 set(ENV{NDK_ROOT}        "${NDK_ROOT}")

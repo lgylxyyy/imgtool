@@ -8562,10 +8562,24 @@ static int cmd_img_trim(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_u64(out,"compressed_clusters_skipped", r.compressed_skipped);
     img_result_u64(out,"alloc_before", r.alloc_before);
     img_result_u64(out,"alloc_after", r.alloc_after);
-    /* 打洞全失败 = 宿主不支持（/sdcard 常见）。不致命，但要如实报 */
+    /* 打洞失败不致命（簇已经释放了，只是文件没变小），但要如实报。
+     * 两种情形分开说，App 直接原样展示这句话：
+     *   全失败 = 宿主不支持（/sdcard 上某些 FUSE 实现、部分 exFAT）
+     *   部分失败 = 支持但个别区间被拒（原子写区、跨 extent 边界） */
     img_result_bool(out,"punch_ok", r.punch_failed == 0);
-    if(r.punch_failed && !r.host_bytes_punched)
-        img_result_str(out,"punch_note","宿主文件系统不支持打洞，簇已释放但文件没变小");
+    if(r.punch_failed){
+        if(!r.host_bytes_punched){
+            img_result_str(out,"punch_note","宿主文件系统不支持打洞，簇已释放但文件没变小");
+        }else{
+            char note[192];
+            snprintf(note,sizeof note,
+                     "有 %llu 个簇打洞失败，文件只缩小了 %llu 字节（簇已全部释放，"
+                     "下次 img.compact 能把这部分收回来）",
+                     (unsigned long long)r.punch_failed,
+                     (unsigned long long)r.host_bytes_punched);
+            img_result_str(out,"punch_note",note);
+        }
+    }
     return IMG_OK;
 }
 

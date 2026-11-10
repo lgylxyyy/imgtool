@@ -11,7 +11,15 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 imgtool_need "Android NDK" "${IMGTOOL_NDK:-}" "设 NDK / ANDROID_NDK_HOME，或运行 ./configure-local.sh" || exit 1
 NDK="$IMGTOOL_NDK"
 BUILD_ROOT="$IMGTOOL_BUILD_ROOT"
-API="${API:-21}"
+# ★ 2026-11-10：API 从 21 提到 26。Bionic 的 libc 桩在 21 里没有 `stdin`/`stdout`
+#   （__INTRODUCED_IN(23)）和 `hasmntopt`（__INTRODUCED_IN(26)），而 wimlib 的
+#   textfile.c/header.c 与 ntfs-3g 的 volume.c 正好引用了它们 —— 编 .so 时因为
+#   shared 允许未定义符号没暴露，一编命令行工具(可执行文件)就链接失败：
+#     ld.lld: error: undefined symbol: stdin / stdout
+#     ld.lld: error: undefined symbol: hasmntopt
+#   这两种符号没法用 stub 补（stdin/stdout 是数据符号，值是 libc 的 __sF），
+#   所以按 bionic 的真实门槛统一到 26。代价：产物要求 Android 8.0+（App minSdk 33，无影响）。
+API="${API:-26}"
 ABIS=("$@"); [ ${#ABIS[@]} -eq 0 ] && ABIS=(arm64-v8a armeabi-v7a x86_64)
 OUT="${OUT:-$BUILD_ROOT/android}"
 
@@ -59,6 +67,13 @@ for abi in "${ABIS[@]}"; do
     echo "  [cache] 源码路径已变更（$(cmake_src "$b") → $SRC），清除构建缓存"
     rm -rf "$b"
   fi
+  # ★ 缓存自愈 2：有人为了「先编过去」往 CMakeCache 里塞过
+  #   -Wl,--unresolved-symbols=ignore-all（REQ-20261110-71 §3 就是这种产物）。
+  #   留着它会把真正的链接错误藏起来，这里直接摘掉。
+  if [ -f "$b/CMakeCache.txt" ] && grep -q "unresolved-symbols=ignore-all" "$b/CMakeCache.txt"; then
+    sed -i 's/ *-Wl,--unresolved-symbols=ignore-all//g' "$b/CMakeCache.txt"
+    echo "  [cache] 已摘掉遗留的 --unresolved-symbols=ignore-all（它会掩盖链接错误）"
+  fi
   cmake -S "$SRC" -B "$b" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_TOOLCHAIN_FILE="$SRC/cmake/android-arm64host.cmake" \
@@ -80,6 +95,30 @@ for abi in "${ABIS[@]}"; do
     exit 1
   fi
   printf '    NEEDED   %s\n' "$(readelf -d "$so" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' | tr '\n' ' ')"
+  # ★ 2026-11-10：.so 允许未定义符号（运行时从 libc 解析），所以「编得过」不代表能跑：
+  #   stdin/stdout(__INTRODUCED_IN(23))、hasmntopt(26) 在低 API 的 libc 里根本不存在，
+  #   设备上走到那条路径才会炸。这里对着【本 API 的 libc 桩】逐个核，缺了就当场失败。
+  UNDEF="$(nm -D --undefined-only "$so" | awk '{print $NF}' | sed 's/@.*//' | sort -u || true)"
+  case "$abi" in
+    arm64-v8a)   _t=aarch64-linux-android  ;;
+    armeabi-v7a) _t=arm-linux-androideabi  ;;
+    x86_64)      _t=x86_64-linux-android   ;;
+    x86)         _t=i686-linux-android     ;;
+  esac
+  LIBCSTUB="$SYS/usr/lib/$_t/$API/libc.so"
+  MISSING=""
+  for sym in stdin stdout stderr hasmntopt; do
+    case " $UNDEF " in *" $sym "*)
+      if ! readelf -sW --dyn-syms "$LIBCSTUB" 2>/dev/null | grep -q " $sym@"; then
+        MISSING="$MISSING $sym"
+      fi ;;
+    esac
+  done
+  if [ -n "$MISSING" ]; then
+    echo "  ❌ libimgtool.so 需要 bionic API $API 里没有的符号：[$MISSING ]" >&2
+    echo "     stdin/stdout 要 API 23，hasmntopt 要 26；把 API 提到 26 再编" >&2
+    exit 1
+  fi
   printf '    导出     %s 个符号\n' "$(nm -D --defined-only "$so" | grep -cE ' [TWtw] ')"
 done
 echo "=== 完成：${ABIS[*]} ==="
