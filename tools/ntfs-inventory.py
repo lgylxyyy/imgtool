@@ -623,7 +623,10 @@ def _cli():
     raw = None; tmp = None
     if '--qcow2' in argv:
         i = argv.index('--qcow2'); q = argv[i + 1]; plba = int(argv[argv.index('--lba') + 1])
-        tmp = tempfile.mktemp(suffix='.raw')
+        # ★ 不用 mktemp：它在返回路径和真正写文件之间有竞争窗口
+        #   （CodeQL: py/insecure-temporary-file）。mkstemp 直接建好文件再复用。
+        _fd, tmp = tempfile.mkstemp(suffix='.raw')
+        os.close(_fd)
         subprocess.run(['qemu-img', 'convert', '-O', 'raw', q, tmp], check=True)
         raw = tmp
     else:

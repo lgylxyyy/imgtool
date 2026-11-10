@@ -79,14 +79,21 @@ int img_wim_list_images(const char *wim_path, char *buf, int cap){
     int k = snprintf(buf,(size_t)cap,
         "{\"imageCount\":%u,\"compression\":\"%s\",\"images\":[",
         wi.image_count, wimlib_get_compression_type_string(wi.compression_type));
-    for(unsigned i=1;i<=wi.image_count && k<cap-4;i++){
+    for(unsigned i=1;i<=wi.image_count && k>=0 && k<cap-4;i++){
         const char *nm = wimlib_get_image_name(w,(int)i);
         const char *ds = wimlib_get_image_description(w,(int)i);
-        k += snprintf(buf+k,(size_t)cap-k,
+        /* ★ snprintf 截断时返回"本该写多长"，直接累加会让 k 超过 cap：
+         *   此时 buf+k 已出界，且 (size_t)cap-k 变成巨大的 size_t —— 下一次
+         *   写入就落到界外（CodeQL: cpp/overflowing-snprintf）。
+         *   夹到 cap-3，给结尾的 "]}"" 和 NUL 留够位置。*/
+        int n = snprintf(buf+k,(size_t)(cap-k),
             "%s{\"index\":%u,\"name\":\"%s\",\"desc\":\"%s\"}",
             (i>1)?",":"", i, nm?nm:"", ds?ds:"");
+        if(n < 0) break;
+        k += n;
+        if(k > cap-3) k = cap-3;
     }
-    snprintf(buf+k,(size_t)cap-k,"]}");
+    snprintf(buf+k,(size_t)(cap-k),"]}");
     wimlib_free(w);
     return IMG_OK;
 }

@@ -7261,6 +7261,13 @@ static void id_final_arch(const img_wim_image_t *im,
     *par=""; *pbasis="none"; *psrc="none";
 }
 
+/* ★ snprintf 截断时返回的是"本该写多长"，把返回值累加到 k 上会让 k 超过
+ *   缓冲区长度：此时 cb+k 已经出界，且 CB_CAP-k 变成巨大的 size_t，
+ *   下一次 snprintf 就会写到界外（CodeQL: cpp/overflowing-snprintf）。
+ *   这两个函数保证位置永远落在 [0, cap-1]、剩余长度永远 >= 1。*/
+static size_t cb_pos(size_t k, size_t cap){ return k < cap ? k : cap - 1; }
+static size_t cb_left(size_t k, size_t cap){ return k < cap ? cap - k : 1; }
+
 static int cmd_wim_identify(img_ctx *ctx, const img_args *in, img_result *out){
     (void)ctx;
     const char *src=img_args_get(in,"src");
@@ -7296,7 +7303,7 @@ static int cmd_wim_identify(img_ctx *ctx, const img_args *in, img_result *out){
         char *cb=img_tbuf(IMG_TB_ID_SCAN,CB_CAP);
         if(!cb) return tb_nomem(out,"wim.identify 候选缓冲");
         size_t k=0; int emitted=0;
-        k+=(size_t)snprintf(cb+k,CB_CAP-k,"[");
+        k+=(size_t)snprintf(cb+cb_pos(k,(size_t)CB_CAP),cb_left(k,(size_t)CB_CAP),"[");
         char mcont[16]="", msrc[32]="";
         if(sc.n==1) iso_media_arch(src,mcont,sizeof mcont,msrc,sizeof msrc);
         for(int i=0;i<sc.n && k<CB_CAP-2048;i++){
@@ -7306,12 +7313,12 @@ static int cmd_wim_identify(img_ctx *ctx, const img_args *in, img_result *out){
             size_t pl=strlen(sc.path[i]);
             const char *kind=(pl>4 && (sc.path[i][pl-1]=='d'||sc.path[i][pl-1]=='D')
                               && sc.path[i][pl-2]=='s')?"esd":"wim";
-            k+=(size_t)snprintf(cb+k,CB_CAP-k,
+            k+=(size_t)snprintf(cb+cb_pos(k,(size_t)CB_CAP),cb_left(k,(size_t)CB_CAP),
                 "%s{\"inner_path\":\"%s\",\"kind\":\"%s\",\"size_bytes\":%llu,\"ok\":%s,\"count\":%d",
                 emitted?",":"",sc.path[i],kind,(unsigned long long)sc.size[i],
                 (rrc==IMG_OK)?"true":"false",(rrc==IMG_OK)?n2:0);
             if(rrc==IMG_OK){
-                k+=(size_t)snprintf(cb+k,CB_CAP-k,",\"images\":[");
+                k+=(size_t)snprintf(cb+cb_pos(k,(size_t)CB_CAP),cb_left(k,(size_t)CB_CAP),",\"images\":[");
                 /* ★ 逐映像判位数（2026-11-05 修正）：
                  *   以前只探第 1 个映像然后把结果套给全部 —— x86+x64 合一盘
                  *   （Win7/Win10）的后 4 个 64 位映像全被标成 x86。
@@ -7339,7 +7346,7 @@ static int cmd_wim_identify(img_ctx *ctx, const img_args *in, img_result *out){
                     }
                     const char *ar1=NULL,*basis1=NULL,*asrc1=NULL;
                     id_final_arch(&im2[j],acont,asrc,mcont,msrc,&ar1,&basis1,&asrc1);
-                    k+=(size_t)snprintf(cb+k,CB_CAP-k,
+                    k+=(size_t)snprintf(cb+cb_pos(k,(size_t)CB_CAP),cb_left(k,(size_t)CB_CAP),
                         "%s{\"index\":%d,\"name\":\"%s\",\"display_name\":\"%s\","
                         "\"arch\":\"%s\",\"arch_raw\":\"%s\",\"arch_basis\":\"%s\",\"arch_source\":\"%s\","
                         "\"build\":%d,\"languages\":\"%s\",\"total_bytes\":%llu}",
@@ -7348,15 +7355,15 @@ static int cmd_wim_identify(img_ctx *ctx, const img_args *in, img_result *out){
                         im2[j].build,ln,
                         (unsigned long long)im2[j].total_bytes);
                 }
-                k+=(size_t)snprintf(cb+k,CB_CAP-k,"]");
+                k+=(size_t)snprintf(cb+cb_pos(k,(size_t)CB_CAP),cb_left(k,(size_t)CB_CAP),"]");
             } else {
                 char e3[220]; idj_esc(e3,sizeof e3,e2[0]?e2:"解析失败");
-                k+=(size_t)snprintf(cb+k,CB_CAP-k,",\"error\":\"%s\"",e3);
+                k+=(size_t)snprintf(cb+cb_pos(k,(size_t)CB_CAP),cb_left(k,(size_t)CB_CAP),",\"error\":\"%s\"",e3);
             }
-            k+=(size_t)snprintf(cb+k,CB_CAP-k,"}");
+            k+=(size_t)snprintf(cb+cb_pos(k,(size_t)CB_CAP),cb_left(k,(size_t)CB_CAP),"}");
             emitted++;
         }
-        k+=(size_t)snprintf(cb+k,CB_CAP-k,"]");
+        k+=(size_t)snprintf(cb+cb_pos(k,(size_t)CB_CAP),cb_left(k,(size_t)CB_CAP),"]");
         const char *vol=img_iso_volume_id(iso);
         img_iso_close(iso);
         img_result_str(out,"container","iso");
