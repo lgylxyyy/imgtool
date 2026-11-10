@@ -8502,6 +8502,11 @@ static const img_arg A_WIMCAP[] = {
     {"estimate",   IMG_A_BOOL, false, "false","只估算（不抽文件、不打 WIM）", NULL},
 };
 static int cmd_wim_capture(img_ctx *ctx, const img_args *in, img_result *out){
+    /* ★ 必须显式闸：wimlib 关掉时 img_wim_capture.c 不参与编译，
+     *   这里再多调一个符号就是链接错误（degraded-build-test 抓到的就是这条）。*/
+    if(!IMG_WITH_WIM) return feat_unavail(out,"wimlib（WIM/ESD 捕获）",
+                                          "重新编译时开启该功能并安装对应系统库");
+#if IMG_WITH_WIM
     uint64_t lba = img_args_u64(in,"lba",0);
     const char *outw = img_args_get(in,"out");
     const char *sub = img_args_get(in,"path");
@@ -8576,6 +8581,9 @@ static int cmd_wim_capture(img_ctx *ctx, const img_args *in, img_result *out){
     if(r.bytes_in && r.bytes_out)
         img_result_u64(out,"ratio_pct", r.bytes_out*100/r.bytes_in);
     return IMG_OK;
+#else
+    (void)ctx; (void)in; (void)out; return IMG_ENOTSUP;   /* 不可达：上一行已返回 */
+#endif
 }
 
 static const img_arg A_WINFINISH[] = {

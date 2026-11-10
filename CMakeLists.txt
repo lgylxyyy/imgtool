@@ -283,7 +283,11 @@ if(NOT IMG_WITH_WIM)
   add_compile_definitions(IMG_WITH_WIM=0)
   set(IMG_WIM_VFD_EXE 0)
   set(IMG_WIM_VFD_SHARED 0)
-  list(REMOVE_ITEM IMG_SOURCES src/img_wim_apply.c src/img_wim_fs.c)
+  list(REMOVE_ITEM IMG_SOURCES src/img_wim_apply.c src/img_wim_fs.c
+                        src/img_wim_capture.c)
+  # 命令层与 img_recovery.c 仍引用这两个符号 → 必须占位（ENOTSUP），
+  # 否则「WIM 关、NTFS 开」这组直接链接失败。
+  list(APPEND IMG_SOURCES src/img_wim_stub.c)
 endif()
 
 # ---- libhivex（BCD hive 读写；imggenbcd 需要；缺了就只跳过该工具）----

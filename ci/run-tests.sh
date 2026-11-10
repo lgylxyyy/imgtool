@@ -71,4 +71,10 @@ fi
 
 echo
 echo "════ 4. 全量回归 ════"
+# ★ DEGRADED=1：让 run_all 里那条 degraded-build-test 真的跑起来。
+#   它验证「关掉 wimlib / ntfs-3g 仍然能构建且如实报 FEATURE-UNAVAILABLE」——
+#   正是「别人克隆、机器上没装这些库」的核心场景。以前默认跳过，结果
+#   2026-11-10 才第一次跑，发现两处链接失败（img_wim_capture.c 没裁、
+#   WIM 占位只在 NTFS=OFF 时才编）。约 55 秒，值得每次跑。
+export DEGRADED=1
 exec bash "$ROOT/tests/run_all.sh"

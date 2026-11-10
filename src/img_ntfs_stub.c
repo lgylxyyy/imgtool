@@ -169,22 +169,5 @@ int img_ntfs_read_range(img_ntfs_fs *fs, const char *abs_path, uint64_t off,
     if(got) *got=0;
     return NA;
 }
-/* WIM 侧：CMakeLists 在 NTFS=OFF 时会把 IMG_WITH_WIM 也关掉，但 img_wim_fs.c
- * 仍参与编译（源码列表没移除），于是需要占位。—— 与上面同源，一律 ENOTSUP。 */
-int img_wim_probe_arch(const char *wim_path, int index, char *out, size_t cap,
-                       char *src, size_t srccap, char *why, size_t whycap){
-    (void)wim_path; (void)index;
-    if(out && cap) out[0]=0;
-    if(src && srccap) src[0]=0;
-    if(why && whycap) snprintf(why,whycap,"本构建未启用 NTFS/WIM");
-    return NA;
-}
-int img_wim_stream_consume(const char *wim_path,int index,const char *inner_path,
-                           img_wim_consume_fn consume, void *ud,
-                           uint64_t *out_size, img_prog *prog,
-                           char *err, size_t errcap){
-    (void)wim_path; (void)index; (void)inner_path; (void)consume; (void)ud; (void)prog;
-    if(out_size) *out_size=0;
-    if(err && errcap) snprintf(err,errcap,"本构建未启用 NTFS/WIM");
-    return NA;
-}
+/* WIM 侧的占位已挪到 img_wim_stub.c（WIM 关掉时单独编进来，
+ * 不依赖 NTFS 开关）。*/
