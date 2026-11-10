@@ -19,8 +19,13 @@ tools/build-mkntfs-obj.sh "$NTFS3G_SRC" "$OBJ_DIR"
 
 echo
 echo "════ 2. 配置与编译 ════"
+# ★ -fstack-protector-all：默认的 strong 只保护部分函数，而"数组越界 1 字节"
+#   这类 bug 在 aarch64 上往往落进补齐字节、什么也看不出来（8.3 短名那次就是）。
+#   全量插桩后，同样的越界会当场 abort，而不是让某个功能静默失效。
 cmake -S "$ROOT" -B "$ROOT/build" \
       -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_FLAGS="-fstack-protector-all" \
+      -DCMAKE_CXX_FLAGS="-fstack-protector-all" \
       -DIMG_WITH_NTFS=ON \
       -DIMG_MKNTFS_OBJ_DIR="$OBJ_DIR" \
       -DIMG_BUILD_TESTS=ON

@@ -221,24 +221,35 @@ static void name_to_83(const char *nm, char out[12]){
 }
 /* ★ 写盘用的是【补满 11 字节】的 8.3；比较时必须用【去尾空格】版，
  *   否则 "EFI" 与 "EFI        " 永不相等 —— 这个坑我踩过一次。*/
+/* ★ 8.3 名的最长形态是【8 基名 + '.' + 3 扩展名】= 12 个字符，
+ *   加上结尾 NUL 一共 13 字节。这几个函数的输出缓冲区一律按 13 给，
+ *   声明里写 [12] 会【少 1 字节】：短名恰好满 8+3 时（"HELLO_WO.TXT"）
+ *   就写出界 1 字节。x86_64 上这 1 字节会压到 dir_find() 的相邻局部
+ *   （want_is83 / have_fb83），导致 8.3 兜底匹配整个失效；aarch64 上
+ *   落在补齐字节里，什么也看不出来 —— 所以这个 bug 只在 CI 的 amd64 现形。
+ *   现在统一改成"带容量、够不够都写 NUL"，以后再加字节也不会越界。*/
+#define IMG_83_DOT_CAP 13
+
 /* 比较用的规范形：去尾空格 + 基名/扩展名之间用点号（与 dir_find 里现拼的 n 一致）。
  * ★ 只去尾空格还不够 —— 'HELLO   TXT'（补空格形）与 'HELLO.TXT'（点号形）
  *   永远不相等。必须两边都规范成【点号形】。*/
-static void name_to_83_dot(const char *nm, char out[12]){
+static void name_to_83_dot(const char *nm, char *out, size_t cap){
     char pad[12]; name_to_83(nm,pad);
+    char tmp[IMG_83_DOT_CAP];
     int j=0;
-    for(int i=0;i<8 && pad[i] && pad[i]!=' ';i++) out[j++]=pad[i];
+    for(int i=0;i<8 && pad[i] && pad[i]!=' ';i++) tmp[j++]=pad[i];
     if(pad[8] && pad[8]!=' '){
-        out[j++]='.';
-        for(int i=8;i<11 && pad[i] && pad[i]!=' ';i++) out[j++]=pad[i];
+        tmp[j++]='.';
+        for(int i=8;i<11 && pad[i] && pad[i]!=' ';i++) tmp[j++]=pad[i];
     }
-    out[j]=0;
+    tmp[j]=0;
+    snprintf(out, cap, "%s", tmp);
 }
-__attribute__((unused)) static void name_to_83_trim(const char *nm, char out[12]){
+__attribute__((unused)) static void name_to_83_trim(const char *nm, char *out, size_t cap){
     char pad[12]; name_to_83(nm, pad);
     int i=11; while(i>0 && pad[i-1]==' ') i--;
     pad[i]=0;
-    memcpy(out,pad,(size_t)i+1);
+    snprintf(out, cap, "%s", pad);
 }
 
 /* 从一个 32 字节目录项里取元数据 */
@@ -255,23 +266,26 @@ static void ent_fill(dir_ent *o, const uint8_t *e, uint64_t slot_off){
     o->wrt_date = (uint16_t)(e[24] | (e[25] << 8));
 }
 /* 把 8.3 项名字拼成点号形（大写） */
-/* 8.3 名 → 显示串。★ 应用目录项第 12 字节的 NT 小写标志：
+/* 8.3 名 → 显示串。★ 输出最长 12 字符 + NUL = 13 字节，见 IMG_83_DOT_CAP。
+ * ★ 应用目录项第 12 字节的 NT 小写标志：
  *   0x08 = 基名小写，0x10 = 扩展名小写（Windows 的 "readme.txt" 就是这么存的）。
  *   以前一律转大写 → fat.ls 印 README.TXT，和资源管理器/用户输入不一致；
  *   现在按盘上的真值印，比较一律走 strcasecmp（FAT 本来就大小写不敏感）。*/
-static void ent_83_name(const uint8_t *e, char out[12]){
+static void ent_83_name(const uint8_t *e, char *out, size_t cap){
+    char tmp[IMG_83_DOT_CAP];
     int j=0;
     bool lb = (e[12] & 0x08)!=0, le = (e[12] & 0x10)!=0;
     for(int k=0;k<8 && e[k]!=' ';k++){
         char c=(char)e[k];
         if(lb && c>='A' && c<='Z') c=(char)(c+32);
-        out[j++]=c;
+        tmp[j++]=c;
     }
-    if(e[8]!=' '){ out[j++]='.'; for(int k=8;k<11 && e[k]!=' ';k++){
+    if(e[8]!=' '){ tmp[j++]='.'; for(int k=8;k<11 && e[k]!=' ';k++){
         char c=(char)e[k];
         if(le && c>='A' && c<='Z') c=(char)(c+32);
-        out[j++]=c; } }
-    out[j]=0;
+        tmp[j++]=c; } }
+    tmp[j]=0;
+    snprintf(out, cap, "%s", tmp);
 }
 
 /* ---------- LFN 累加器（dir_find 与 list_dir 共用） ----------
@@ -381,7 +395,7 @@ static int dir_find(img_fat32_fs *fs, uint32_t dirclus, const char *want, dir_en
     uint8_t *buf = malloc(csz);
     if(!buf) return IMG_ENOMEM;
     memset(out,0,sizeof *out);
-    char want83[12]; name_to_83_dot(want, want83);
+    char want83[IMG_83_DOT_CAP]; name_to_83_dot(want, want83, sizeof want83);
     /* ★ 只有当【请求名本身就是 8.3 形状】时才允许用短名兜底匹配。
      *   否则 "xxxxxxxxx.dat"（9 字符基名）会拿截断后的 "XXXXXXXX.DAT"
      *   去撞已有的 "xxxxxxxx.dat" —— 又是同一个别名陷阱。*/
@@ -425,7 +439,7 @@ static int dir_find(img_fat32_fs *fs, uint32_t dirclus, const char *want, dir_en
              *   以前"有 LFN 就只比 LFN" → 真机上 rm 8.3 名报 PATH-SRC-NOTFOUND。
              *   优先级不变：LFN 精确命中已在上面的立即返回；短名只在整目录扫完后兜底。*/
             {
-                char n[12]; ent_83_name(e, n);
+                char n[IMG_83_DOT_CAP]; ent_83_name(e, n, sizeof n);
                 if(want_is83 && !have_fb83 && !strcasecmp(n, want83)){
                     ent_fill(&fb83, e, coff+i);
                     have_fb83=true;
@@ -450,7 +464,7 @@ static int dir_display_name(img_fat32_fs *fs, uint32_t dirclus, const char *want
     size_t csz=(size_t)fs->L.sectors_per_cluster*512;
     uint8_t *buf=malloc(csz);
     if(!buf) return IMG_ENOMEM;
-    char want83[12]; name_to_83_dot(want,want83);
+    char want83[IMG_83_DOT_CAP]; name_to_83_dot(want,want83,sizeof want83);
     char wantu[1024]; snprintf(wantu,sizeof wantu,"%s",want);
     for(char *p=wantu;*p;p++) if(*p>='a'&&*p<='z') *p-=32;
     lfn_acc la; lfn_reset(&la);
@@ -471,7 +485,7 @@ static int dir_display_name(img_fat32_fs *fs, uint32_t dirclus, const char *want
                 for(char *q=a;*q;q++) if(*q>='a'&&*q<='z') *q-=32;
                 if(!strcmp(a,wantu)){ snprintf(out,cap,"%s",lfn); rc=IMG_OK; goto done; }
             }
-            {   char n[12]; ent_83_name(e,n);
+            {   char n[IMG_83_DOT_CAP]; ent_83_name(e,n,sizeof n);
                 if(!strcasecmp(n,want83)){ snprintf(out,cap,"%s",had?lfn:n); rc=IMG_OK; goto done; }
             }
             lfn_reset(&la);
