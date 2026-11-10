@@ -35,7 +35,9 @@ def run(cmd, **kw):
     if cmd == 'file.copy':
         cmd, kw = compat.translate_filecopy(kw)
     args = [IMGCMD, cmd] + ['--%s=%s' % (k, v) for k, v in kw.items()]
-    p = subprocess.run(args, capture_output=True, text=True)
+    # errors='replace'：stderr 的日志行可能带文件名里的原始字节（非 UTF-8），
+    # 那是给人看/给 logcat 的，不是给解析的；stdout 的 JSON 由工具端保证合法 UTF-8。
+    p = subprocess.run(args, capture_output=True, text=True, errors='replace')
     js = [l for l in p.stdout.splitlines() if l.startswith('{')]
     return json.loads(js[-1]) if js else {'ok': False, 'error_msg': (p.stdout + p.stderr)[-300:]}
 
@@ -381,7 +383,7 @@ for tag, img in (('A', A), ('B', B)):
 raw = os.path.join(W, 'a.raw'); base = os.path.join(W, 'a.base.json')
 subprocess.run(['qemu-img', 'convert', '-O', 'raw', A, raw], check=True)
 subprocess.run([sys.executable, INV, raw, str(AN), '--base-out', base], check=False)
-p = subprocess.run([sys.executable, INV, raw, str(AN), '--base', base], capture_output=True, text=True)
+p = subprocess.run([sys.executable, INV, raw, str(AN), '--base', base], capture_output=True, text=True, errors='replace')
 check('★ 这一串跨分区/跨镜像操作没有给 NTFS 卷新增任何不一致', p.returncode == 0,
       (p.stdout + p.stderr)[-300:])
 

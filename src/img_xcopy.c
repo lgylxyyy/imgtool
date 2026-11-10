@@ -369,8 +369,22 @@ static int src_stat(xep *s, const char *path, bool *isdir, img_src_meta *meta){
 typedef struct { char name[XC_NAME_MAX]; bool isdir; uint64_t size; bool skip; } xent;
 typedef struct { xent *v; int n, cap; int overflow; } xlist;
 
+/* ★ 2026-11-10（REQ-65 §4）：目录条目不再截断在 256。
+ *   以前 cap 固定 256、满了直接 overflow=1 丢掉条目 → 最后报 IMG_EFULL。
+ *   NTFS 上 \Windows\WinSxS 上千条、\Windows\servicing\Packages 上万条，
+ *   固定上限一律走不通；更糟的是"静默丢条目"会做出一个缺文件的 WIM。
+ *   上限 64k 条目（xent ≈1KB → 最多 64 MB），病态目录仍按 EFULL 报错。*/
+#define XLIST_MAX 65536
+static bool xlist_grow(xlist *l){
+    int nc = l->cap ? l->cap*2 : 256;
+    if(nc > XLIST_MAX) return false;
+    xent *nv=(xent*)realloc(l->v,(size_t)nc*sizeof(xent));
+    if(!nv) return false;
+    l->v=nv; l->cap=nc;
+    return true;
+}
 static void xlist_push(xlist *l, const char *name, bool isdir, uint64_t size){
-    if(l->n>=l->cap){ l->overflow=1; return; }
+    if(l->n>=l->cap && !xlist_grow(l)){ l->overflow=1; return; }
     /* 名字长到连缓冲都放不下（≈1023 字节）：不截断、不跳过 —— 直接失败。
      * 各文件系统自己的 255 字符上限由目标层按"字符/码元"判定
      * （NTFS: UTF-16 码元；FAT: UTF-16 码元；宿主: 255 字节）。*/
@@ -1070,7 +1084,15 @@ static int copy_file(xctx *c, const char *spath, const char *dpath, bool top){
     img_src_meta meta; bool isdir=false;
     int rc=src_stat(c->s,spath,&isdir,&meta);
     if(rc!=IMG_OK){ c->st->side=1; return rc; }
-    if(isdir) return IMG_ESTATE;
+    if(isdir){
+        /* ★ 2026-11-10（REQ-65 §3）：重解析点（junction / mount point / symlink）。
+         *   NTFS 目录列表把 \Documents and Settings 这类 junction 报成【文件】
+         *   （size=0），到这里 stat 出来才发现是目录。以前直接 IMG_ESTATE，
+         *   而它几乎存在于每张 Vista 之后的系统盘上 → 捕获映像 100% 失败。
+         *   与宿主源的符号链接同策略：跳过、计数、继续，不复制也不报错。*/
+        c->st->skipped++;
+        return IMG_OK;
+    }
 
     char final[4096]; bool existed=false, ed=false;
     rc=resolve_final(c,spath,dpath,top,final,sizeof final,&existed,&ed);
@@ -1156,6 +1178,7 @@ static int copy_dir(xctx *c, const char *spath, const char *dpath, int depth, bo
     xlist l;
     rc=src_list(c->s,spath,&l);
     if(rc!=IMG_OK){ c->st->side=1; return rc; }
+    char failed[4096]; failed[0]=0;
     for(int i=0;i<l.n && rc==IMG_OK;i++){
         if(l.v[i].skip){ c->st->skipped++; continue; }
         int ex=x_excluded(c->o,l.v[i].name);        /* REQ-32：顶层目录本身不参与（这里只滤子项）*/
@@ -1165,9 +1188,16 @@ static int copy_dir(xctx *c, const char *spath, const char *dpath, int depth, bo
            join_path(target,l.v[i].name,cd,sizeof cd)!=IMG_OK){ rc=IMG_EINVAL; break; }
         if(l.v[i].isdir) rc=copy_dir(c,cs,cd,depth+1,false);
         else             rc=copy_file(c,cs,cd,false);
+        if(rc!=IMG_OK) snprintf(failed,sizeof failed,"%s",cs);
     }
     free(l.v);
-    if(rc!=IMG_OK) return rc;
+    if(rc!=IMG_OK){
+        /* ★ 2026-11-10（REQ-65 §5）：把出错的那条源路径写进 first_error，
+         *   上层（wim.capture）才有东西可显示。以前冒号后面永远是空的。*/
+        if(!c->st->first_error[0] && failed[0])
+            snprintf(c->st->first_error,sizeof c->st->first_error,"%s",failed);
+        return rc;
+    }
     if(top) xstrlcpy(c->st->final_path,target,sizeof c->st->final_path);
 
     /* 目录时间：子树写完之后再设（否则会被子项创建时间改掉） */

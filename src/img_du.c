@@ -31,7 +31,11 @@
 #define IMG_WITH_NTFS3G 0
 #endif
 
-#define DU_MAXQ 64
+/* ★ 2026-11-10（REQ-65 §6）：目录队列原来是 qbuf[64]，满了就【静默丢整棵子树】。
+ *   系统盘（WinSxS / servicing\Packages）待处理目录远多于 64 个，于是
+ *   wim.capture --estimate 的 files 少算 38%、bytes 少算 36% —— App 的空间预检
+ *   按这个数放行，真正捕获时跑到一半炸在磁盘上。改成按需扩容。*/
+#define DU_QCAP_INIT 64
 
 typedef struct {
     img_path     *p;
@@ -44,6 +48,19 @@ typedef struct {
 
 typedef struct { char path[2048]; int depth; } du_dirq;
 
+static bool du_push(du_dirq **q, int *cap, int *sp, const char *path, int depth){
+    if(*sp >= *cap){
+        int nc = *cap ? (*cap)*2 : DU_QCAP_INIT;
+        if(nc > 1<<20) return false;                 /* 100 万目录项 ≈ 2 GB，不可能 */
+        du_dirq *nq=(du_dirq*)realloc(*q,(size_t)nc*sizeof(du_dirq));
+        if(!nq) return false;
+        *q=nq; *cap=nc;
+    }
+    snprintf((*q)[*sp].path,sizeof (*q)[0].path,"%s",path);
+    (*q)[*sp].depth=depth;
+    (*sp)++;
+    return true;
+}
 static bool du_hit(const ducx *c){
     return c->limit && c->st->scanned>=c->limit;
 }
@@ -94,7 +111,7 @@ static int du_host(ducx *c, const char *path, int depth){
 #if IMG_WITH_NTFS3G
 typedef struct {
     ducx      *c;
-    du_dirq   *q; int *sp;
+    du_dirq   *q; int *sp; int *qcap;
     int        depth;
     char       cur[2048];
     int        rc;
@@ -109,10 +126,8 @@ static void du_ntfs_cb(void *ud, const img_ntfs_ent_t *e){
     du_tick(x->c,full);
     if(e->is_dir){
         x->c->st->dirs++;
-        if((x->c->max_depth==0 || x->depth<x->c->max_depth) && *x->sp<DU_MAXQ){
-            snprintf(x->q[*x->sp].path,sizeof x->q[0].path,"%s",full);
-            x->q[*x->sp].depth=x->depth+1;
-            (*x->sp)++;
+        if(x->c->max_depth==0 || x->depth<x->c->max_depth){
+            if(!du_push(&x->q,x->qcap,x->sp,full,x->depth+1)) x->c->st->truncated=true;
         }
     }else{
         x->c->st->files++;
@@ -126,7 +141,7 @@ static void du_ntfs_cb(void *ud, const img_ntfs_ent_t *e){
 #if IMG_WITH_NTFS3G
 typedef struct {
     ducx      *c;
-    du_dirq   *q; int *sp;
+    du_dirq   *q; int *sp; int *qcap;
     int        depth;
     char       cur[2048];
     int        rc;
@@ -141,10 +156,8 @@ static void du_fat_cb(void *ud, const img_fat32_ent_t *e){
     du_tick(x->c,full);
     if(e->is_dir){
         x->c->st->dirs++;
-        if((x->c->max_depth==0 || x->depth<x->c->max_depth) && *x->sp<DU_MAXQ){
-            snprintf(x->q[*x->sp].path,sizeof x->q[0].path,"%s",full);
-            x->q[*x->sp].depth=x->depth+1;
-            (*x->sp)++;
+        if(x->c->max_depth==0 || x->depth<x->c->max_depth){
+            if(!du_push(&x->q,x->qcap,x->sp,full,x->depth+1)) x->c->st->truncated=true;
         }
     }else{
         x->c->st->files++;
@@ -157,7 +170,7 @@ static void du_fat_cb(void *ud, const img_fat32_ent_t *e){
 typedef struct {
     ducx    *c;
     img_iso *iso;
-    du_dirq *q; int *sp;
+    du_dirq *q; int *sp; int *qcap;
     int      depth;
     char     cur[2048];
     int      rc;
@@ -173,10 +186,8 @@ static void du_iso_cb(void *ud, const char *name, bool is_dir, uint64_t size, ui
     du_tick(x->c,full);
     if(is_dir){
         x->c->st->dirs++;
-        if((x->c->max_depth==0 || x->depth<x->c->max_depth) && *x->sp<DU_MAXQ){
-            snprintf(x->q[*x->sp].path,sizeof x->q[0].path,"%s",full);
-            x->q[*x->sp].depth=x->depth+1;
-            (*x->sp)++;
+        if(x->c->max_depth==0 || x->depth<x->c->max_depth){
+            if(!du_push(&x->q,x->qcap,x->sp,full,x->depth+1)) x->c->st->truncated=true;
         }
     }else{
         x->c->st->files++;
@@ -257,15 +268,16 @@ int img_du_run(const img_path *p, uint64_t limit, int max_depth, bool follow,
             return IMG_OK;
         }
         {
-            du_dirq q[DU_MAXQ]; int sp=0;
-            snprintf(q[0].path,sizeof q[0].path,"%s",p->inner); q[0].depth=1; sp=1;
+            du_dirq *q=NULL; int qcap=0, sp=0;
+            if(!du_push(&q,&qcap,&sp,p->inner,1)){ img_iso_close(iso); return IMG_ENOMEM; }
             rc=IMG_OK;
             while(sp>0 && rc==IMG_OK){
                 sp--;
                 du_iso_ctx x; memset(&x,0,sizeof x);
-                x.c=&c; x.iso=iso; x.q=q; x.sp=&sp; x.depth=q[sp].depth; x.rc=IMG_OK;
+                x.c=&c; x.iso=iso; x.q=q; x.sp=&sp; x.qcap=&qcap; x.depth=q[sp].depth; x.rc=IMG_OK;
                 snprintf(x.cur,sizeof x.cur,"%s",q[sp].path);
                 int n=img_iso_list(iso,x.cur,du_iso_cb,&x);
+                q=x.q;         /* ★ 同上 */
                 if(n<0) rc=n; else rc=x.rc;
             }
         }
@@ -308,15 +320,16 @@ int img_du_run(const img_path *p, uint64_t limit, int max_depth, bool follow,
                 img_ntfs_ent_t e; rc=img_ntfs_stat(fs,p->inner,&e);
                 if(rc==IMG_OK){ st->files=1; st->total_bytes=e.size; st->alloc_bytes=e.alloc_bytes; st->scanned=1; }
             }else{
-                du_dirq qbuf[DU_MAXQ]; int sp=0;
-                snprintf(qbuf[0].path,sizeof qbuf[0].path,"%s",p->inner); qbuf[0].depth=1; sp=1;
+                du_dirq *qbuf=NULL; int qcap=0, sp=0;
+                if(!du_push(&qbuf,&qcap,&sp,p->inner,1)){ img_ntfs_umount(fs); img_ctx_close(ctx); return IMG_ENOMEM; }
                 rc=IMG_OK;
                 while(sp>0 && rc==IMG_OK){
                     sp--;
                     du_ntfs_ctx x; memset(&x,0,sizeof x);
-                    x.c=&c; x.q=qbuf; x.sp=&sp; x.depth=qbuf[sp].depth; x.rc=IMG_OK;
+                    x.c=&c; x.q=qbuf; x.sp=&sp; x.qcap=&qcap; x.depth=qbuf[sp].depth; x.rc=IMG_OK;
                     snprintf(x.cur,sizeof x.cur,"%s",qbuf[sp].path);
                     rc=img_ntfs_list_dir_full(fs,x.cur,du_ntfs_cb,&x);
+                qbuf=x.q;      /* ★ du_push 里 realloc 换过地址，外层要跟上 */
                     if(rc==IMG_OK) rc=x.rc;
                 }
             }
@@ -330,15 +343,16 @@ int img_du_run(const img_path *p, uint64_t limit, int max_depth, bool follow,
                 if(rd) img_fat32_rd_close(rd);
                 if(rc==IMG_OK){ st->files=1; st->total_bytes=m.size; st->scanned=1; }
             }else{
-                du_dirq qbuf[DU_MAXQ]; int sp=0;
-                snprintf(qbuf[0].path,sizeof qbuf[0].path,"%s",p->inner); qbuf[0].depth=1; sp=1;
+                du_dirq *qbuf=NULL; int qcap=0, sp=0;
+                if(!du_push(&qbuf,&qcap,&sp,p->inner,1)){ img_fat32_unmount(fs); img_ctx_close(ctx); return IMG_ENOMEM; }
                 rc=IMG_OK;
                 while(sp>0 && rc==IMG_OK){
                     sp--;
                     du_fat_ctx x; memset(&x,0,sizeof x);
-                    x.c=&c; x.q=qbuf; x.sp=&sp; x.depth=qbuf[sp].depth; x.rc=IMG_OK;
+                    x.c=&c; x.q=qbuf; x.sp=&sp; x.qcap=&qcap; x.depth=qbuf[sp].depth; x.rc=IMG_OK;
                     snprintf(x.cur,sizeof x.cur,"%s",qbuf[sp].path);
                     rc=img_fat32_list_dir_full(fs,x.cur,du_fat_cb,&x);
+                qbuf=x.q;      /* ★ 同上 */
                     if(rc==IMG_OK) rc=x.rc;
                 }
             }

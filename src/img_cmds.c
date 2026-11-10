@@ -8577,6 +8577,7 @@ static int cmd_wim_capture(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_str(out,"compression",img_wim_comp_name(c));
     img_result_u64(out,"files",r.files);
     img_result_u64(out,"dirs",r.dirs);
+    img_result_u64(out,"skipped",r.skipped);   /* REQ-65 Q1：跳过的重解析点个数 */
     img_result_u64(out,"bytes_in",r.bytes_in);
     img_result_u64(out,"bytes_out",r.bytes_out);
     img_result_u64(out,"tmpdir_need",r.tmpdir_need);

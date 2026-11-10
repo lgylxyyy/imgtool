@@ -116,11 +116,15 @@ int img_wim_capture(const char *img_path, uint64_t lba, uint64_t part_bytes,
     rc = img_xcopy_run(&src,&dst,&xo,prog,&st);
     if(rc != IMG_OK){
         (void)img_tmpdir_remove(tmpdir);
-        if(err&&errcap) snprintf(err,errcap,"抽取失败（%llu 文件后）：",
-            (unsigned long long)st.files);
+        /* ★ 2026-11-10（REQ-65 §5）：以前末尾只有一个冒号，用户与 App 都看不到原因。
+         *   first_error 现在由 copy_dir 填（出错那条源路径），这里如实带出去。*/
+        if(err&&errcap) snprintf(err,errcap,"抽取失败（%llu 文件后）：%s（rc=%d side=%d）",
+            (unsigned long long)st.files,
+            st.first_error[0]?st.first_error:"未记录原因", rc, st.side);
         return rc;
     }
     out->files = st.files; out->dirs = st.dirs; out->bytes_in = st.bytes;
+    out->skipped = st.skipped;
 
     /* ④ wimlib capture */
     if(wimlib_global_init(0) != 0){

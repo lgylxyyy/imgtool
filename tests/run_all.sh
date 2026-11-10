@@ -170,6 +170,7 @@ run "diskfmt-test（raw / VHD / VMDK 读写 + qemu 互验）"      bash "$ROOT/t
 run "qcow2-zstd-test（qcow2 的 zstd 压缩簇：qemu-img 造、我们读）" python3 "$ROOT/tests/qcow2-zstd-test.py"
 run "vhd-fault-test（N6-3：任意一步失败后映像仍可用、已提交数据不丢）" python3 "$ROOT/tests/vhd-fault-test.py"
 run "vhd-test（VHD 建盘、多块写入、重开与 QEMU 互验）"         python3 "$ROOT/tests/vhd-test.py"
+run "bigdir-wim-test（REQ-65：单目录 >256 条、宽树估算不截断）" python3 "$ROOT/tests/bigdir-wim-test.py"
 run "wim-capture-test（捕获、临时目录清理、产物可读）"          bash "$ROOT/tests/wim-capture-test.sh"
 run "provenance-test（内置模板 == 微软原件；缺原件则跳过）"   bash "$ROOT/tests/provenance-test.sh"
 run "style-check（用户可见文本符合 STYLE-GUIDE）"           python3 "$ROOT/tests/style-check.py"

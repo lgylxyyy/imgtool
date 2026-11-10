@@ -30,8 +30,7 @@ typedef enum {
     IMG_WIM_COMP_LZMS        /* LZMS（ESD 用，压缩率最高，慢）*/
 } img_wim_comp;
 
-typedef struct {
-    img_wim_comp comp;
+typedef struct {    img_wim_comp comp;
     const char  *image_name;    /* 映像名（默认 "Windows"）*/
     const char  *image_desc;    /* 映像描述（可 NULL）*/
     bool         capture_acl;   /* 是否保留 ACL（默认 true）*/
@@ -44,6 +43,7 @@ typedef struct {
     uint64_t bytes_in;          /* 原始字节 */
     uint64_t bytes_out;         /* WIM 字节 */
     uint64_t tmpdir_need;       /* 估算需要的临时空间（= bytes_in）*/
+    uint64_t skipped;      /* 跳过的重解析点（junction/符号链接）个数 */
 } img_wim_capture_result_t;
 
 /* 从 qcow2 的某个 NTFS 分区捕获成 WIM。

@@ -209,9 +209,42 @@ void img_result_fail(img_result *r,int rc,const char *code,const char *at,
 
 /* ---------- JSON 渲染（栈上，无 malloc） ---------- */
 typedef struct { char *p,*start,*end; } W;
+/* UTF-8 序列校验（只做"能不能安全放进 JSON"这一件事）。
+ * 返回合法序列的字节数（1..4）；非法返回 0。
+ * ★ 2026-11-10（REQ-65）：文件名是任意字节，NTFS 上确实见得到非法 UTF-8。
+ *   以前 >=0x80 一律原样透传 → 整条 JSON 不是合法 UTF-8，App 的解析器直接抛。*/
+static int u8_seq(const unsigned char *p){
+    unsigned char c=p[0];
+    if(c<0x80) return 1;
+    if(c>=0xC2 && c<=0xDF) return (p[1]>=0x80&&p[1]<=0xBF) ? 2 : 0;
+    if(c>=0xE0 && c<=0xEF){
+        if(!(p[1]>=0x80&&p[1]<=0xBF) || !(p[2]>=0x80&&p[2]<=0xBF)) return 0;
+        if(c==0xE0 && p[1]<0xA0) return 0;          /* overlong */
+        if(c==0xED && p[1]>0x9F) return 0;          /* surrogate */
+        return 3;
+    }
+    if(c>=0xF0 && c<=0xF4){
+        if(!(p[1]>=0x80&&p[1]<=0xBF) || !(p[2]>=0x80&&p[2]<=0xBF) ||
+           !(p[3]>=0x80&&p[3]<=0xBF)) return 0;
+        if(c==0xF0 && p[1]<0x90) return 0;          /* overlong */
+        if(c==0xF4 && p[1]>0x8F) return 0;          /* > U+10FFFF */
+        return 4;
+    }
+    return 0;
+}
 static void jesc(W *w,const char *s){
-    for(; s&&*s; s++){
+    for(; s&&*s; ){
         unsigned char c=(unsigned char)*s; const char *rep=NULL; char tmp[8];
+        if(c>=0x80){
+            int n=u8_seq((const unsigned char*)s);
+            if(n>0){                                   /* 合法 UTF-8：原样搬 */
+                if(w->p+n<w->end){ memcpy(w->p,s,(size_t)n); w->p+=n; }
+                s+=n; continue;
+            }
+            rep="\\ufffd"; s++;                      /* 非法字节：替换成 U+FFFD */
+            size_t l=strlen(rep); if(w->p+l<w->end){ memcpy(w->p,rep,l); w->p+=l; }
+            continue;
+        }
         switch(c){
             case '"': rep="\\\""; break; case '\\': rep="\\\\"; break;
             case '\n': rep="\\n"; break; case '\r': rep="\\r"; break; case '\t': rep="\\t"; break;
@@ -219,6 +252,7 @@ static void jesc(W *w,const char *s){
         }
         if(rep){ size_t l=strlen(rep); if(w->p+l<w->end){ memcpy(w->p,rep,l); w->p+=l; } }
         else if(w->p+1<w->end) *w->p++=(char)c;
+        s++;
     }
 }
 static void wkey(W *w,const char *k){
