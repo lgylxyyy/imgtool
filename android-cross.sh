@@ -120,5 +120,17 @@ for abi in "${ABIS[@]}"; do
     exit 1
   fi
   printf '    导出     %s 个符号\n' "$(nm -D --defined-only "$so" | grep -cE ' [TWtw] ')"
+  # ★ 2026-11-11：交付物必须说清"这份 .so 对应哪个提交"。
+  #   踩过的坑：改了 src/img_cmds.c 之后只重编了宿主工具，忘了重打 android 库，
+  #   结果发出去 .so 的 md5 与当次提交对不上（增量构建不会自己发现这种事）。
+  #   这里把提交号 + 是否 dirty 打出来，并落到 buildinfo 里，换库时照着抄。
+  _commit="$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  if [ -n "$(git -C "$SRC" status --porcelain 2>/dev/null)" ]; then
+    _commit="$_commit-dirty"
+    echo "  ⚠ 工作树有未提交改动（$_commit）：这份产物不能作为发布物，换库前先 clean build" >&2
+  fi
+  printf '    提交     %s\n' "$_commit"
+  printf '%s  size=%s  md5=%s\n' "$_commit" "$(stat -c%s "$so")" "$(md5sum "$so" | cut -d' ' -f1)" \
+    > "$b/libimgtool.so.buildinfo"
 done
 echo "=== 完成：${ABIS[*]} ==="
