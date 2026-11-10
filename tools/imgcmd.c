@@ -380,6 +380,17 @@ int main(int argc, char **argv){
         if(eq){ size_t n=(size_t)(eq-a-2); if(n>=sizeof key) n=sizeof key-1; memcpy(key,a+2,n); key[n]=0; }
         else   snprintf(key,sizeof key,"%s",a+2);
 
+        if(!strcmp(key,"version")){
+            /* REQ-64：App 侧一直以为有 --version（其实没有），补上。
+             * 输出与 `imgcmd version` 同构，方便脚本直接 jq。*/
+            printf("{\"ok\":true,\"cmd\":\"version\",\"version\":1,\"data\":{"
+                   "\"tool\":\"imgtool\",\"version\":\"%s\",\"build_date\":\"%s\","
+                   "\"commit\":\"%s\",\"platform\":\"%s\",\"abi\":\"%s\"}}\n",
+                   IMGTOOL_BUILD_DATE, IMGTOOL_BUILD_DATE, IMGTOOL_BUILD_COMMIT,
+                   img_platform(), img_abi());
+            img_args_free(args);
+            return 0;
+        }
         if(!strcmp(key,"list")){ list=true; continue; }
         if(!strcmp(key,"help")){ helpcmd=eq?val:NULL; if(!eq) list=true; continue; }
         if(!strcmp(key,"ro")){ ro=true; continue; }

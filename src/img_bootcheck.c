@@ -378,7 +378,9 @@ int img_bootcheck_ex(img_qcow2 *q, img_boot_mode_t mode, unsigned flags,
 
     bool has_gpt = (t.table == IMG_TABLE_GPT);
     bool has_mbr = (t.table == IMG_TABLE_MBR) || has_gpt; /* GPT 也有保护 MBR */
-    out->is_uefi = (mode==IMG_BOOT_UEFI) || (mode==IMG_BOOT_AUTO && has_gpt);
+    out->is_uefi = (mode==IMG_BOOT_UEFI)
+                || (flags & IMG_BC_FLAG_UEFI32)          /* --mode=uefi32 钉死 UEFI */
+                || (mode==IMG_BOOT_AUTO && has_gpt);
     const char *modename = out->is_uefi ? "UEFI/GPT" : "BIOS/MBR";
 
     add(out,"mode","引导模式",IMG_CK_INFO,true,"%s（%s，%d 个分区）",

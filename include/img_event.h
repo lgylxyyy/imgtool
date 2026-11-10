@@ -19,7 +19,15 @@
 #ifndef IMG_EVENT_H
 #define IMG_EVENT_H
 
-#define IMGTOOL_VERSION "imgtool 2026.10.23"
+/* ★ REQ-64：版本串必须能区分构建。日期/提交号由 CMake 注入；直接在别的
+ *   构建系统里编（没有这两个宏）时退回固定串，不至于编不过。*/
+#ifndef IMGTOOL_BUILD_DATE
+#define IMGTOOL_BUILD_DATE "2026.10.23"
+#endif
+#ifndef IMGTOOL_BUILD_COMMIT
+#define IMGTOOL_BUILD_COMMIT "unknown"
+#endif
+#define IMGTOOL_VERSION "imgtool " IMGTOOL_BUILD_DATE
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>

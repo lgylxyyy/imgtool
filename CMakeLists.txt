@@ -148,6 +148,29 @@ set(IMG_SOURCES
   src/img_7z_solid.c     # 7z 固实标志（自解 7z 头；REQ-51 A）
 )
 
+# ---- 构建标识（REQ-64 Q6）----
+# 版本串以前写死 "imgtool 2026.10.23"，四份内容不同的构建印同一个串，
+# App 没法用它核对交付。改成构建日期 + 提交号，写进 --list 的 features 之外，
+# 由 version 命令 / --version 暴露。
+string(TIMESTAMP IMGTOOL_BUILD_DATE "%Y.%m.%d" UTC)
+set(IMGTOOL_BUILD_COMMIT "unknown")
+find_package(Git QUIET)
+if(GIT_FOUND)
+  execute_process(COMMAND ${GIT_EXECUTABLE} -C "${CMAKE_SOURCE_DIR}" rev-parse --short HEAD
+                  OUTPUT_VARIABLE _commit OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  execute_process(COMMAND ${GIT_EXECUTABLE} -C "${CMAKE_SOURCE_DIR}" status --porcelain
+                  OUTPUT_VARIABLE _dirty OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  if(_commit)
+    set(IMGTOOL_BUILD_COMMIT "${_commit}")
+    if(_dirty)
+      string(APPEND IMGTOOL_BUILD_COMMIT "-dirty")
+    endif()
+  endif()
+endif()
+add_compile_definitions(IMGTOOL_BUILD_DATE="${IMGTOOL_BUILD_DATE}"
+                        IMGTOOL_BUILD_COMMIT="${IMGTOOL_BUILD_COMMIT}")
+message(STATUS "imgtool: build ${IMGTOOL_BUILD_DATE} commit ${IMGTOOL_BUILD_COMMIT}")
+
 # ---- zlib（qcow2 压缩簇必需；安卓 NDK 自带或可交叉编译）----
 set(IMG_ZLIB_LIBS "")
 if(IMG_WITH_ZLIB)

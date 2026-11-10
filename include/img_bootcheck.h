@@ -53,6 +53,11 @@ typedef struct {
 /* 模式：自动探测 / 强制某一种 */
 typedef enum { IMG_BOOT_AUTO = 0, IMG_BOOT_UEFI, IMG_BOOT_BIOS } img_boot_mode_t;
 
+/* flags 位（2026-11-10，REQ-64）：命令层 --mode=uefi32 用它把 32 位 UEFI 钉死。
+ *   为什么单独一个位而不是新 enum 值：is_uefi 的判定散在检查逻辑各处，
+ *   加一个"强制 UEFI"的位比新增第四种 mode 改动面小、也不会漏判。*/
+#define IMG_BC_FLAG_UEFI32   1u     /* 调用方声明这是 32 位 UEFI 盘 */
+
 /* 检查项开关（默认 0）*/
 /* ★ 默认【不把"没有恢复分区"当失败/警告】—— 恢复分区是用户显式勾选才做的
  *   （DESIGN-OUTPUT.md §十一、手册 §15）。只有调用方明确"该镜像应当带恢复分区"时

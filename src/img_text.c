@@ -243,7 +243,7 @@ static const char *const T[][2] = {
     {"引导方式：mbr(BIOS) | gpt(UEFI)","boot mode: mbr (BIOS) | gpt (UEFI)"},
     {"引导方式：auto(按分区表) | mbr | gpt","boot mode: auto (from the partition table) | mbr | gpt"},
     {"要判定的分区表：gpt | mbr | auto(两种都答)","partition table to judge: gpt | mbr | auto (answers both)"},
-    {"引导模式：auto | uefi | bios","boot mode: auto | uefi | bios"},
+    {"引导模式：auto | uefi | uefi32 | bios（uefi32=32 位 UEFI 盘）","boot mode: auto | uefi | uefi32 | bios (uefi32 = 32-bit UEFI)"},
 
     {"系统分区大小（GiB）","system partition size (GiB)"},
     {"系统保留分区大小（MiB，活动）","system reserved partition size (MiB, active)"},

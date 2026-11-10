@@ -3791,7 +3791,7 @@ static int cmd_bcd_gen_uefi(img_ctx *ctx, const img_args *in, img_result *out){
 /* ---------- boot.check（= imgbc，但走命令表/JSON）---------- */
 static const img_arg A_BOOTCHECK[] = {
     {"img",  IMG_A_STR,  true,  NULL,    "映像路径（qcow2）", NULL},
-    {"mode", IMG_A_ENUM, false, "auto",  "引导模式：auto | uefi | bios", NULL},
+    {"mode", IMG_A_ENUM, false, "auto",  "引导模式：auto | uefi | uefi32 | bios（uefi32=32 位 UEFI 盘）", NULL},
     {"expect-recovery", IMG_A_BOOL, false, "false", "要求有恢复分区（默认不要求）", NULL},
 };
 static int cmd_boot_check(img_ctx *ctx, const img_args *in, img_result *out){
@@ -3799,13 +3799,15 @@ static int cmd_boot_check(img_ctx *ctx, const img_args *in, img_result *out){
 #if IMG_WITH_NTFS3G
     const char *m=img_args_get(in,"mode"); if(!m||!*m) m="auto";
     img_boot_mode_t mode=IMG_BOOT_AUTO;
+    unsigned flags=0;
+    bool want32=false;
     if(!strcasecmp(m,"uefi")) mode=IMG_BOOT_UEFI;
+    else if(!strcasecmp(m,"uefi32")){ mode=IMG_BOOT_UEFI; flags|=IMG_BC_FLAG_UEFI32; want32=true; }
     else if(!strcasecmp(m,"bios")) mode=IMG_BOOT_BIOS;
-    else if(strcasecmp(m,"auto")){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","mode","只接受 auto | uefi | bios",NULL); return IMG_EINVAL; }
+    else if(strcasecmp(m,"auto")){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","mode","只接受 auto | uefi | uefi32 | bios",NULL); return IMG_EINVAL; }
     /* ★ --expect-recovery 已废弃（2026-11-04）：恢复分区的检查整体搬去 recovery.status。
      *   参数保留但不再起作用 —— App 旧调用传了也不会报"未知参数"。 */
     (void)img_args_bool(in,"expect-recovery",false);
-    unsigned flags = 0;
     img_qcow2 *q=img_ctx_qcow2(ctx);
     if(!q){ return qc_open_fail(out,ctx); }
     img_bootcheck_result_t r; memset(&r,0,sizeof r);
@@ -3821,7 +3823,7 @@ static int cmd_boot_check(img_ctx *ctx, const img_args *in, img_result *out){
     static char jb[65536];
     int n=img_bootcheck_json_array(&r,jb,sizeof jb);   /* ★ 必须是数组，不是 NDJSON */
     char sum[256]; img_bootcheck_summary(&r,sum,sizeof sum);
-    img_result_str(out,"mode", r.is_uefi?"uefi":"bios");
+    img_result_str(out,"mode", want32?"uefi32":(r.is_uefi?"uefi":"bios"));
     img_result_u64(out,"count",(uint64_t)r.count);
     img_result_u64(out,"required_fail",(uint64_t)r.n_required_fail);
     img_result_u64(out,"warn_fail",(uint64_t)r.n_warn_fail);
@@ -8813,6 +8815,19 @@ static int cmd_sys_tmpdir(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+/* version（REQ-64）：App 要能核对「装到手机上的库是哪一次构建」。
+ * 版本串以前写死 2026.10.23，四份不同的构建印同一个串 —— 现在带日期与提交号。*/
+static int cmd_version(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx; (void)in;
+    img_result_str(out,"tool","imgtool");
+    img_result_str(out,"version",IMGTOOL_BUILD_DATE);
+    img_result_str(out,"build_date",IMGTOOL_BUILD_DATE);
+    img_result_str(out,"commit",IMGTOOL_BUILD_COMMIT);
+    img_result_str(out,"platform",img_platform());
+    img_result_str(out,"abi",img_abi());
+    return IMG_OK;
+}
+
 static const img_arg A_DU[] = {
     {"src",       IMG_A_STR, true,  NULL,     "统一路径（host:/… / 映像!p3:/… / ISO!:/… / WIM!1:/… / 包!:/…）", NULL},
     {"limit",     IMG_A_U64, false, "2000000","最多看多少条目；超了停下并回 truncated=true（不报错）", NULL},
@@ -9386,6 +9401,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_NTFSPUT,(int)(sizeof A_NTFSPUT/sizeof A_NTFSPUT[0]), cmd_ntfs_put, NULL, 0},
     {"ntfs.export","1.0", "把 NTFS 分区里的文件导出到本地（抽 bootmgr/boot.sdi/winre.wim）",
         A_NTFSEXPORT,(int)(sizeof A_NTFSEXPORT/sizeof A_NTFSEXPORT[0]), cmd_ntfs_export, NULL, 0},
+    {"version","1.0","工具的构建标识（日期/提交号）：App 用它核对交付的是哪一份库",
+        NULL, 0, cmd_version, NULL, 0},
     {"win.finish", "1.0", "直接写入后首次启动收尾：离线把 SYSTEM\\Setup\\Status\\ChildCompletion\\setup.exe 改成 3（微软官方修复）",
         A_WINFINISH,(int)(sizeof A_WINFINISH/sizeof A_WINFINISH[0]), cmd_win_finish, NULL, 0},
     {"reg.get", "1.0", "离线读注册表值（SYSTEM/SOFTWARE/SAM/SECURITY/DEFAULT；映像必须关机）",
