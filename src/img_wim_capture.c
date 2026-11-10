@@ -156,8 +156,16 @@ static enum wimlib_progress_status cap_on_progress(enum wimlib_progress_msg msg,
     case WIMLIB_PROGRESS_MSG_WRITE_STREAMS:
         img_prog_phase(c->p, IMG_PH_WRITE, "压缩写出 WIM");
         img_prog_op(c->p, IMG_OP_COMPRESS);
-        img_prog_bytes(c->p, info->write_streams.completed_bytes,
-                             info->write_streams.total_bytes);
+        {
+            /* ★ REQ-69 ①：这里【不能冻结】分母。wimlib 的 total_bytes 是
+             *   "未压缩上界"，发现重复数据后会往下调；冻结第一次的值会让
+             *   cur/total 永远到不了 100%（实测 8.43 GB 的分母、4.57 GB 收尾 = 54%）。
+             *   直接用它给的值，pct 由引擎夹成单调不减即可。*/
+            uint64_t tot = info->write_streams.total_bytes;
+            uint64_t cur = info->write_streams.completed_bytes;
+            if(tot && cur > tot) cur = tot;
+            img_prog_bytes(c->p, cur, tot);
+        }
         img_prog_count(c->p, info->write_streams.completed_streams,
                              info->write_streams.total_streams);
         break;
@@ -190,6 +198,9 @@ int img_wim_capture(const char *img_path, uint64_t lba, uint64_t part_bytes,
         return rc;
     }
     out->tmpdir_need = need_bytes;
+
+    /* ★ REQ-69 ④：先把上次"取消后待清"的 -garbage 收走，免得占着空间不让这次跑 */
+    (void)img_tmpdir_sweep();
 
     /* ② 临时目录（P1-6 统一命名）*/
     const char *td = img_tmpdir();
@@ -225,15 +236,26 @@ int img_wim_capture(const char *img_path, uint64_t lba, uint64_t part_bytes,
     /* ★ REQ-68 §2：totalBytes 全程不变，App 的 ETA 才稳 */
     xo.agg_bytes_total = need_bytes;
     xo.agg_files_total = need_files;
+    /* ★ REQ-69 ⑥：先把段定成 extract —— 否则 xcopy 会按"独立 copy 命令"
+     *   先发一条 phase=copy（App 没这个文案，界面上会出现两帧不明阶段）。*/
+    if(prog) img_prog_phase(prog, IMG_PH_EXTRACT, "抽取文件");
     img_xcopy_stats st; memset(&st,0,sizeof st);
     rc = img_xcopy_run(&src,&dst,&xo,prog,&st);
     if(rc != IMG_OK){
-        (void)img_tmpdir_remove(tmpdir);
-        /* ★ 2026-11-10（REQ-65 §5）：以前末尾只有一个冒号，用户与 App 都看不到原因。
-         *   first_error 现在由 copy_dir 填（出错那条源路径），这里如实带出去。*/
-        if(err&&errcap) snprintf(err,errcap,"抽取失败（%llu 文件后）：%s（rc=%d side=%d）",
-            (unsigned long long)st.files,
-            st.first_error[0]?st.first_error:"未记录原因", rc, st.side);
+        /* ★ REQ-69 ④：取消 ≠ 失败。取消时把整棵树改个名字（O(1)）交给下次 sweep；
+         *   失败时（数据可能有用）照旧同步删。*/
+        if(rc == IMG_ECANCELLED) (void)img_tmpdir_discard(tmpdir);
+        else                     (void)img_tmpdir_remove(tmpdir);
+        if(err&&errcap){
+            if(rc == IMG_ECANCELLED)
+                snprintf(err,errcap,"已取消（已抽取 %llu 个文件）",(unsigned long long)st.files);
+            else
+            /* ★ 2026-11-10（REQ-65 §5）：以前末尾只有一个冒号，用户与 App 都看不到原因。
+             *   first_error 现在由 copy_dir 填（出错那条源路径），这里如实带出去。*/
+                snprintf(err,errcap,"抽取失败（%llu 文件后）：%s（rc=%d side=%d）",
+                    (unsigned long long)st.files,
+                    st.first_error[0]?st.first_error:"未记录原因", rc, st.side);
+        }
         return rc;
     }
     out->files = st.files; out->dirs = st.dirs; out->bytes_in = st.bytes;
@@ -269,7 +291,11 @@ int img_wim_capture(const char *img_path, uint64_t lba, uint64_t part_bytes,
         if(err&&errcap) snprintf(err,errcap,"wimlib_add_empty_image 失败");
         return IMG_EIO;
     }
-    int add_flags = 0;
+    /* ★ REQ-69 ②：WIMLIB_PROGRESS_MSG_SCAN_DENTRY【只在 VERBOSE 下发送】
+     *   （wimlib.h 原文：This message is only sent if WIMLIB_ADD_FLAG_VERBOSE
+     *   has been specified）。不加这个标志，pack 段就只有 BEGIN/END 两条、
+     *   item 永远是空 —— 用户看到圆盘下方全空、环还停在 100%。*/
+    int add_flags = WIMLIB_ADD_FLAG_VERBOSE;
     if(!opts->capture_acl) add_flags |= WIMLIB_ADD_FLAG_NO_ACLS;   /* 默认带 ACL */
 
     /* ★ REQ-67：add_tree 与 write 都通过这个注册的回调上报进度 */
@@ -297,7 +323,8 @@ int img_wim_capture(const char *img_path, uint64_t lba, uint64_t part_bytes,
         return canc ? IMG_ECANCELLED : IMG_EIO;
     }
 
-    /* ⑤ 收尾 */
+    /* ⑤ 收尾（REQ-69 ①：write 段末必须有 pct=100，否则圆环停在半路）*/
+    if(prog) img_prog_done(prog, "写入完成");
     struct stat sb;
     if(stat(out_wim,&sb)==0) out->bytes_out = (uint64_t)sb.st_size;
     (void)img_tmpdir_remove(tmpdir);

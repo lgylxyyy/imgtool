@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 
 static img_progress_t g_last;
 static int g_events = 0;
@@ -65,6 +66,25 @@ int main(void){
     usleep(300*1000);
     img_prog_emit(p);
     ok(g_last.eta_s >= 1 && g_last.eta_s <= keep + 2, "无进展时 ETA 不跳变");
+
+    /* ⑤b 事件洪水：狂调 20,000 次，1 秒内最多 ~5 条（REQ-69 ③：以前 990 条/秒）*/
+    {
+        int before = g_events;
+        struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
+        for(int i = 0; i < 20000; i++){
+            img_prog_phase(p, IMG_PH_EXTRACT, "复制文件");   /* 同一段：以前每次都强制发 */
+            img_prog_op(p, IMG_OP_WRITE);                    /* 同一 op：同上 */
+            img_prog_bytes(p, 60u*1024*1024 + (uint64_t)i, 100u*1024*1024);
+            img_prog_item(p, "/Windows/System32/x.dll");
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        double sec = (double)(t1.tv_sec-t0.tv_sec) + (double)(t1.tv_nsec-t0.tv_nsec)/1e9;
+        int n = g_events - before;
+        double per_sec = (sec > 0.05) ? n/sec : (double)n;
+        char msg[160];
+        snprintf(msg,sizeof msg,"20,000 次轰炸 → %d 条事件（%.1f 条/秒，上限≈5）", n, per_sec);
+        ok(n <= 8 && sec >= 0.0, msg);
+    }
 
     /* ⑥ 完成 */
     img_prog_done(p, "done");

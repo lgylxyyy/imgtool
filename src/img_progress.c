@@ -184,7 +184,8 @@ void img_prog_overall(img_prog *p, uint64_t cur, uint64_t total){
 }
 void img_prog_phase(img_prog *p, img_phase_t ph, const char *msg){
     if(!p) return;
-    if(p->cur.phase != ph){
+    const int changed = (p->cur.phase != ph);
+    if(changed){
         /* ★ 换阶段 = 换一套数值。留着上一阶段的 3/3 会让新阶段第一帧就报 100%，
          *   App 那边看到的是"进度条瞬间冲到 95% 又掉回来"。*/
         p->cur.phase = ph;
@@ -199,12 +200,17 @@ void img_prog_phase(img_prog *p, img_phase_t ph, const char *msg){
     }
     if(msg) strcopy(p->msg_buf, sizeof p->msg_buf, msg);
     p->cur.msg = p->msg_buf;
-    do_emit(p, 1);                    /* 阶段变化立即上报 */
+    /* ★ REQ-69 ③：xcopy 每复制一个文件都会调一次本函数（同一段）。
+     *   以前无条件 do_emit(p,1) → 6 万个文件就是 6 万条强制事件（实测 990 条/秒）。
+     *   只有真的换段才强制发，同段走 200 ms 节流。*/
+    do_emit(p, changed ? 1 : 0);
 }
 void img_prog_op(img_prog *p, img_op_t op){
     if(!p) return;
     p->cur.op = op;
-    do_emit(p, 1);                    /* 操作变化立即上报 */
+    /* ★ REQ-69 ③：op 变化【也不】强制发 —— xcopy 里 read/write 交替，
+     *   强制发就是每秒几十条。op 只是字段，下一次 200 ms 节流上报会带出去。*/
+    do_emit(p, 0);
 }
 void img_prog_count(img_prog *p, uint64_t cur, uint64_t total){
     if(!p) return;
@@ -224,7 +230,10 @@ void img_prog_item(img_prog *p, const char *item){
     if(strcmp(p->item_buf, n) != 0){
         strcopy(p->item_buf, sizeof p->item_buf, n);
         p->cur.item = p->item_buf;
-        do_emit(p,1);                  /* 当前文件换了 → 立即上报 */
+        /* ★ REQ-68 §3.1：每换一个文件要发一条，但限到 5 条/秒 ——
+         *   扫描 6 万个文件时不能一条文件一条事件（JNI 侧撑不住）。
+         *   走节流通道（默认 200 ms ≈ 5 条/秒）。*/
+        do_emit(p,0);
     }
 }
 void img_prog_emit(img_prog *p){
@@ -271,6 +280,10 @@ void img_prog_seal(img_prog *p, const char *msg){
     do_emit(p, 1);
 }
 
+img_phase_t img_prog_phase_of(const img_prog *p){
+    return p ? p->cur.phase : IMG_PH_NONE;
+}
+
 void img_prog_cancel(img_prog *p){
     if(!p) return;
     p->cancelled = 1;
@@ -307,14 +320,14 @@ int img_prog_json(const img_progress_t *pr, char *buf, int cap){
         "{\"ev\":\"progress\",\"phase\":\"%s\",\"op\":\"%s\","
         "\"cur\":%llu,\"total\":%llu,"
         "\"curBytes\":%llu,\"totalBytes\":%llu,"
-        "\"pct\":%d,\"eta\":%d,\"elapsed\":%d,"
+        "\"pct\":%d,\"eta\":%d,\"elapsed\":%d,\"elapsed_ms\":%lld,"
         "\"overall_pct\":%d,\"overall_cur_bytes\":%llu,\"overall_total_bytes\":%llu,"
         "\"bytes_kind\":\"%s\",\"archive_cur_bytes\":%llu,\"archive_total_bytes\":%llu,"
         "\"item\":\"%s\",\"msg\":\"%s\"}",
         img_phase_name(pr->phase), img_op_name(pr->op),
         (unsigned long long)pr->cur,(unsigned long long)pr->total,
         (unsigned long long)pr->cur_bytes,(unsigned long long)pr->total_bytes,
-        pr->pct, pr->eta_s, pr->elapsed_s,
+        pr->pct, pr->eta_s, pr->elapsed_s, (long long)pr->elapsed_s*1000LL,
         pr->overall_pct, (unsigned long long)pr->overall_cur_bytes,
         (unsigned long long)pr->overall_total_bytes,
         pr->bytes_kind?pr->bytes_kind:"raw",

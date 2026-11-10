@@ -163,6 +163,9 @@ const char *img_tmpdir(void);
  *   img_tmpdir_free_bytes() 查询该目录所在卷的空间 */
 const char *img_tmpdir_source(void);
 void        img_tmpdir_reset(void);
+/* 取消时的"待清"：只改个名字（O(1)），真正的删除交给 img_tmpdir_sweep()。
+ * 33,000 个文件实测删一次 6.8 秒 —— 用户点取消后卡 7 秒就是这个（REQ-69 ④）。*/
+int         img_tmpdir_discard(const char *path);
 int         img_tmpdir_sweep(void);
 int         img_tmpdir_free_bytes(uint64_t *out_free, uint64_t *out_total);
 

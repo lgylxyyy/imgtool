@@ -25,7 +25,9 @@ void img_prog_op(img_prog *p, img_op_t op);
 /* 设置进度数据（内部按节流决定是否真正上报） */
 void img_prog_count(img_prog *p, uint64_t cur, uint64_t total);
 void img_prog_bytes(img_prog *p, uint64_t cur_bytes, uint64_t total_bytes);
-void img_prog_item(img_prog *p, const char *item);   /* item 换了就立即上报 */
+void img_prog_item(img_prog *p, const char *item);   /* item 换了就上报（走节流，≤5 条/秒）*/
+/* 当前 phase（IMG_PH_NONE = 还没设）。xcopy 用它判断"调用方已经定好段了"。*/
+img_phase_t img_prog_phase_of(const img_prog *p);
 /* 全局进度（REQ-49 §3）：cur 单调（传小值会被忽略），pct 单调不减。
  * total=0 表示未知（此时 overall_pct=-1）。*/
 void img_prog_overall(img_prog *p, uint64_t cur, uint64_t total);

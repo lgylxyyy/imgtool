@@ -59,6 +59,10 @@ target_link_libraries(thread_test PRIVATE imgtool)
 add_executable(cancel_test cancel_test.c)
 target_link_libraries(cancel_test PRIVATE imgtool)
 
+# 临时目录删除耗时基准（REQ-69 ④ 的证据；不进 run_all，手动跑）
+add_executable(tmpdir_bench rmbench.c)
+target_link_libraries(tmpdir_bench PRIVATE imgtool)
+
 # 进度/ETA 口径（REQ-67：阶段清零、字节优先、ETA 同单位）
 add_executable(progress_test progress_test.c)
 target_link_libraries(progress_test PRIVATE imgtool)

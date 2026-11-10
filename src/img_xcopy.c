@@ -1208,6 +1208,7 @@ static int copy_dir(xctx *c, const char *spath, const char *dpath, int depth, bo
     if(rc!=IMG_OK){ c->st->side=1; return rc; }
     char failed[4096]; failed[0]=0;
     for(int i=0;i<l.n && rc==IMG_OK;i++){
+        if(img_cancelled()){ rc=IMG_ECANCELLED; break; }   /* REQ-69 ④：目录间也要能停 */
         if(l.v[i].skip){ c->st->skipped++; continue; }
         int ex=x_excluded(c->o,l.v[i].name);        /* REQ-32：顶层目录本身不参与（这里只滤子项）*/
         if(ex){ if(ex==1) c->st->skipped_trashed++; else c->st->skipped_excluded++; continue; }
@@ -1354,7 +1355,9 @@ int img_xcopy_run(const img_xloc *src, const img_xloc *dst,
         if(isdir && !o.recursive){ rc=IMG_ENOTSUP; goto out; }
     }
 
-    if(prog){ img_prog_phase(prog,IMG_PH_COPY,"复制");
+    /* ★ REQ-69 ⑥：调用方（wim.capture）已经定好段了 —— 别把它盖成 copy。
+     *   只有独立跑 copy 命令（段还是 none）时才用 copy。*/
+    if(prog && img_prog_phase_of(prog) == IMG_PH_NONE){ img_prog_phase(prog,IMG_PH_COPY,"复制");
               img_prog_op(prog,IMG_OP_WRITE); }
     {
         xctx c; memset(&c,0,sizeof c);
