@@ -127,7 +127,7 @@ To build the library for the app, check out `android` and run `./android-cross.s
 
 | Area | Capability |
 |---|---|
-| **Image formats** | qcow2 create / expand / compact / clone; raw, VHD (dynamic), VMDK (sparse) read-write; format detected by magic, not extension (see the unsupported list below) |
+| **Image formats** | qcow2 create / expand / compact / clone (compressed clusters: zlib and **zstd**); raw, VHD (dynamic), VMDK (sparse) read-write; format detected by magic, not extension (see the unsupported list below) |
 | **Partition tables** | MBR / GPT read-write; role-based auto layout (ESP + MSR + system + recovery); add / remove / resize; attribute bits; whole-table export / import |
 | **FAT32** | List, read, write, mkdir, rename, delete, volume label, timestamps, 8.3 short names |
 | **NTFS** | List, read, write, recursive copy / move, delete, `du`, volume label, format (mkntfs) |
@@ -151,9 +151,11 @@ To build the library for the app, check out `android` and run `./android-cross.s
 
 **Not supported** (reported honestly by the command layer; never silently mishandled)
 
+> zstd compressed clusters are supported as of 2026-11-10, but the build must find
+> `libzstd`; builds without it refuse such images and report `features.zstd = false`.
+
 | Item | Status | What happens |
 |---|---|---|
-| qcow2 **zstd clusters** | only zlib is linked, no zstd decoder; `allow_zstd` defaults to off and no command turns it on | the image cannot be opened |
 | qcow2 **encryption** | rejected as soon as `INCOMPAT_ENCRYPTED` is set in the header | the image cannot be opened |
 | **VHDX** | only VHD dynamic (vpc) is supported; there is no VHDX parser | `img.create --format=vhdx` fails with an argument error |
 | NTFS **hard links** | upstream `libntfs-3g` still has `ntfs_link` as a FIXME, so links cannot be created | no such command; moving/copying does not change the link count |

@@ -6,6 +6,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <zlib.h>
+#ifdef IMG_HAVE_ZSTD
+#include <zstd.h>
+#endif
 
 /* ---------- 大端读取（qcow2 全镜像大端）---------- */
 static inline uint16_t be16(const void *p){
@@ -38,7 +41,14 @@ img_qcow2 *img_qcow2_open(img_io *io, const img_qcow2_opts_t *o){
     if(!q) return NULL;
     q->io = io; q->own_io = false;
     q->read_only = o ? o->read_only : false;
-    q->allow_zstd = o ? o->allow_zstd : false;
+    /* ★ 2026-11-10：装了 libzstd 就默认允许 zstd 压缩簇 —— 以前默认拒绝是因为
+     *   没有解码器，硬读会写出坏数据；现在有解码器，拒绝反而让用户打不开正常映像。
+     *   显式传 opts->allow_zstd=false 仍然可以强制拒绝（测试用）。*/
+#ifdef IMG_HAVE_ZSTD
+    q->allow_zstd = o ? (o->allow_zstd || true) : true;
+#else
+    q->allow_zstd = false;
+#endif
     q->cb = o ? o->cb : NULL; q->cb_ud = o ? o->cb_ud : NULL;
 
     /* ★ P3（2026-11-09）：先探测格式。qcow2 / raw / vhd / vmdk 共用本类型。
@@ -107,9 +117,14 @@ img_qcow2 *img_qcow2_open(img_io *io, const img_qcow2_opts_t *o){
             q->h.refcount_order = 4;              /* 无法读取就按默认 16 位 */
             q->h.header_length  = 104;
         }
-        if(q->h.header_length > 104){             /* 104: compression_type */
-            uint8_t ct[2]; if(img_io_read_full(io,104,ct,2)==IMG_OK)
-                q->h.compression_type = be16(ct);
+        /* ★ compression_type 是【1 字节】，在 header_length 之后（offset 104）：
+         *     0 = deflate(zlib)，1 = zstd
+         *   以前按 2 字节大端读 → 拿到的是高半部分（zstd 镜像读到 0x0100），
+         *   于是恒被当成 zlib，解压出来是错的（一律 ECORRUPT）。
+         *   出处：QEMU qcow2 规范「104: compression_type」。*/
+        if(q->h.header_length > 104){
+            uint8_t ct=0; if(img_io_read_full(io,104,&ct,1)==IMG_OK)
+                q->h.compression_type = ct;
         }
     } else {
         q->h.refcount_order = 4;                  /* v2 恒为 4 (16 位) */
@@ -237,19 +252,41 @@ static int read_l2_entry(img_qcow2 *q, uint64_t l2_addr, uint64_t abs, uint64_t 
 
 /* 解压压缩簇：描述符 x = 62 - (cluster_bits - 8) */
 static int decompress_cluster(img_qcow2 *q, uint64_t l2e, uint8_t *out){
-#ifdef IMG_HAVE_ZLIB
+#if defined(IMG_HAVE_ZLIB) || defined(IMG_HAVE_ZSTD)
+    /* 压缩簇的地址描述（两种算法共用）：
+     *   低 62 位 = 主机偏移 + 压缩字节数以 512 字节扇区计。 */
     int x = 62 - ((int)q->h.cluster_bits - 8);
     uint64_t desc = l2e & ((1ULL<<62) - 1);
     uint64_t host_off = desc & (( (x>=64) ? ~0ULL : ((1ULL<<x)-1) ));
     uint64_t nb_sectors = (desc >> x) + 1;
-
     size_t nraw = (size_t)nb_sectors * 512;
+    if(!nraw) return IMG_ECORRUPT;
+
     uint8_t *raw = malloc(nraw);
     if(!raw) return IMG_ENOMEM;
     int rc = img_io_read_full(q->io, host_off, raw, nraw);
     if(rc){ free(raw); return rc; }
 
-    /* qcow2 压缩簇用【raw deflate】（无 zlib 头） */
+    if(q->h.compression_type == IMG_QCOW2_COMP_ZSTD){
+#if defined(IMG_HAVE_ZSTD)
+        /* ★ 压缩簇按扇区对齐存放，帧后面可能跟着填充字节 —— ZSTD_decompress
+         *   要求 srcSize 恰好是【帧】的长度，多给会报 "Src size is incorrect"。
+         *   先用 findFrameCompressedSize 量出真正的帧长，再按帧解。*/
+        size_t flen = ZSTD_findFrameCompressedSize(raw, nraw);
+        if(ZSTD_isError(flen)){ free(raw); return IMG_ECORRUPT; }
+        size_t got = ZSTD_decompress(out, (size_t)q->h.cluster_size, raw, flen);
+        free(raw);
+        if(ZSTD_isError(got)) return IMG_ECORRUPT;
+        if(got < (size_t)q->h.cluster_size)
+            memset(out + got, 0, (size_t)q->h.cluster_size - got);
+        return IMG_OK;
+#else
+        free(raw);
+        return IMG_ENOTSUP;   /* 本构建没有 libzstd（open 时已按 allow_zstd 拦过） */
+#endif
+    }
+
+    /* 默认按 zlib（raw deflate，无 zlib 头）解 */
     z_stream zs; memset(&zs,0,sizeof zs);
     if(inflateInit2(&zs, -15) != Z_OK){ free(raw); return IMG_EIO; }
     zs.next_in = raw;  zs.avail_in  = (uInt)nraw;
@@ -265,7 +302,7 @@ static int decompress_cluster(img_qcow2 *q, uint64_t l2e, uint8_t *out){
     return IMG_OK;
 #else
     (void)q; (void)l2e; (void)out;
-    return IMG_ENOTSUP;      /* 未编入 zlib */
+    return IMG_ENOTSUP;      /* 未编入 zlib/zstd */
 #endif
 }
 

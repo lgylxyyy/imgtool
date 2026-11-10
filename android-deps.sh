@@ -243,6 +243,19 @@ build_xz() {
   echo "  [xz] → $STAGE/lib/liblzma.a"
 }
 
+# zstd（qcow2 的 zstd 压缩簇；2026-11-10）：上游自带 Makefile，只用 lib/ 子目录。
+# 不装 programs（CLI），也不要 tests/contrib —— 交叉编译时那些只会添麻烦。
+build_zstd() {
+  have libzstd.a && { echo "  [zstd] 已存在，跳过"; return 0; }
+  need_src zstd-1.5.5 zstd-1.5.5.tar.gz || return 1
+  local s="$SRC_DL/zstd-1.5.5"
+  ( cd "$s/lib" && make -j"$(nproc)" libzstd.a CC="$CC" CFLAGS="$CFLAGS" > make.log 2>&1 )
+  [ -e "$s/lib/libzstd.a" ] || { echo "!! [zstd] 失败，看 $s/lib/make.log" >&2; return 1; }
+  cp "$s/lib/libzstd.a" "$STAGE/lib/"
+  cp "$s/lib/zstd.h" "$s/lib/zstd_errors.h" "$STAGE/include/" 2>/dev/null || true
+  echo "  [zstd] → $STAGE/lib/libzstd.a"
+}
+
 # libarchive（只读）：zip/7z/rar/tar/cab 一个库全覆盖。不带 openssl/xml2/expat/lz4/zstd/bz2。
 build_libarchive() {
   have libarchive.a && { echo "  [libarchive] 已存在，跳过"; return 0; }
@@ -268,7 +281,7 @@ build_libarchive() {
 
 PROJ="$(cd "$(dirname "$0")" && pwd)"
 ABIS=("$@"); [ ${#ABIS[@]} -eq 0 ] && ABIS=(arm64-v8a)
-read -r -a DEPS_ARR <<< "${DEPS:-libxml2 ntfs3g wimlib mkntfs libiconv hivex xz libarchive}"
+read -r -a DEPS_ARR <<< "${DEPS:-libxml2 ntfs3g wimlib mkntfs libiconv hivex xz zstd libarchive}"
 for abi in "${ABIS[@]}"; do
   echo "=== $abi (API $API) stage=$OUT/stage/$abi ==="
   abi_env "$abi"
@@ -281,6 +294,7 @@ for abi in "${ABIS[@]}"; do
       mkntfs)   build_mkntfs   "$abi" ;;
       hivex)   build_hivex   "$abi" ;;
       xz)        build_xz        "$abi" ;;
+      zstd)      build_zstd      "$abi" ;;
       libarchive) build_libarchive "$abi" ;;
       *) echo "  未知库: $L" >&2 ;;
     esac

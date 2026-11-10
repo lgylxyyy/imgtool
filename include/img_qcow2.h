@@ -67,7 +67,7 @@ typedef struct img_qcow2 img_qcow2;
 
 typedef struct {
     bool        read_only;
-    bool        allow_zstd;      /* 默认 false → zstd 镜像拒绝（宁可报错不静默写坏） */
+    bool        allow_zstd;      /* 编入 libzstd 时默认允许；没有解码器则一律拒绝 */
     img_progress_cb cb;          /* 进度回调，可为 NULL */
     void       *cb_ud;
 } img_qcow2_opts_t;

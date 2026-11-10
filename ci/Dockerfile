@@ -22,7 +22,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake pkg-config git ca-certificates curl \
         autoconf automake libtool libgcrypt20-dev gettext \
-        zlib1g-dev libxml2-dev \
+        zlib1g-dev libzstd-dev libxml2-dev \
         ntfs-3g ntfs-3g-dev libwim-dev libhivex-dev libhivex-bin libarchive-dev liblzma-dev \
         p7zip-full zip unzip mtools dosfstools \
         qemu-utils xorriso \

@@ -154,23 +154,72 @@ int img_io_write(img_io *io, uint64_t off, const void *buf, size_t len, size_t *
     return IMG_OK;
 }
 
+#ifdef IMG_FAULT_INJECT
+/* ---------------- 故障注入（只在测试构建里编：-DIMG_FAULT_INJECT=1）----------------
+ * IMGTOOL_FAULT=<op>:<n>[:kill|ENOSPC|EIO]
+ *   op = read | write | sync | truncate；第 n 次该操作时人为失败。
+ *   kill → _exit(70)，模拟进程在那一刻被杀。
+ * 目的不是"能注入故障"，而是证明：任意一步失败之后，映像仍能打开、
+ * 已经提交的数据不丢、尾部 footer 不错位。用例见 tests/vhd-fault-test.sh。 */
+static int fault_hit(const char *op){
+    static int inited = 0;
+    static char fop[16];
+    static long nth = -1;
+    static int fkill = 0, ferr = EIO;
+    if(!inited){
+        inited = 1;
+        const char *v = getenv("IMGTOOL_FAULT");
+        if(v && *v){
+            char buf[64]; snprintf(buf,sizeof buf,"%s",v);
+            char *p1 = strchr(buf,':');
+            if(p1){
+                *p1++ = 0;
+                snprintf(fop,sizeof fop,"%s",buf);
+                char *p2 = strchr(p1,':');
+                if(p2) *p2++ = 0;
+                nth = strtol(p1,NULL,10);
+                if(p2 && *p2){
+                    if(!strcmp(p2,"kill")) fkill = 1;
+                    else if(!strcmp(p2,"ENOSPC")) ferr = ENOSPC;
+                    else ferr = EIO;
+                }
+            }
+        }
+    }
+    if(!fop[0] || strcmp(op,fop)) return 0;
+    static long cnt = 0;
+    cnt++;
+    if(cnt != nth) return 0;
+    if(fkill) _exit(70);
+    errno = ferr;
+    return 1;
+}
+#define FAULT_GATE(op) do{ if(fault_hit(op)) return IMG_EIO; }while(0)
+#else
+#define FAULT_GATE(op) do{}while(0)
+#endif
+
 int img_io_read_full(img_io *io, uint64_t off, void *buf, size_t len){
+    FAULT_GATE("read");
     size_t d=0; int rc = img_io_read(io,off,buf,len,&d);
     if(rc) return rc;
     return (d==len) ? IMG_OK : IMG_ETRUNC;
 }
 int img_io_write_full(img_io *io, uint64_t off, const void *buf, size_t len){
+    FAULT_GATE("write");
     size_t d=0; int rc = img_io_write(io,off,buf,len,&d);
     if(rc) return rc;
     return (d==len) ? IMG_OK : IMG_ETRUNC;
 }
 
 int img_io_sync(img_io *io){
+    FAULT_GATE("sync");
     if(!io) return IMG_EINVAL;
     return fsync(io->fd)==0 ? IMG_OK : map_errno(errno);
 }
 
 int img_io_truncate(img_io *io, uint64_t new_size){
+    FAULT_GATE("truncate");
     if(!io||!io->writable) return IMG_EINVAL;
     if(ftruncate(io->fd,(off_t)new_size)!=0) return map_errno(errno);
     io->size_valid = false;      /* 尺寸变了：缓存必须失效，否则 img_io_size 报旧值 */

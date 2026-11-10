@@ -579,9 +579,15 @@ int img_cmd_list_json(char *buf,int cap){
     /* 本构建带了哪些可选库 —— App 据此把不可用命令【提前灰掉】，不是让用户点了才报错（硬缺口 #3）*/
     {   char feat[160];
         snprintf(feat,sizeof feat,
-            "{\"wimlib\":%s,\"ntfs3g\":%s,\"zlib\":%s,\"mkntfs\":%s}",
+            "{\"wimlib\":%s,\"ntfs3g\":%s,\"zlib\":%s,\"mkntfs\":%s,\"zstd\":%s}",
             IMG_WITH_WIM?"true":"false", IMG_WITH_NTFS3G?"true":"false",
-            IMG_WITH_ZLIB?"true":"false", IMG_WITH_NTFS?"true":"false");
+            IMG_WITH_ZLIB?"true":"false", IMG_WITH_NTFS?"true":"false",
+#ifdef IMG_HAVE_ZSTD
+            "true"
+#else
+            "false"
+#endif
+            );
         wraw(&w,"features",feat);       /* 走 writer：逗号/引号由它管 */
     }
     /* ★ 尺寸口径（2026-10-25）：前端据此画范围/默认值，不用再把数字抄一份。

@@ -62,9 +62,9 @@ WRAP
 fi
 
 echo "════ 3. 依赖能力断言（缺库会让用例静默跳过，这里必须拦下）════"
-FEAT="$("$ROOT/build/tools/imgcmd" --list | python3 -c 'import json,sys;d=json.load(sys.stdin)["features"];print("%s/%s/%s/%s" % (d["wimlib"],d["ntfs3g"],d["zlib"],d["mkntfs"]))')"
-echo "features(wimlib/ntfs3g/zlib/mkntfs) = $FEAT"
-if [ "$FEAT" != "True/True/True/True" ]; then
+FEAT="$("$ROOT/build/tools/imgcmd" --list | python3 -c 'import json,sys;d=json.load(sys.stdin)["features"];print("/".join(str(d[k]) for k in ("wimlib","ntfs3g","zlib","mkntfs","zstd")))')"
+echo "features(wimlib/ntfs3g/zlib/mkntfs/zstd) = $FEAT"
+if [ "$FEAT" != "True/True/True/True/True" ]; then
   echo "错误：镜像缺依赖，拒绝跑一个会静默跳过用例的回归" >&2
   exit 1
 fi
