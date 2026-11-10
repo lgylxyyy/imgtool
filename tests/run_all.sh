@@ -56,6 +56,7 @@ head -c 16777216 /dev/urandom > "$W/big.bin"      # 取消测试要够大的源�
 run "cmd_test（命令表/校验/日志/建盘流水线 67 条）"  bash "$ROOT/tests/cmd_test.sh"
 run "limits-test（尺寸口径/extra-mb/part.add·remove·resize/win-mb/extended/mbr-fill/auto/lba/w128 126 条）" python3 "$ROOT/tests/limits-test.py"
 run "compact-label-test（紧凑另存 img.compact + 只改卷标 48 条）" python3 "$ROOT/tests/compact-label-test.py"
+run "trim-test（REQ-66：空闲位图原地释放簇 + 门禁 + 打洞；NTFS/FAT32）" python3 "$ROOT/tests/trim-test.py"
 run "format_twice_test（同进程连续两次格式化 NTFS，不许崩）" "$ROOT/build/tests/format_twice_test"
 [ -x "$ROOT/build/tests/wimcodes_test" ] && run "wimcodes_test（wimlib 错误码 → 枚举名/中文；REQ-48 §1）" "$ROOT/build/tests/wimcodes_test"
 [ -x "$ROOT/build/tests/progress_test" ] && run "progress_test（进度/ETA 口径：换阶段清零、字节优先；REQ-68）" "$ROOT/build/tests/progress_test"

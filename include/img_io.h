@@ -55,6 +55,9 @@ const char *img_io_path(const img_io *io); /* 路径模式返回路径；fd 模�
 
 /* 稀疏指示：告诉系统“这段是空的，别占真实空间”。不支持时静默忽略。 */
 int img_io_punch(img_io *io, uint64_t off, uint64_t len);
+/* 只打洞：不支持就返回 IMG_ENOTSUP，**不写零**（img.trim 用；
+ * 写零会让"已释放"变成假象，还可能撑爆宿主）。*/
+int img_io_punch_strict(img_io *io, uint64_t off, uint64_t len);
 
 #ifdef __cplusplus
 }

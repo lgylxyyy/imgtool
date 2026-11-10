@@ -37,6 +37,7 @@
 #include "img_archive.h"
 #include "img_archive_w.h"
 #include "img_du.h"
+#include "img_trim.h"
 #include "img_win_finish.h"
 #include "img_reg.h"
 #include "img_wim_capture.h"
@@ -8491,6 +8492,78 @@ static int cmd_reg_del(img_ctx *ctx, const img_args *in, img_result *out){
     return IMG_OK;
 }
 
+/* ================= img.trim（REQ-66）：按空闲位图原地释放簇 ================= */
+static const img_arg A_IMGTRIM[] = {
+    {"img",     IMG_A_STR,  true,  NULL,   "qcow2 映像路径", NULL},
+    {"lba",     IMG_A_U64,  true,  NULL,   "分区起始 LBA（NTFS 或 FAT32）", chk_lba},
+    {"dry-run", IMG_A_BOOL, false, "false","只统计，不修改（一个字节都不写）", NULL},
+    {"punch",   IMG_A_BOOL, false, "true", "释放后对宿主文件打洞回收空间（不支持就只计数，不写零）", NULL},
+};
+static int cmd_img_trim(img_ctx *ctx, const img_args *in, img_result *out){
+    uint64_t lba = img_args_u64(in,"lba",0);
+    bool dry   = img_args_bool(in,"dry-run",false);
+    bool punch = img_args_bool(in,"punch",true);
+    img_qcow2 *q = img_ctx_qcow2(ctx);
+    if(!q) return qc_open_fail(out,ctx);
+    /* ★ 先做"根本不支持"的门禁，再看分区表 —— 否则空 overlay 会先报
+     *   PART-READ-FAIL（格式不合法），用户以为映像坏了。*/
+    {
+        const img_qcow2_header_t *h = img_qcow2_header(q);
+        if(h && h->backing_file_offset){
+            img_result_fail(out,IMG_ENOTSUP,"TRIM-NOTSUP",img_ctx_path(ctx),
+                "映像是 backing 链的一层：我们读不到底层数据，空闲位图会算错",NULL);
+            return IMG_ENOTSUP;
+        }
+        if(h && h->nb_snapshots){
+            char why[256];
+            snprintf(why,sizeof why,"映像里有 %u 个快照：释放簇会改掉快照的历史数据，先合并或删除快照",
+                     h->nb_snapshots);
+            img_result_fail(out,IMG_ENOTSUP,"TRIM-NOTSUP",img_ctx_path(ctx),why,NULL);
+            return IMG_ENOTSUP;
+        }
+    }
+
+    img_parttable_t *t=NULL;
+    int rc = img_ctx_parttable(ctx,&t);
+    if(rc||!t) return img_result_fail(out,rc?rc:IMG_ESTATE,"PART-READ-FAIL",
+                                      img_ctx_path(ctx),img_strerror(rc),NULL), rc?rc:IMG_ESTATE;
+    uint64_t pb=0;
+    for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+        if(t->parts[i].used && t->parts[i].first_lba==lba){
+            pb=(t->parts[i].last_lba - t->parts[i].first_lba + 1)*512; break; }
+    if(!pb){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","lba","分区不存在",NULL); return IMG_EINVAL; }
+
+    img_trim_opts_t o; o.dry_run = dry; o.punch = punch;
+    img_trim_result_t r; char err[256]="";
+    img_span sp; img_span_prep(&sp,"img","trim","按空闲位图清理");
+    img_span_kv_u64(&sp,"lba",lba);
+    img_span_kv_u64(&sp,"dry_run",dry?1:0);
+    img_span_begin(&sp);
+    rc = img_trim(q, lba, pb, &o, &r, img_cmd_prog(), err, sizeof err);
+    img_span_end(&sp,rc);
+    if(rc != IMG_OK){
+        const char *code = (rc==IMG_ECANCELLED) ? "CMD-CANCELLED"
+                         : (rc==IMG_ENOTSUP)    ? "TRIM-NOTSUP"
+                         : (rc==IMG_ESTATE)     ? "TRIM-STATE"
+                                                : "TRIM-FAIL";
+        img_result_fail(out,rc,code,img_ctx_path(ctx),err[0]?err:"清理失败",
+            "确认分区是 NTFS/FAT32 且卷是正常关闭的；有快照或 backing 的映像不支持原地清理");
+        return rc;
+    }
+    img_result_str(out,"fs", r.fs);
+    img_result_bool(out,"dry_run",dry);
+    img_result_u64(out,"clusters_checked", r.host_clusters_checked);
+    img_result_u64(out,"clusters_freed", r.clusters_freed);
+    img_result_u64(out,"guest_bytes_freed", r.guest_bytes_freed);
+    img_result_u64(out,"host_bytes_punched", r.host_bytes_punched);
+    img_result_u64(out,"punch_failed", r.punch_failed);
+    img_result_u64(out,"shared_clusters_skipped", r.shared_skipped);
+    img_result_u64(out,"compressed_clusters_skipped", r.compressed_skipped);
+    img_result_u64(out,"alloc_before", r.alloc_before);
+    img_result_u64(out,"alloc_after", r.alloc_after);
+    return IMG_OK;
+}
+
 /* ================= wim.capture（P4）：qcow2 → WIM ================= */
 /* --exclude 的逗号列表 → 定长数组（copy / wim.capture 共用一份解析，
  * 免得一处改了另一处没改）。返回条数；空白会被裁掉，超长条目丢弃。*/
@@ -9408,6 +9481,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_PARTRESIZE,(int)(sizeof A_PARTRESIZE/sizeof A_PARTRESIZE[0]), cmd_part_resize, NULL, 0},
     {"img.compact","1.0", "另存为紧凑映像（源只读；只写非零块；绝不碰源文件）",
         A_IMGCOMPACT,(int)(sizeof A_IMGCOMPACT/sizeof A_IMGCOMPACT[0]), cmd_img_compact, NULL, 0},
+    {"img.trim","1.0", "按客户机空闲位图原地释放 qcow2 簇（NTFS/FAT32；有快照或 backing 拒绝）",
+        A_IMGTRIM,(int)(sizeof A_IMGTRIM/sizeof A_IMGTRIM[0]), cmd_img_trim, NULL, 0},
     {"ntfs.label","1.0", "只改 NTFS 卷标（不格式化、不动文件数据）",
         A_FSLABEL,(int)(sizeof A_FSLABEL/sizeof A_FSLABEL[0]), cmd_ntfs_label, NULL, 0},
     {"fat.label","1.0", "只改 FAT32 卷标（BPB + 根目录卷标项；不格式化）",

@@ -111,6 +111,15 @@ int img_ntfs_list_dir_sizes(img_ntfs_fs *fs, const char *abs_path,
                             img_ntfs_list_cb cb, void *ud);
 /* 空闲/已用字节（数 $Bitmap 位 × 簇大小；不含簇以下的零碎尾部） */
 int img_ntfs_free_bytes(img_ntfs_fs *fs, uint64_t *out_free, uint64_t *out_used);
+/* ---- REQ-66（img.trim）---- */
+uint64_t img_ntfs_cluster_size(img_ntfs_fs *fs);
+uint64_t img_ntfs_cluster_count(img_ntfs_fs *fs);
+/* 卷被标记为脏（上次没正常卸载）→ true。脏卷不许 trim。*/
+bool     img_ntfs_is_dirty(img_ntfs_fs *fs);
+/* 把空闲簇写进 bits（1=空闲，位序 = 分区内第 i 个簇）。调用方应先把 bits 清零
+ * 并按"已用"处理非数据区；本函数只往里置 1。*/
+int      img_ntfs_free_map(img_ntfs_fs *fs, uint8_t *bits, uint64_t nbits);
+
 /* 卷标（无卷标 → 空串；失败返回 <0） */
 int img_ntfs_label(img_ntfs_fs *fs, char *out, size_t cap);
 /* 改卷标（2026-10-25）：只动 $Volume 的 AT_VOLUME_NAME，不碰文件数据、

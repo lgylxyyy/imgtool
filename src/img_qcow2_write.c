@@ -164,6 +164,56 @@ static int l1_set(img_qcow2 *q, uint64_t l1i, uint64_t val){
 }
 
 /* ------------------------------------------------------------------ */
+/* img.trim 要用的内部入口（img_trim.c 只拿这几个，不碰 static）          */
+/* ------------------------------------------------------------------ */
+
+/* 读 l1i 指向的 L2 表。返回 IMG_ENOENT = 这一层还没分配（正常）。*/
+int qc2_l2_load(img_qcow2 *q, uint64_t l1i, uint64_t *l2_addr, uint8_t **out){
+    if(!q || !l2_addr || !out) return IMG_EINVAL;
+    *out = NULL; *l2_addr = 0;
+    if(l1i >= q->h.l1_size) return IMG_ENOENT;
+    uint64_t a = 0;
+    int rc = l1_get(q, l1i, &a);
+    if(rc) return rc;
+    a &= QCOW2_OFFSET_MASK;
+    *l2_addr = a;
+    if(!a) return IMG_ENOENT;
+    return read_l2_cluster(q, a, out);
+}
+
+int qc2_l2_store(img_qcow2 *q, uint64_t l2_addr, const uint8_t *b){
+    if(!q || !l2_addr || !b) return IMG_EINVAL;
+    return write_l2_cluster(q, l2_addr, b);
+}
+
+/* 读 host 簇的 refcount（16/32 位都认；表项为 0 → 0）*/
+int qc2_refcount_get(img_qcow2 *q, uint64_t host_idx, uint32_t *out){
+    if(!q || !out) return IMG_EINVAL;
+    *out = 0;
+    if(q->refcount_bits != 16 && q->refcount_bits != 32) return IMG_ENOTSUP;
+    uint64_t eprb = q->entries_per_rc_block;
+    if(!eprb) return IMG_ESTATE;
+    uint64_t block_i = host_idx / eprb;
+    if(block_i * 8 >= q->refcount_table_bytes) return IMG_ERANGE;
+    uint64_t blk = 0;
+    int rc = rd64(q->io, q->h.refcount_table_offset + block_i*8, &blk);
+    if(rc) return rc;
+    if(!blk) return IMG_OK;                    /* 没分配过 → refcount 0 */
+    uint64_t pos = blk + (host_idx % eprb) * (q->refcount_bits/8);
+    uint8_t b[4] = {0,0,0,0};
+    rc = img_io_read_full(q->io, pos, b, q->refcount_bits/8);
+    if(rc) return rc;
+    *out = (q->refcount_bits == 16) ? (uint32_t)((b[0]<<8)|b[1])
+                                    : (uint32_t)((b[0]<<24)|(b[1]<<16)|(b[2]<<8)|b[3]);
+    return IMG_OK;
+}
+
+int qc2_refcount_set(img_qcow2 *q, uint64_t host_idx, uint32_t v){
+    if(!q) return IMG_EINVAL;
+    return set_refcount(q, host_idx, v);
+}
+
+/* ------------------------------------------------------------------ */
 /* 创建全新 qcow2                                                      */
 /* ------------------------------------------------------------------ */
 /*

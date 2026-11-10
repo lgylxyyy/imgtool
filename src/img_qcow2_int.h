@@ -55,6 +55,12 @@ struct img_qcow2 {
     uint64_t scan_dup, scan_oor, scan_max_end;
 };
 
+/* ---- img.trim 入口（img_qcow2_write.c 实现；外部别用）---- */
+int qc2_l2_load(img_qcow2 *q, uint64_t l1i, uint64_t *l2_addr, uint8_t **out);
+int qc2_l2_store(img_qcow2 *q, uint64_t l2_addr, const uint8_t *b);
+int qc2_refcount_get(img_qcow2 *q, uint64_t host_idx, uint32_t *out);
+int qc2_refcount_set(img_qcow2 *q, uint64_t host_idx, uint32_t v);
+
 /* ---- P3 格式分发（img_diskfmt.c / img_vhd.c / img_vmdk.c 提供）---- */
 disk_fmt    img_diskfmt_probe(img_io *io);
 const char *img_diskfmt_name(disk_fmt f);

@@ -83,8 +83,12 @@ img_qcow2 *img_qcow2_open(img_io *io, const img_qcow2_opts_t *o){
     if(q->h.magic != IMG_QCOW2_MAGIC){ free(q); return NULL; }   /* 不是 qcow2 */
 
     q->h.version                = be32(hdr+4);
-    q->h.backing_file_offset    = be32(hdr+8);
-    q->h.backing_file_size      = be32(hdr+12);
+    /* ★ 2026-11-10（REQ-66）：规范里 backing_file_offset 是 **u64**（8..15），
+     *   backing_file_size 是 u32（16..19）。以前按 be32(hdr+8) 读，读到的是
+     *   这个 u64 的【高 32 位】—— 4 GiB 以内的镜像恒为 0，于是所有 backing
+     *   镜像都被当成"没有 backing"。在我们开始按它做门禁（img.trim）之前必须修。*/
+    q->h.backing_file_offset    = be64(hdr+8);
+    q->h.backing_file_size      = be32(hdr+16);
     q->h.cluster_bits           = be32(hdr+20);
     q->h.size                   = be64(hdr+24);
     q->h.crypt_method           = be64(hdr+32);

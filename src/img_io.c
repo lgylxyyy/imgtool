@@ -246,13 +246,25 @@ const char *img_io_path(const img_io *io){
 bool     img_io_is_fd(const img_io *io){ return io && io->is_fd_mode; }
 int      img_io_fd(img_io *io){ return io ? io->fd : -1; }
 
-int img_io_punch(img_io *io, uint64_t off, uint64_t len){
+/* ★ REQ-66：只打洞、不降级。返回 IMG_ENOTSUP = 这个文件系统/内核不支持。
+ *   img.trim 必须能分清"真回收"和"写了一片零"（后者是假回收：文件一点没小，
+ *   还白占一次 I/O）。*/
+int img_io_punch_strict(img_io *io, uint64_t off, uint64_t len){
     if(!io||!io->writable) return IMG_EINVAL;
+    if(!len) return IMG_OK;
 #ifdef __linux__
     if(fallocate(io->fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,
                  (off_t)off, (off_t)len)==0) return IMG_OK;
-    /* 多数文件系统不支持 → 静默降级：写零（仍能腾出空间，只是慢） */
+    return IMG_ENOTSUP;
+#else
+    return IMG_ENOTSUP;
 #endif
+}
+
+int img_io_punch(img_io *io, uint64_t off, uint64_t len){
+    if(!io||!io->writable) return IMG_EINVAL;
+    if(img_io_punch_strict(io, off, len)==IMG_OK) return IMG_OK;
+    /* 多数文件系统不支持 → 静默降级：写零（仍能腾出空间，只是慢） */
     size_t z = len>65536?65536:(size_t)len;
     char *nul = calloc(1,z);
     if(!nul) return IMG_ENOMEM;

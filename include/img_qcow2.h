@@ -41,7 +41,7 @@ typedef enum {
 typedef struct {
     uint32_t magic;
     uint32_t version;            /* 2 或 3 */
-    uint32_t backing_file_offset;
+    uint64_t backing_file_offset;   /* 规范：u64（8..15）；0 = 没有 backing */
     uint32_t backing_file_size;
     uint32_t cluster_bits;       /* e.g. 16 → 64KB 簇 */
     uint64_t cluster_size;       /* 1<<cluster_bits */

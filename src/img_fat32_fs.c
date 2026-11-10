@@ -1627,6 +1627,45 @@ int img_fat32_rename(img_fat32_fs *fs, const char *src_abs, const char *dst_abs)
 
 /* 剩余空间（字节）：扫一遍 FAT0 数空簇。首次调用后缓存，直到 FAT 被修改。
  * 用途：App 想在写大文件前校验空间（默认不校验 —— 见 DESIGN-OUTPUT.md 第五节） */
+/* ---------- REQ-66：img.trim 要的三件事 ---------- */
+uint32_t img_fat32_cluster_bytes(img_fat32_fs *fs){
+    if(!fs) return 0;
+    return (uint32_t)fs->L.sectors_per_cluster * 512u;
+}
+
+/* FAT[1] 的 bit27 = ClnShutBitMask；清除 = 上次没正常卸载/写完 */
+bool img_fat32_is_dirty(img_fat32_fs *fs){
+    if(!fs) return false;
+    uint32_t v = 0;
+    if(fat_get(fs, 1, &v) != IMG_OK) return false;
+    return (v & 0x08000000u) == 0;
+}
+
+/* 空闲簇写进 bits（1=空闲）。域 = 分区内第 i 个簇（数据区起点按 data_off 折算）。*/
+int img_fat32_free_map(img_fat32_fs *fs, uint8_t *bits, uint64_t nbits){
+    if(!fs || !bits) return IMG_EINVAL;
+    uint32_t cs = img_fat32_cluster_bytes(fs);
+    if(!cs) return IMG_ESTATE;
+    uint64_t base = fs->data_off / cs;          /* FAT 簇 2 对应的分区内簇号 */
+    /* 一次把 FAT0 读进来：逐条 fat_get 是 4 字节一次读，32 万簇会慢死 */
+    uint64_t fat_bytes = (uint64_t)fs->L.fat_size_sectors * 512u;
+    uint8_t *fat = (uint8_t*)malloc(fat_bytes ? (size_t)fat_bytes : 1);
+    if(!fat) return IMG_ENOMEM;
+    if(fat_bytes && rd(fs, fs->fat_off, fat, (size_t)fat_bytes) != IMG_OK){ free(fat); return IMG_EIO; }
+    for(uint32_t c = 2; c < fs->L.cluster_count + 2; c++){
+        uint64_t pos = (uint64_t)c * 4;
+        if(pos + 4 > fat_bytes) break;
+        uint32_t v = (uint32_t)fat[pos] | ((uint32_t)fat[pos+1]<<8)
+                   | ((uint32_t)fat[pos+2]<<16) | ((uint32_t)fat[pos+3]<<24);
+        if((v & FAT32_MASK) != 0) continue;      /* 非 0 → 已分配/坏簇 */
+        uint64_t i = base + (uint64_t)(c - 2);
+        if(i >= nbits) break;
+        bits[i >> 3] |= (uint8_t)(1u << (i & 7));
+    }
+    free(fat);
+    return IMG_OK;
+}
+
 uint64_t img_fat32_free_bytes(img_fat32_fs *fs){
     if(!fs) return 0;
     if(fs->free_valid) return fs->free_bytes;

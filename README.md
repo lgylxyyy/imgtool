@@ -123,11 +123,12 @@ Android 与宿主的行为差异（同一份代码内 `#ifdef __ANDROID__` 共 4
 
 | 领域 | 能力 |
 |---|---|
-| **映像格式** | qcow2 建/扩/压/克隆（压缩簇支持 zlib 与 **zstd**）；raw、VHD（动态盘）、VMDK（sparse）读写；按魔数自动识别（不支持项见下表） |
+| **映像格式** | qcow2 建/扩/压/克隆/原地清理（压缩簇支持 zlib 与 **zstd**）；raw、VHD（动态盘）、VMDK（sparse）读写；按魔数自动识别（不支持项见下表） |
 | **分区表** | MBR / GPT 读写、按角色自动布局（ESP + MSR + 系统 + 恢复）、增删改、属性位、导出/导入整表 |
 | **FAT32** | 列目录、读写文件、建目录、改名、删除、卷标、时间戳、8.3 短名 |
 | **NTFS** | 列目录、读写文件、递归复制/移动、删除、`du`、卷标、格式化（mkntfs） |
 | **WIM / ESD** | 列映像、估算展开体积、写入分区、提取单文件、**捕获**（qcow2 生成新 WIM） |
+| **空间回收** | `img.compact` 紧凑另存；`img.trim` 按客户机空闲位图**原地**释放簇并打洞（只做 NTFS / FAT32，有快照或 backing 的映像拒绝） |
 | **ISO** | 浏览 ISO9660 / UDF、提取内部文件（`install.wim` 可直接从 ISO 读取） |
 | **压缩包** | zip / 7z / tar / tgz 读写；RAR / CAB 只读；统一 `copy` 命令覆盖解压与打包 |
 | **引导** | 写 MBR/VBR 引导码、铺 `bootmgr` / `bootmgfw.efi` / `boot.sdi` / 字体、生成 BCD（BIOS/UEFI 双体系）、32 位 UEFI 位数判定、引导自检 |

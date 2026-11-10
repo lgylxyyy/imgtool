@@ -34,6 +34,13 @@ const img_fat32_layout_t *img_fat32_fs_layout(const img_fat32_fs *fs);
 bool img_fat32_path_exists(img_fat32_fs *fs, const char *abs_path);
 /* 是否是【目录】（路径不存在/是文件 → false）。移动前查目标父目录用。*/
 bool img_fat32_dir_exists(img_fat32_fs *fs, const char *abs_path);
+/* ---- REQ-66（img.trim）---- */
+uint32_t img_fat32_cluster_bytes(img_fat32_fs *fs);
+/* FAT[1] 的 clean-shutdown 位被清 → 脏卷（不许 trim）*/
+bool     img_fat32_is_dirty(img_fat32_fs *fs);
+/* 空闲簇写进 bits（1=空闲；位序 = 分区内第 i 个簇）。调用方先把 bits 清零当"已用"。*/
+int      img_fat32_free_map(img_fat32_fs *fs, uint8_t *bits, uint64_t nbits);
+
 /* 剩余空间（字节）。扫描 FAT 数空簇，结果缓存到 FAT 下次被修改 */
 uint64_t img_fat32_free_bytes(img_fat32_fs *fs);
 int  img_fat32_file_size(img_fat32_fs *fs, const char *abs_path, uint64_t *out);

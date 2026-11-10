@@ -1598,6 +1598,58 @@ int img_ntfs_free_bytes(img_ntfs_fs *fs, uint64_t *out_free, uint64_t *out_used)
     return IMG_OK;
 }
 
+/* ---------- REQ-66：img.trim 要的三件事 ---------- */
+uint64_t img_ntfs_cluster_size(img_ntfs_fs *fs){
+    if(!fs || !fs->vol) return 0;
+    return (uint64_t)fs->vol->cluster_size;
+}
+uint64_t img_ntfs_cluster_count(img_ntfs_fs *fs){
+    if(!fs || !fs->vol) return 0;
+    return (uint64_t)fs->vol->nr_clusters;
+}
+
+/* 卷是否被标记为"脏"（$Volume 的 VOLUME_INFORMATION.flags bit0）。
+ * 脏卷上按空闲位图释放簇 = 有可能释放掉"位图说空闲、其实已被引用"的簇。*/
+bool img_ntfs_is_dirty(img_ntfs_fs *fs){
+    if(!fs || !fs->vol) return false;
+    ntfs_inode *vi = ntfs_inode_open(fs->vol, FILE_Volume);
+    if(!vi) return false;
+    VOLUME_INFORMATION info;
+    memset(&info, 0, sizeof info);
+    ntfs_attr *na = ntfs_attr_open(vi, AT_VOLUME_INFORMATION, NULL, 0);
+    bool dirty = false;
+    if(na){
+        s64 got = ntfs_attr_pread(na, 0, (s64)sizeof info, &info);
+        if(got == (s64)sizeof info)
+            dirty = (le16_to_cpu(info.flags) & le16_to_cpu(VOLUME_IS_DIRTY)) != 0;
+        ntfs_attr_close(na);
+    }
+    ntfs_inode_close(vi);
+    return dirty;
+}
+
+/* 把 $Bitmap 里的空闲簇标进 bits[]（1=空闲）。域 = 分区内第 i 个 gcs 簇。
+ * 非数据区（引导扇区、MFT 保留区…）不在 $Bitmap 覆盖范围内 —— 调用方默认当"已用"。*/
+int img_ntfs_free_map(img_ntfs_fs *fs, uint8_t *bits, uint64_t nbits){
+    if(!fs || !fs->vol || !fs->vol->lcnbmp_na || !bits) return IMG_EINVAL;
+    ntfs_volume *vol = fs->vol;
+    s64 nr = vol->nr_clusters;
+    if(nr <= 0) return IMG_ESTATE;
+    size_t nb = (size_t)((nr + 7) / 8);
+    unsigned char *bm = (unsigned char*)calloc(1, nb ? nb : 1);
+    if(!bm) return IMG_ENOMEM;
+    s64 got = ntfs_attr_pread(vol->lcnbmp_na, 0, (s64)nb, bm);
+    if(got != (s64)nb){ free(bm); return IMG_EIO; }
+    for(s64 c = 0; c < nr; c++){
+        if(bm[c >> 3] & (1u << (c & 7))) continue;      /* 位=1 → 已用 */
+        uint64_t i = (uint64_t)c;
+        if(i >= nbits) break;
+        bits[i >> 3] |= (uint8_t)(1u << (i & 7));
+    }
+    free(bm);
+    return IMG_OK;
+}
+
 /* ---------- 卷标（$Volume 的 AT_VOLUME_NAME；没有就空串）---------- */
 int img_ntfs_label(img_ntfs_fs *fs, char *out, size_t cap){
     if(!fs||!out||!cap) return IMG_EINVAL;

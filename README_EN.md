@@ -127,7 +127,7 @@ To build the library for the app, check out `android` and run `./android-cross.s
 
 | Area | Capability |
 |---|---|
-| **Image formats** | qcow2 create / expand / compact / clone (compressed clusters: zlib and **zstd**); raw, VHD (dynamic), VMDK (sparse) read-write; format detected by magic, not extension (see the unsupported list below) |
+| **Image formats** | qcow2 create / expand / compact / clone / in-place trim (compressed clusters: zlib and **zstd**); raw, VHD (dynamic), VMDK (sparse) read-write; format detected by magic, not extension (see the unsupported list below) |
 | **Partition tables** | MBR / GPT read-write; role-based auto layout (ESP + MSR + system + recovery); add / remove / resize; attribute bits; whole-table export / import |
 | **FAT32** | List, read, write, mkdir, rename, delete, volume label, timestamps, 8.3 short names |
 | **NTFS** | List, read, write, recursive copy / move, delete, `du`, volume label, format (mkntfs) |
