@@ -298,6 +298,7 @@ Docs:
 - [`PARTITION-POLICY.md`](PARTITION-POLICY.md): partition, format and clone policy decisions
 - [`SPEC-NTFS-MOVE.md`](SPEC-NTFS-MOVE.md): NTFS rename and move versus the specification
 - [`THIRD_PARTY.md`](THIRD_PARTY.md): third-party components and notices
+- [`SECURITY.md`](SECURITY.md): how scanning is set up, what was fixed, what was dismissed and why
 
 ---
 

@@ -293,6 +293,7 @@ android-deps.sh     Android 第三方依赖编译（一次性）
 - [`PARTITION-POLICY.md`](PARTITION-POLICY.md)：分区、格式化、克隆的政策决策
 - [`SPEC-NTFS-MOVE.md`](SPEC-NTFS-MOVE.md)：NTFS 改名与移动的规范对照
 - [`THIRD_PARTY.md`](THIRD_PARTY.md)：第三方组件与版权声明
+- [`SECURITY.md`](SECURITY.md)：静态扫描怎么配的、哪些告警修了、哪些屏蔽了以及理由
 
 ---
 
