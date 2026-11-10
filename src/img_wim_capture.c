@@ -118,6 +118,9 @@ int img_wim_capture_estimate(const char *ipath, uint64_t lba, uint64_t part_byte
 /* ---------- 打包/写出阶段的进度（REQ-67 §2.1） ---------- */
 typedef struct {
     img_prog *p;
+    const char *tmpdir;      /* ★ REQ-70 §2：wimlib 给的 cur_path 是【宿主路径】，
+                              *   要剥掉这一截才是 WIM 内路径 */
+    int       write_item_cleared;
     uint64_t  files_total;   /* 抽取阶段的实际文件数：PACK 阶段的分母 */
     uint64_t  bytes_total;   /* 抽取阶段的实际字节数 */
 } cap_cb;
@@ -145,8 +148,16 @@ static enum wimlib_progress_status cap_on_progress(enum wimlib_progress_msg msg,
         /* num_nondirs/num_bytes 是"扫到现在累计"，正好当 cur（单调）。
          * ★ REQ-68 §3.1：pack 阶段也要 item —— 用户看到路径在滚才知道没卡死。
          *   wimlib 给的是 WIM 内路径（/Windows/...），正是 App 要的样子。*/
-        if(info->scan.cur_path && info->scan.cur_path[0])
-            img_prog_item(c->p, (const char*)info->scan.cur_path);
+        if(info->scan.cur_path && info->scan.cur_path[0]){
+            /* wimlib 的 cur_path 带宿主临时目录前缀（实测
+             * /tmp/imgtool-tmp-wimcap-32695-lOaAS0/t8/w/f01406.dat）。
+             * 契约要的是 WIM 内路径 /t8/w/f01406.dat —— 剥掉前缀；
+             * 剥完是空（正好是根目录）就不报，别把临时目录名显示给用户。*/
+            const char *cp = (const char*)info->scan.cur_path;
+            size_t tl = c->tmpdir ? strlen(c->tmpdir) : 0;
+            if(tl && !strncmp(cp, c->tmpdir, tl)) cp += tl;
+            if(*cp) img_prog_item(c->p, cp);
+        }
         img_prog_count(c->p, info->scan.num_nondirs_scanned, c->files_total);
         img_prog_bytes(c->p, info->scan.num_bytes_scanned, c->bytes_total);
         break;
@@ -154,6 +165,10 @@ static enum wimlib_progress_status cap_on_progress(enum wimlib_progress_msg msg,
         img_prog_count(c->p, info->scan.num_nondirs_scanned, c->files_total);
         break;
     case WIMLIB_PROGRESS_MSG_WRITE_STREAMS:
+        /* 进 write 段先把 item 清掉：pack 最后一条是源根目录（/t8）或临时目录名，
+         * 显示在圆盘下方没有信息量（REQ-70 Q3）。必须在 phase/op 之前清，
+         * 否则那两条强制事件还会带着旧 item 出去。*/
+        if(!c->write_item_cleared){ c->write_item_cleared = 1; img_prog_item(c->p, ""); }
         img_prog_phase(c->p, IMG_PH_WRITE, "压缩写出 WIM");
         img_prog_op(c->p, IMG_OP_COMPRESS);
         {
@@ -244,7 +259,12 @@ int img_wim_capture(const char *img_path, uint64_t lba, uint64_t part_bytes,
     if(rc != IMG_OK){
         /* ★ REQ-69 ④：取消 ≠ 失败。取消时把整棵树改个名字（O(1)）交给下次 sweep；
          *   失败时（数据可能有用）照旧同步删。*/
-        if(rc == IMG_ECANCELLED) (void)img_tmpdir_discard(tmpdir);
+        if(rc == IMG_ECANCELLED){
+            /* 先真删 600 ms（小树当场清干净）；大树删不完就改名交 sweep，
+             * 用户看到的是"1 秒内停下"，盘也不会一直占着。*/
+            if(img_tmpdir_remove_td(tmpdir, 600) != IMG_OK)
+                (void)img_tmpdir_discard(tmpdir);
+        }
         else                     (void)img_tmpdir_remove(tmpdir);
         if(err&&errcap){
             if(rc == IMG_ECANCELLED)
@@ -300,7 +320,8 @@ int img_wim_capture(const char *img_path, uint64_t lba, uint64_t part_bytes,
 
     /* ★ REQ-67：add_tree 与 write 都通过这个注册的回调上报进度 */
     cap_cb cc;
-    cc.p = prog; cc.files_total = st.files; cc.bytes_total = st.bytes;
+    cc.p = prog; cc.tmpdir = tmpdir; cc.write_item_cleared = 0;
+    cc.files_total = st.files; cc.bytes_total = st.bytes;
     /* 无条件注册：即使没有进度器，也要靠这个回调把取消送进 add_tree/write */
     wimlib_register_progress_function(w, cap_on_progress, &cc);
 

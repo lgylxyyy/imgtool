@@ -147,6 +147,18 @@ def main():
             check(ph in phases, "④ 进度里有 phase=%s（旧代码后两段是黑的）" % ph,
                   sorted(set(phases)))
 
+        # REQ-70 §2：pack 的 item 必须是 WIM 内路径，不能带宿主临时目录前缀
+        pack_items = [e.get("item") for e in events
+                      if e.get("phase") == "pack" and e.get("item")]
+        check(all(i.startswith("/") for i in pack_items) and
+              not any("imgtool-tmp" in i for i in pack_items),
+              "pack.item 是 WIM 内路径（无宿主临时目录前缀）", pack_items[:2])
+
+        # REQ-70 Q3：write 段不发 item（临时目录根没信息量）
+        write_items = [e.get("item") for e in events
+                       if e.get("phase") == "write" and e.get("item")]
+        check(not write_items, "write 段 item 为空", write_items[:2])
+
         # pct 在同一段内不倒退
         bad = []
         last, lastp = None, -1

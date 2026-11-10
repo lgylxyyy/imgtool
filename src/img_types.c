@@ -1,4 +1,11 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L   /* clock_gettime / CLOCK_MONOTONIC */
+#endif
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
 #include "img_types.h"
+#include <sys/time.h>
 
 const char *img_strerror(int e){
     switch(e){
@@ -267,6 +274,48 @@ static void host_rm_rf_dir(const char *path){
     }
     closedir(d);
     rmdir(path);
+}
+
+/* ★ REQ-70 §3：带时间预算的删除。取消时先真删，但最多花 budget_ms；
+ *   超时就把剩下的改名为 -garbage 交给 sweep —— 既不让用户等，也不让盘一直占着。*/
+typedef struct { long long deadline; int timed_out; int ticks; } rmtd;
+static long long rm_now_ms(void){
+    struct timeval tv; gettimeofday(&tv,NULL);     /* 墙钟够用；不依赖 CLOCK_* */
+    return (long long)tv.tv_sec*1000 + tv.tv_usec/1000;
+}
+static void host_rm_rf_dir_td(const char *path, rmtd *t){
+    if(t->timed_out) return;
+    DIR *d=opendir(path);
+    if(!d){ unlink(path); return; }
+    struct dirent *de;
+    char sub[1200];
+    while((de=readdir(d))){
+        if(!strcmp(de->d_name,".")||!strcmp(de->d_name,"..")) continue;
+        if(++t->ticks >= 64){
+            t->ticks = 0;
+            if(rm_now_ms() > t->deadline){ t->timed_out=1; break; }
+        }
+        snprintf(sub,sizeof sub,"%s/%s",path,de->d_name);
+        if(unlink(sub)==0) continue;
+        if(errno==EISDIR || errno==EPERM){
+            if(rmdir(sub)==0) continue;
+            host_rm_rf_dir_td(sub,t);
+            if(t->timed_out) break;
+        }
+    }
+    closedir(d);
+    if(!t->timed_out) rmdir(path);
+}
+int img_tmpdir_remove_td(const char *path, int budget_ms){
+    if(!path || !*path) return IMG_EINVAL;
+    struct stat st;
+    if(lstat(path,&st)!=0) return (errno==ENOENT)?IMG_OK:IMG_EIO;
+    if(!S_ISDIR(st.st_mode)){ unlink(path); return IMG_OK; }
+    rmtd t;
+    t.deadline = rm_now_ms() + (budget_ms > 0 ? budget_ms : 0);
+    t.timed_out = 0; t.ticks = 0;
+    host_rm_rf_dir_td(path,&t);
+    return t.timed_out ? IMG_ETIMEDOUT : IMG_OK;
 }
 
 /* ★ REQ-69 ④：取消时【不】同步删树 —— 33,000 个文件要 6.8 秒，用户看起来就是"点了没反应"。

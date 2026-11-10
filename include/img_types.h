@@ -166,6 +166,9 @@ void        img_tmpdir_reset(void);
 /* 取消时的"待清"：只改个名字（O(1)），真正的删除交给 img_tmpdir_sweep()。
  * 33,000 个文件实测删一次 6.8 秒 —— 用户点取消后卡 7 秒就是这个（REQ-69 ④）。*/
 int         img_tmpdir_discard(const char *path);
+/* 有预算的删除：最多花 budget_ms。删净返回 IMG_OK；超时返回 IMG_ETIMEDOUT（还剩半截，
+ * 调用方可再 img_tmpdir_discard() 改名交 sweep）。*/
+int         img_tmpdir_remove_td(const char *path, int budget_ms);
 int         img_tmpdir_sweep(void);
 int         img_tmpdir_free_bytes(uint64_t *out_free, uint64_t *out_total);
 
