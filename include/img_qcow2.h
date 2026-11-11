@@ -134,6 +134,13 @@ typedef struct {
 /* 扫描（只读，不改文件）。返回 IMG_OK 表示扫完了；扫描结果里的计数才是结论。*/
 int img_qcow2_scan(img_qcow2 *q, img_qcow2_scan_t *out);
 
+/* ---- 宿主占用与分配粒度（App 的「容量 X · 占用 Y」；T5）----
+ * alloc_bytes = 宿主 st_blocks×512；alloc_known=false 时 App 必须显示「—」
+ * （Android /sdcard 的 FUSE 有已知不可靠案例）。granule_bytes 是分配粒度：
+ * qcow2 簇 / VHD 2 MiB 块 / VMDK grain / raw 宿主块。 */
+int img_qcow2_alloc_info(img_qcow2 *q, uint64_t *alloc_bytes, bool *alloc_known,
+                         uint64_t *granule_bytes);
+
 
 
 #ifdef __cplusplus

@@ -150,6 +150,25 @@ static int cmd_img_info(img_ctx *ctx, const img_args *in, img_result *out){
         return IMG_EFORMAT;
     }
     img_result_u64(out,"size_bytes",img_qcow2_size(q));
+    /* ★ T5：容量与占用是两件事。st_size 是容量，st_blocks 才是真占用；
+     *   App 的「容量 X · 占用 Y」和「是否稀疏」都靠这几个字段，不再自己猜。 */
+    {
+        uint64_t logical = img_qcow2_size(q), alloc = 0, granule = 0;
+        bool known = false;
+        (void)img_qcow2_alloc_info(q, &alloc, &known, &granule);
+        img_result_u64(out,"logical_bytes",logical);
+        img_result_u64(out,"alloc_bytes",alloc);
+        img_result_bool(out,"alloc_known",known);
+        img_result_u64(out,"granule_bytes",granule);
+        /* sparse_ratio 是【百分比整数】（0..100）：省下来的占比。
+         *   占的比容量还多（qcow2 元数据）时按 0 报，不出现负数。 */
+        uint64_t pct = 0;
+        /* 四舍五入：64 GiB 里只占 1 MiB 时应该显示 100%，而不是向下取整成 99% */
+        if(logical && alloc < logical)
+            pct = ((logical - alloc) * 100u + logical/2) / logical;
+        img_result_u64(out,"sparse_ratio",pct);
+        img_result_u64(out,"hole_bytes", alloc < logical ? logical - alloc : 0);
+    }
     /* format：App 按扩展名猜格式并不可靠（实际按魔数判定）。
      *   建盘后要显示实际格式，这里直接报探测结果。*/
     img_result_str(out,"format",img_diskfmt_name(q->fmt));
@@ -8828,6 +8847,9 @@ static const img_arg A_COPY[] = {
     {"max-depth", IMG_A_U64, false, "32", "目录递归深度上限（P1；超限报 COPY-DEPTH-EXCEEDED）", NULL},
     {"exclude", IMG_A_STR, false, NULL,    "basename 通配排除，逗号分隔（如 .trashed-*,*.tmp）；大小写敏感", NULL},
     {"exclude-from",IMG_A_STR,false,NULL,  "排除清单文件（一行一条，tar -X 风格，只按 basename 匹配）", NULL},
+    /* ★ T4：宿主 → 宿主复制时的稀疏策略。raw 映像的 st_size 是容量、
+     *   st_blocks 才是占用；逐字节复制会把 64 GiB 稀疏盘变成 64 GiB 实体占用。*/
+    {"sparse", IMG_A_ENUM, false, "auto", "宿主→宿主：auto=源有洞就保持 | always=同上 | never=按完整容量写", NULL},
 };
 static const img_arg A_MOVE[] = {
     {"src", IMG_A_STR, false, NULL, "源（同 copy；批量时可省）", NULL},
@@ -8839,6 +8861,7 @@ static const img_arg A_MOVE[] = {
     {"allow_host_delete", IMG_A_BOOL, false, "false", "允许删除宿主源文件（App 弹窗确认后再传 true）", NULL},
     {"list_file", IMG_A_STR, false, NULL, "批量：每行 `源路径>目标路径`", NULL},
     {"on_fail", IMG_A_ENUM, false, "continue", "批量失败策略：continue | stop", NULL},
+    {"sparse", IMG_A_ENUM, false, "auto", "跨卷移动时宿主→宿主复制：auto | always | never", NULL},
 };
 static const img_arg A_RENAME[] = {
     {"path", IMG_A_STR, true, NULL, "要改名的路径（! 语法）", NULL},
@@ -9040,6 +9063,18 @@ static int cmd_copy(img_ctx *ctx, const img_args *in, img_result *out){
     o.preserve_times=img_args_bool(in,"preserve_times",true);
     o.create_parents=img_args_bool(in,"create_parents",true);
     o.follow_symlinks=img_args_bool(in,"follow_symlinks",false);
+    /* ★ T4：sparse=auto|always|never（默认 auto）*/
+    {
+        const char *sp=img_args_get(in,"sparse");
+        if(sp){
+            if(!strcmp(sp,"auto"))        o.sparse=IMG_SPARSE_AUTO;
+            else if(!strcmp(sp,"always")) o.sparse=IMG_SPARSE_ALWAYS;
+            else if(!strcmp(sp,"never"))  o.sparse=IMG_SPARSE_NEVER;
+            else { img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","sparse",
+                       "只能是 auto/always/never","auto：源有洞就保持（默认）；never：按完整容量写");
+                   return IMG_EINVAL; }
+        }
+    }
 
     if(lst){
         FILE *fp=fopen(lst,"r");
@@ -9146,6 +9181,12 @@ static int cmd_copy(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_u64(out,"parent_total",st.parent_total);
     if(st.archive_bytes) img_result_u64(out,"archive_bytes",st.archive_bytes);   /* REQ-41：重写后的包大小 */
     img_result_str(out,"mode",path_same_volume(&ps,&pd)?"same_volume":"cross_volume");
+    /* ★ T4：稀疏口径。sparse_source=源有洞；sparse_kept=false 时 App 必须提示
+     *   「已按完整容量写入」。*/
+    img_result_bool(out,"sparse_source",st.sparse_source);
+    img_result_u64(out,"hole_bytes",st.hole_bytes);
+    img_result_bool(out,"sparse_kept",st.sparse_kept);
+    img_result_u64(out,"out_alloc_bytes",st.out_alloc_bytes);
     img_result_str(out,"src",ss);
     img_result_str(out,"dst",ds);
     if(st.final_path[0]){
@@ -9170,11 +9211,21 @@ static int cmd_move(img_ctx *ctx, const img_args *in, img_result *out){
     if(cf){ if(!strcmp(cf,"overwrite")) conflict=IMG_COPY_OVERWRITE;
             else if(!strcmp(cf,"rename")) conflict=IMG_COPY_RENAME;
             else if(strcmp(cf,"fail")){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","conflict","只能是 fail/overwrite/rename",NULL); return IMG_EINVAL; } }
-    img_xmove_opts o={ conflict, true, true, true, false, true, 32 };
+    img_xmove_opts o={ conflict, true, true, true, false, true, 32, 0 };
     o.recursive=img_args_bool(in,"recursive",true);
     o.preserve_times=img_args_bool(in,"preserve_times",true);
     o.create_parents=img_args_bool(in,"create_parents",true);
     o.allow_host_delete=img_args_bool(in,"allow_host_delete",false);
+    {
+        const char *sp=img_args_get(in,"sparse");
+        if(sp){
+            if(!strcmp(sp,"auto"))        o.sparse=IMG_SPARSE_AUTO;
+            else if(!strcmp(sp,"always")) o.sparse=IMG_SPARSE_ALWAYS;
+            else if(!strcmp(sp,"never"))  o.sparse=IMG_SPARSE_NEVER;
+            else { img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","sparse",
+                       "只能是 auto/always/never",NULL); return IMG_EINVAL; }
+        }
+    }
 
     if(lst){
         FILE *fp=fopen(lst,"r");
@@ -9273,6 +9324,10 @@ static int cmd_move(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_bool(out,"deleted",st.deleted);
     img_result_bool(out,"noop",st.noop);
     img_result_bool(out,"case_only",st.case_only);
+    img_result_bool(out,"sparse_source",st.sparse_source);
+    img_result_u64(out,"hole_bytes",st.hole_bytes);
+    img_result_bool(out,"sparse_kept",st.sparse_kept);
+    img_result_u64(out,"out_alloc_bytes",st.out_alloc_bytes);
     img_result_str(out,"src",ss);
     img_result_str(out,"dst",ds);
     if(st.final_path[0]) img_result_str(out,"dst_path",st.final_path);

@@ -125,6 +125,39 @@ static void host_rm_rf(const char *path){
 }
 
 typedef struct { int fd; } host_rd;
+
+/* ★ T4（2026-11-11）：宿主文件的洞。
+ *   raw 映像 st_size = 容量、st_blocks = 实际占用。逐字节复制会把洞写成真实
+ *   零字节 —— 64 GiB 的稀疏 raw 复制完就是 64 GiB 占用，手机上等于爆盘。
+ *   SEEK_DATA/SEEK_HOLE 是 Linux 3.1+ 的接口；不支持时退回普通复制。 */
+#ifndef SEEK_DATA
+#define SEEK_DATA 3
+#endif
+#ifndef SEEK_HOLE
+#define SEEK_HOLE 4
+#endif
+
+/* 量源文件有多少洞：1=有洞 0=没洞 -1=不支持/出错 */
+static int host_measure_holes(int fd, uint64_t size, uint64_t *hole_bytes){
+    if(hole_bytes) *hole_bytes = 0;
+    uint64_t holes = 0;
+    off_t off = 0;
+    while((uint64_t)off < size){
+        off_t d = lseek(fd, off, SEEK_DATA);
+        if(d < 0){
+            if(errno == ENXIO){ holes += size - (uint64_t)off; break; }  /* 尾段全是洞 */
+            return -1;                        /* EINVAL：文件系统不支持 SEEK_DATA */
+        }
+        if((uint64_t)d >= size){ holes += size - (uint64_t)off; break; }
+        off_t h = lseek(fd, d, SEEK_HOLE);
+        if(h < 0) return -1;
+        if((uint64_t)h > size) h = (off_t)size;
+        if(h <= d) h = d + 1;                 /* 防御：不许死循环 */
+        off = h;
+    }
+    if(hole_bytes) *hole_bytes = holes;
+    return holes ? 1 : 0;
+}
 static int host_read_cb(void *ud, uint64_t off, void *buf, size_t want, size_t *got){
     host_rd *h=(host_rd*)ud;
     if(got) *got=0;
@@ -690,7 +723,8 @@ typedef struct {
 static int dst_write_file(xep *d, const char *final, const img_stream *src,
                           const img_src_meta *meta, const img_xcopy_opts *o,
                           xagg *agg, img_prog *prog,
-                          bool existed, uint64_t *out_size, bool *out_replaced){
+                          bool existed, uint64_t *out_size, bool *out_replaced,
+                          img_xcopy_stats *st){
     if(out_size) *out_size=meta->size;
     if(out_replaced) *out_replaced=existed;
     if(d->loc.kind==IMG_XK_ARCHIVE){
@@ -738,6 +772,24 @@ static int dst_write_file(xep *d, const char *final, const img_stream *src,
         uint8_t *buf=(uint8_t*)malloc(CH);
         int rc=buf?IMG_OK:IMG_ENOMEM;
         uint64_t off=0;
+        /* ★ T4：源是宿主文件且允许保持稀疏 → 先量洞，再分段复制。
+         *   新文件只写有数据的段，跳过的段天然就是洞（不用 fallocate）。*/
+        uint64_t holes=0;
+        int hs=-1;
+        int sfd=(src->read==host_read_cb && src->ud)?((host_rd*)src->ud)->fd:-1;
+        bool sparse_src=false;
+        /* ★ 量洞不受 --sparse 影响：sparse_source 是「源的事实」，
+         *   哪怕用户选了 never，App 也要知道源本来是稀疏的。*/
+        if(sfd>=0 && meta->size){
+            hs=host_measure_holes(sfd,meta->size,&holes);
+            sparse_src=(hs==1);
+        }
+        /* 选 never 就逐字节写：目标一定实体化。*/
+        const bool use_seg = sparse_src && o->sparse!=IMG_SPARSE_NEVER;
+        if(st && sfd>=0){
+            st->hole_bytes=holes;
+            st->sparse_source=sparse_src;
+        }
         /* ★ REQ-68：聚合模式把"当前文件已拷"报成"整棵树已拷"，
          *   这样 totalBytes 全程不变（App 的 ETA 才不会被单文件大小带跑）。*/
         const bool agg_on = (agg && agg->total_bytes > 0);
@@ -753,27 +805,80 @@ static int dst_write_file(xep *d, const char *final, const img_stream *src,
                 img_prog_bytes(prog,0,meta->size);
             }
         }
-        while(rc==IMG_OK && off<meta->size){
-            if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
-            size_t want=(size_t)((meta->size-off<CH)?(meta->size-off):CH);
-            size_t got=0;
-            rc=src->read(src->ud,off,buf,want,&got);
-            if(rc!=IMG_OK) break;
-            if(got==0){ rc=IMG_EIO; break; }
-            size_t w=0;
-            while(w<got){
-                ssize_t n=write(fd,buf+w,got-w);
-                if(n<=0){ rc=IMG_EIO; break; }
-                w+=(size_t)n;
+        if(use_seg){
+            /* 分段复制：SEEK_DATA → SEEK_HOLE 之间的就是真数据，其余是洞。
+             * 进度按"处理到的逻辑位置"报（洞也算走过了），否则 ETA 会一直不到头。*/
+            off_t pos=0;
+            while(rc==IMG_OK && pos < (off_t)meta->size){
+                if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
+                off_t d2=lseek(sfd,pos,SEEK_DATA);
+                if(d2<0){ if(errno==ENXIO) break; rc=IMG_EIO; break; }
+                if(d2>=(off_t)meta->size) break;
+                off_t h2=lseek(sfd,d2,SEEK_HOLE);
+                if(h2<0){ rc=IMG_EIO; break; }
+                if(h2>(off_t)meta->size) h2=(off_t)meta->size;
+                if(h2<=d2) h2=d2+1;
+                off_t cur=d2;
+                while(rc==IMG_OK && cur<h2){
+                    size_t want=(size_t)((h2-cur<(off_t)CH)?(h2-cur):(off_t)CH);
+                    ssize_t r=pread(sfd,buf,want,cur);
+                    if(r<=0){ rc=IMG_EIO; break; }
+                    ssize_t w=0;
+                    while(w<r){
+                        ssize_t n=pwrite(fd,buf+w,(size_t)(r-w),(off_t)(cur+w));
+                        if(n<=0){ rc=IMG_EIO; break; }
+                        w+=n;
+                    }
+                    cur+=r;
+                }
+                pos=h2;
+                off=(uint64_t)pos;
+                if(prog) img_prog_bytes(prog, agg_on ? base+off : off,
+                                        agg_on ? agg->total_bytes : meta->size);
             }
-            if(rc!=IMG_OK) break;
-            off+=got;
-            if(prog) img_prog_bytes(prog, agg_on ? base+off : off,
-                                    agg_on ? agg->total_bytes : meta->size);
+            /* 补齐到逻辑大小：尾部洞也要体现为文件长度 */
+            if(rc==IMG_OK && ftruncate(fd,(off_t)meta->size)!=0) rc=IMG_EIO;
+        } else {
+            while(rc==IMG_OK && off<meta->size){
+                if(img_cancelled()){ rc=IMG_ECANCELLED; break; }
+                size_t want=(size_t)((meta->size-off<CH)?(meta->size-off):CH);
+                size_t got=0;
+                rc=src->read(src->ud,off,buf,want,&got);
+                if(rc!=IMG_OK) break;
+                if(got==0){ rc=IMG_EIO; break; }
+                size_t w=0;
+                while(w<got){
+                    ssize_t n=write(fd,buf+w,got-w);
+                    if(n<=0){ rc=IMG_EIO; break; }
+                    w+=(size_t)n;
+                }
+                if(rc!=IMG_OK) break;
+                off+=got;
+                if(prog) img_prog_bytes(prog, agg_on ? base+off : off,
+                                        agg_on ? agg->total_bytes : meta->size);
+            }
+        }
+        /* 目标真的保住洞了吗？按写完的 st_blocks 判，不猜文件系统能力：
+         * 目标若是 FAT/exFAT（无洞概念），这里会看到 alloc ≈ 文件长度 → false。*/
+        if(st && rc==IMG_OK){
+            struct stat ost, sst;
+            if(fstat(fd,&ost)==0){
+                uint64_t alloc=(uint64_t)ost.st_blocks*512u;
+                st->out_alloc_bytes=alloc;
+                /* 「保住了洞」的可靠判据是【目标占用 ≈ 源占用】，不是
+                 * 「目标占用 < 文件长度」—— f2fs 会把大片空洞预分配成数据段，
+                 * 长度那条判据会把「没保住」错判成「保住了」。 */
+                if(sfd>=0 && fstat(sfd,&sst)==0){
+                    uint64_t salloc=(uint64_t)sst.st_blocks*512u;
+                    st->sparse_kept=(alloc <= salloc + (8u<<20));
+                } else {
+                    st->sparse_kept=(alloc <= meta->size - holes + (4u<<20));
+                }
+            }
         }
         free(buf);
         if(close(fd)!=0 && rc==IMG_OK) rc=IMG_EIO;
-        if(rc==IMG_OK && off!=meta->size) rc=IMG_EIO;
+        if(rc==IMG_OK && !sparse_src && off!=meta->size) rc=IMG_EIO;
         if(rc!=IMG_OK){ unlink(tmp); return rc; }
         if(rename(tmp,final)!=0){ unlink(tmp); return IMG_EIO; }
         if(o->preserve_times) (void)dst_set_times(d,final,meta);
@@ -1143,7 +1248,18 @@ static int copy_file(xctx *c, const char *spath, const char *dpath, bool top){
     if(rc!=IMG_OK){ c->st->side=1; return rc; }
     if(c->prog) img_prog_item(c->prog,spath);
     bool replaced=false;
-    rc=dst_write_file(c->d,target,&st,&meta,c->o,&c->agg,c->prog,existed,NULL,&replaced);
+    /* ★ T4：非宿主目标（NTFS/FAT/镜像内）没有洞概念，如实标 false；
+     *   宿主 → 宿主时由 dst_write_file 按写完的实际块数判定。*/
+    if(c->s->loc.kind==IMG_XK_HOST && st.ud){
+        uint64_t holes=0;
+        int hs=host_measure_holes(((host_rd*)st.ud)->fd,meta.size,&holes);
+        if(hs>=0){
+            c->st->hole_bytes=holes;
+            c->st->sparse_source=(hs==1);
+            if(hs==1 && c->d->loc.kind!=IMG_XK_HOST) c->st->sparse_kept=false;
+        }
+    }
+    rc=dst_write_file(c->d,target,&st,&meta,c->o,&c->agg,c->prog,existed,NULL,&replaced,c->st);
     src_close_stream(c->s,holder);
     if(rc!=IMG_OK){ c->st->side=2; return rc; }
     /* NTFS → NTFS 保留命名数据流（ADS）；FAT/宿主没有这个概念，只能丢弃。*/
@@ -1514,7 +1630,7 @@ int img_xmove_run(const img_xloc *src, const img_xloc *dst,
     img_xmove_stats sink; if(!st) st=&sink;
     memset(st,0,sizeof *st);
     if(!src||!dst) return IMG_EINVAL;
-    img_xmove_opts o={ IMG_COPY_FAIL, true, true, true, false, true, XC_MAX_DEPTH };
+    img_xmove_opts o={ IMG_COPY_FAIL, true, true, true, false, true, XC_MAX_DEPTH, 0 };
     if(opt) o=*opt;
     if(o.max_depth<=0 || o.max_depth>256) o.max_depth=XC_MAX_DEPTH;
 
@@ -1694,6 +1810,7 @@ xcross:
     if(sdir && !o.recursive) return IMG_ENOTSUP;
 
     img_xcopy_opts co={ o.conflict, o.recursive, o.preserve_times, o.create_parents, false, o.max_depth, false, {{0}}, 0 };
+    co.sparse = o.sparse;            /* T4：跨卷移动也要能保持稀疏 */
     img_xcopy_stats cs; memset(&cs,0,sizeof cs);
     rc=img_xcopy_run(src,dst,&co,prog,&cs);
     if(rc!=IMG_OK) return rc;
@@ -1708,6 +1825,8 @@ xcross:
     rc=ep_remove(&de,de.root,o.recursive,&removed);
     ep_close(&de);
     st->files=cs.files; st->dirs=cs.dirs; st->bytes=cs.bytes; st->ads=cs.ads;
+    st->sparse_source=cs.sparse_source; st->hole_bytes=cs.hole_bytes;
+    st->sparse_kept=cs.sparse_kept; st->out_alloc_bytes=cs.out_alloc_bytes;
     snprintf(st->mode,sizeof st->mode,"cross_volume");
     snprintf(st->final_path,sizeof st->final_path,"%s",cs.final_path);
     if(rc!=IMG_OK){ st->deleted=false; return IMG_EPARTIAL; }

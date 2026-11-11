@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <zlib.h>
 #ifdef IMG_HAVE_ZSTD
 #include <zstd.h>
@@ -414,6 +416,46 @@ int img_qcow2_any_allocated(img_qcow2 *q, uint64_t off, uint64_t len, bool *any)
         if(rc!=IMG_OK) return rc;
         if(e!=0){ *any=true; return IMG_OK; }     /* 非零 = 有映射（含压缩簇） */
     }
+    return IMG_OK;
+}
+
+/* ---------- 宿主占用 / 分配粒度（App 的「容量 X · 占用 Y」） ----------
+ * 口径说明（重要，别自作聪明）：
+ *   logical_bytes = 虚拟容量（guest 看到的磁盘大小）
+ *   alloc_bytes   = 宿主文件【实际占的块】× 512（st_blocks），不是 st_size
+ *   alloc_known   = 上面这个数是否可信
+ *   granule_bytes = 这份格式分配数据的最小单位
+ *
+ * 为什么要 alloc_known：Android 的 /sdcard 走 FUSE，st_blocks 有已知不可靠
+ *   案例（st_size=0 而 st_blocks>0 的竞态、云端提供者返回 0）。我们只在
+ *   数值自相矛盾时标 false，不去猜——App 显示「—」，比显示一个假数安全。 */
+int img_qcow2_alloc_info(img_qcow2 *q, uint64_t *alloc_bytes, bool *alloc_known,
+                         uint64_t *granule_bytes){
+    if(!q) return IMG_EINVAL;
+    if(alloc_bytes) *alloc_bytes = 0;
+    if(alloc_known) *alloc_known = false;
+    if(granule_bytes){
+        uint64_t g = q->h.cluster_size;
+        if(q->fmt == DISK_FMT_RAW || g == 0) g = 4096;   /* raw 的粒度是宿主块 */
+        *granule_bytes = g;
+    }
+    if(!q->io) return IMG_EINVAL;
+
+    int fd = img_io_fd(q->io);
+    if(fd < 0) return IMG_ENOTSUP;        /* 路径模式下也有 fd；真拿不到就报不可知 */
+    struct stat st;
+    if(fstat(fd, &st) != 0) return IMG_EIO;
+
+    uint64_t blocks_bytes = (uint64_t)st.st_blocks * 512u;
+    uint64_t size = (uint64_t)st.st_size;
+    bool known = true;
+    /* 矛盾①：文件长度 0 却占着块（FUSE 竞态实测见过） */
+    if(size == 0 && blocks_bytes > 0) known = false;
+    /* 矛盾②：占的块比文件还长（超过 4 MiB 余量才算矛盾；小文件尾巴对齐会差一点） */
+    if(blocks_bytes > size + (4u << 20)) known = false;
+
+    if(alloc_bytes) *alloc_bytes = blocks_bytes;
+    if(alloc_known) *alloc_known = known;
     return IMG_OK;
 }
 

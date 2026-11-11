@@ -70,7 +70,19 @@ typedef struct {
      *   0 = 关闭，保持 copy 命令"按单文件报"的现有行为。*/
     uint64_t agg_bytes_total;
     uint64_t agg_files_total;
+    /* ★ T4（2026-11-11）：宿主 → 宿主复制时要不要保住文件的洞。
+     *   raw 映像的 st_size 是容量、st_blocks 才是占用：逐字节复制会把 64 GiB
+     *   的稀疏 raw 变成 64 GiB 实体占用（手机直接爆盘）。IMG_SPARSE_AUTO 时
+     *   只有源真的有洞才分段复制；没有洞的文件行为完全不变。*/
+    int sparse;            /* img_sparse_mode；0=AUTO */
 } img_xcopy_opts;
+
+/* copy --sparse 的取值 */
+typedef enum {
+    IMG_SPARSE_AUTO   = 0,   /* 默认：源有洞就保持，没洞就普通复制 */
+    IMG_SPARSE_ALWAYS = 1,   /* 总是按洞复制（等同 auto，但明确表态） */
+    IMG_SPARSE_NEVER  = 2    /* 逐字节完整写：目标一定实体化（用户明确要"完整副本"） */
+} img_sparse_mode;
 
 typedef struct {
     uint64_t files;
@@ -89,6 +101,11 @@ typedef struct {
     int      side;               /* 失败发生在哪一侧：0=复制中 / 1=源 / 2=目标 */
     char     first_error[256];
     char     bad_name[1024];     /* 被拒绝的目标名字（NAME-INVALID 时给 err.at 用）*/
+    /* ---- T4：稀疏口径（只对宿主 → 宿主复制有意义）---- */
+    bool     sparse_source;      /* 源文件有洞 */
+    uint64_t hole_bytes;         /* 源的洞总字节（SEEK_DATA/SEEK_HOLE 量出来的） */
+    bool     sparse_kept;        /* 目标是否保住了洞（false ⇒ 按完整容量写入了） */
+    uint64_t out_alloc_bytes;    /* 目标实际占用（st_blocks×512） */
 } img_xcopy_stats;
 
 /* 解析 "ntfs:/a/b" 这类位置串。失败返回 IMG_EINVAL 并填 why。 */
@@ -117,6 +134,7 @@ typedef struct {
     bool allow_host_delete;   /* 宿主源删除许可 */
     bool verify;              /* 单文件复制后校验大小 */
     int  max_depth;
+    int  sparse;              /* img_sparse_mode；跨卷移动时透传给复制引擎（T4） */
 } img_xmove_opts;
 
 typedef struct {
@@ -126,6 +144,11 @@ typedef struct {
     bool     noop;            /* mv a a：什么都没做 */
     bool     case_only;       /* 只改大小写 */
     bool     by_rename;       /* 真的没搬数据：走的是 rename(2)（同卷/同分区/同镜像）*/
+    /* ---- T4：稀疏口径（只对宿主 → 宿主有意义）---- */
+    bool     sparse_source;      /* 源文件有洞（st_blocks 明显小于 st_size） */
+    uint64_t hole_bytes;         /* 源的洞总字节（SEEK_DATA/SEEK_HOLE 量出来的） */
+    bool     sparse_kept;        /* 目标是否保住了洞（false ⇒ 按完整容量写入了） */
+    uint64_t out_alloc_bytes;    /* 目标实际占用（st_blocks×512） */
     char     final_path[2048];
     int      side;
     char     first_error[256];   /* 失败原因的说明（如非法名字具体哪个字符） */
