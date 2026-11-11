@@ -2657,7 +2657,7 @@ static int cmd_img_compact(img_ctx *ctx, const img_args *in, img_result *out){
         if(!strcasecmp(cp,"zlib")) compress=true;
         else {
             img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","compress",
-                strcasecmp(cp,"zstd")==0 ? "zstd 还没接（要 qcow2 v3，老 QEMU 打不开）"
+                strcasecmp(cp,"zstd")==0 ? "zstd 还没接（要 qcow2 v3，老 QEMU 无法打开）"
                                          : "只接受 off | zlib",
                 "先用 zlib；zstd 列在 P2");
             return IMG_EINVAL;
