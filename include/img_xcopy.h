@@ -125,6 +125,7 @@ typedef struct {
     bool     deleted;         /* 源是否已删 */
     bool     noop;            /* mv a a：什么都没做 */
     bool     case_only;       /* 只改大小写 */
+    bool     by_rename;       /* 真的没搬数据：走的是 rename(2)（同卷/同分区/同镜像）*/
     char     final_path[2048];
     int      side;
     char     first_error[256];   /* 失败原因的说明（如非法名字具体哪个字符） */

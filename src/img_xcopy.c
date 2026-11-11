@@ -1581,6 +1581,7 @@ int img_xmove_run(const img_xloc *src, const img_xloc *dst,
                     st->files=isdir?0:1; st->dirs=isdir?1:0;
                     st->bytes=isdir?0:meta.size;
                     st->noop=true;
+                    st->by_rename=true;      /* 名字都没变，当然没搬数据 */
                     size_t fl=strlen(final);
                     if(fl>=sizeof st->final_path) fl=sizeof st->final_path-1;
                     memcpy(st->final_path,final,fl); st->final_path[fl]=0;
@@ -1657,6 +1658,10 @@ int img_xmove_run(const img_xloc *src, const img_xloc *dst,
                 snprintf(st->mode,sizeof st->mode,"%s",
                          strcmp(par_s,par_t)?"move":"rename");
                 st->deleted = true;      /* 同卷：旧名字已消失（no-op 在上面提前返回）*/
+                /* ★ T3：这里真的是 rename(2) —— 文件内容一字节没动。
+                 *   App 靠 moved_by 区分「秒级改名」与「整盘复制」：前者不提示
+                 *   raw 会被实体化，后者必须提示。 */
+                st->by_rename = true;
                 st->files = isdir?0:1;
                 st->dirs  = isdir?1:0;
                 st->bytes = isdir?0:meta.size;

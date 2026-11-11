@@ -21,6 +21,7 @@
 #   vhd-test.py          VHD 建盘、多块写入、重开与 qemu 互验
 #   vmdk-test.py         VMDK 建盘、GD 落盘、跨进程重开与 qemu 互验
 #   compact-fmt-test.py  img.compact 对 raw/qcow2/vhd/vmdk 四种源都真的搬数据（D2）
+#   move-rename-test.sh  move 的 moved_by=rename|copy（raw 会不会被实体化）
 #   wim-capture-test.sh  wim.capture 端到端（含临时目录清理）
 #   style-check.py       用户可见文本符合 STYLE-GUIDE
 #   genbcd-test.sh       imggenbcd UEFI BCD 定制（GUID 映射/4 参/反例）
@@ -178,6 +179,7 @@ run "vhd-fault-test（N6-3：任意一步失败后映像仍可用、已提交数
 run "vhd-test（VHD 建盘、多块写入、重开与 QEMU 互验）"         python3 "$ROOT/tests/vhd-test.py"
 run "vmdk-test（VMDK 建盘、GD 落盘、跨进程重开与 qemu 互验）"   python3 "$ROOT/tests/vmdk-test.py"
 run "compact-fmt-test（compact 四种源格式都真的搬数据；D2）"   python3 "$ROOT/tests/compact-fmt-test.py"
+run "move-rename-test（move 的 moved_by=rename|copy；T3）"      bash "$ROOT/tests/move-rename-test.sh"
 run "bigdir-wim-test（REQ-65：单目录 >256 条、宽树估算不截断）" python3 "$ROOT/tests/bigdir-wim-test.py"
 run "wim-capture-test（捕获、临时目录清理、产物可读）"          bash "$ROOT/tests/wim-capture-test.sh"
 run "wim-exclude-test（REQ-67：--exclude 同口径 + extract/pack/write 三段进度）" python3 "$ROOT/tests/wim-exclude-test.py"

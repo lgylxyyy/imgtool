@@ -9211,7 +9211,8 @@ static int cmd_move(img_ctx *ctx, const img_args *in, img_result *out){
             img_path_cleanup(&ps); img_path_cleanup(&pd);
             char ea[2200],eb[2200],ep[2200],tail[2300];
             jesc(ea,sizeof ea,a); jesc(eb,sizeof eb,b); jesc(ep,sizeof ep,stx.final_path);
-            if(rc==IMG_OK) snprintf(tail,sizeof tail,",\"path\":\"%s\",\"mode\":\"%s\"",ep,stx.mode);
+            if(rc==IMG_OK) snprintf(tail,sizeof tail,",\"path\":\"%s\",\"mode\":\"%s\",\"moved_by\":\"%s\"",
+                                    ep,stx.mode,stx.by_rename?"rename":"copy");
             else snprintf(tail,sizeof tail,",\"code\":\"%s\"",op_code(rc,0));
             int need=snprintf(items+il,ITEMS_CAP-il,
                 "%s{\"src\":\"%s\",\"dst\":\"%s\",\"ok\":%s,\"files\":%llu,\"dirs\":%llu,\"bytes\":%llu%s}",
@@ -9262,6 +9263,9 @@ static int cmd_move(img_ctx *ctx, const img_args *in, img_result *out){
         return rc;
     }
     img_result_str(out,"mode",st.mode);
+    /* ★ T3：moved_by 说清「搬没搬数据」。rename = 只改目录项（raw 稀疏原样保留）；
+     *   copy = 逐字节重写（raw 会被实体化成完整容量）。 */
+    img_result_str(out,"moved_by",st.by_rename?"rename":"copy");
     img_result_u64(out,"files",st.files);
     img_result_u64(out,"dirs",st.dirs);
     img_result_u64(out,"bytes",st.bytes);
