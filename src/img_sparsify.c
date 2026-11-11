@@ -575,11 +575,9 @@ static int sparsify_punch(img_qcow2 *q, const img_sparsify_opts_t *opts,
         o->bytes_before = host_alloc(q->io);
         o->punch_supported = true;
         size_t npair = seg_normalize(&segs);
-        uint64_t seg_bytes = 0;
         if(prog){ img_prog_phase(prog,IMG_PH_FIX,"释放宿主空间"); img_prog_op(prog,IMG_OP_WRITE); img_prog_count(prog,0,npair); }
         for(size_t i=0;i<npair && rc==IMG_OK;i++){
             uint64_t s0 = segs.v[i*2], ln = segs.v[i*2+1];
-            if(dry){ seg_bytes += mapped_in(q->io,0,0); /* 见下：按映射量估算 */ }
             if(dry) continue;
             int prc = pf(q, s0, ln);
             if(prc == IMG_OK) o->punched_segments++;
@@ -614,7 +612,6 @@ static int sparsify_punch(img_qcow2 *q, const img_sparsify_opts_t *opts,
                 "执行后校验点不一致（分区表/分区头/已用数据被改动）：立刻停止使用这份映像");
             rc = IMG_ECORRUPT;
         }
-        (void)seg_bytes;
     }
     #undef GCHK_ADD
     free(segs.v);
