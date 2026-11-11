@@ -55,6 +55,88 @@ static int u64v_push(u64v *a, uint64_t x){
     return IMG_OK;
 }
 
+
+/* ---------------- 读卷的空闲位图（trim 与 sparsify 共用） ----------------
+ * bits[i]=1 表示分区内第 i 个【卷簇】空闲。默认全 0（已用）是保守正确的：
+ * 引导扇区 / MFT 保留区不在 $Bitmap 覆盖范围内，保持"已用"就不会被动。
+ * 返回 IMG_ENOTSUP 表示这个分区既不是 NTFS 也不是 FAT32（code=TRIM-FS-UNSUPPORTED）。*/
+int img_fs_free_map(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
+                    uint8_t **bits_out, uint64_t *nbits_out, uint64_t *gcs_out,
+                    char *fsname, size_t fscap, char *code, size_t codecap,
+                    char *err, size_t errcap){
+    if(bits_out) *bits_out = NULL;
+    if(nbits_out) *nbits_out = 0;
+    if(gcs_out) *gcs_out = 0;
+    if(fsname && fscap) fsname[0] = 0;
+    if(code && codecap) code[0] = 0;
+    if(err && errcap) err[0] = 0;
+    if(!q || !part_bytes) return IMG_EINVAL;
+
+    uint64_t gcs = 0, nbits = 0;
+    uint8_t *bits = NULL;
+
+#if IMG_WITH_NTFS3G
+    if(img_ntfs_probe(q, part_lba, NULL) == IMG_OK){
+        img_ntfs_fs *fs = img_ntfs_mount_rw(q, part_lba, part_bytes);
+        if(!fs){
+            if(err&&errcap) snprintf(err,errcap,"NTFS 挂载失败（卷可能被标记为脏）");
+            return IMG_ESTATE;
+        }
+        if(img_ntfs_is_dirty(fs)){
+            img_ntfs_umount(fs);
+            if(err&&errcap) snprintf(err,errcap,"NTFS 卷是脏的（上次没正常关机）：位图不可信，先让系统正常启动一次");
+            return IMG_ESTATE;
+        }
+        gcs = img_ntfs_cluster_size(fs);
+        nbits = part_bytes / (gcs ? gcs : 1);
+        if(gcs && (part_bytes % gcs)) nbits++;          /* 尾部不满一簇也算一格 */
+        bits = (uint8_t*)calloc(1, (size_t)((nbits + 7) / 8) + 1);
+        if(!bits){ img_ntfs_umount(fs); return IMG_ENOMEM; }
+        int rc = img_ntfs_free_map(fs, bits, nbits);
+        img_ntfs_umount(fs);
+        if(rc != IMG_OK){
+            free(bits);
+            if(err&&errcap) snprintf(err,errcap,"读 $Bitmap 失败（rc=%d）", rc);
+            return rc;
+        }
+        if(fsname&&fscap) snprintf(fsname,fscap,"ntfs");
+    } else
+#endif
+    if(img_fat32_probe(q, part_lba, NULL) == IMG_OK){
+        img_fat32_fs *fs = img_fat32_mount(q, part_lba, false);
+        if(!fs){
+            if(err&&errcap) snprintf(err,errcap,"FAT32 挂载失败");
+            return IMG_ESTATE;
+        }
+        if(img_fat32_is_dirty(fs)){
+            img_fat32_unmount(fs);
+            if(err&&errcap) snprintf(err,errcap,"FAT32 卷是脏的（上次没正常卸载）：位图不可信");
+            return IMG_ESTATE;
+        }
+        gcs = img_fat32_cluster_bytes(fs);
+        nbits = part_bytes / (gcs ? gcs : 1) + ((gcs && (part_bytes % gcs)) ? 1 : 0);
+        bits = (uint8_t*)calloc(1, (size_t)((nbits + 7) / 8) + 1);
+        if(!bits){ img_fat32_unmount(fs); return IMG_ENOMEM; }
+        int rc = img_fat32_free_map(fs, bits, nbits);
+        img_fat32_unmount(fs);
+        if(rc != IMG_OK){
+            free(bits);
+            if(err&&errcap) snprintf(err,errcap,"读 FAT 表失败（rc=%d）", rc);
+            return rc;
+        }
+        if(fsname&&fscap) snprintf(fsname,fscap,"fat32");
+    } else {
+        if(code&&codecap) snprintf(code,codecap,"TRIM-FS-UNSUPPORTED");
+        if(err&&errcap) snprintf(err,errcap,"这个分区既不是 NTFS 也不是 FAT32");
+        return IMG_ENOTSUP;
+    }
+
+    if(bits_out) *bits_out = bits; else free(bits);
+    if(nbits_out) *nbits_out = nbits;
+    if(gcs_out) *gcs_out = gcs;
+    return IMG_OK;
+}
+
 int img_trim(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
              const img_trim_opts_t *opts, img_trim_result_t *out,
              img_prog *prog, char *err, size_t errcap){
@@ -136,70 +218,13 @@ int img_trim(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
     uint64_t gcs = 0;               /* 客户机分配单元 */
     uint8_t *bits = NULL;           /* 1=空闲；域 = 分区内第 i 个簇 */
     uint64_t nbits = 0;
-    const char *fsname = "?";
 
-    /* NTFS 先试（probe 只看 BPB，不挂载）*/
-#if IMG_WITH_NTFS3G
-    if(img_ntfs_probe(q, part_lba, NULL) == IMG_OK){
-        img_ntfs_fs *fs = img_ntfs_mount_rw(q, part_lba, part_bytes);
-        if(!fs){
-            if(err&&errcap) snprintf(err,errcap,"NTFS 挂载失败（卷可能被标记为脏）");
-            return IMG_ESTATE;
-        }
-        if(img_ntfs_is_dirty(fs)){
-            img_ntfs_umount(fs);
-            if(err&&errcap) snprintf(err,errcap,"NTFS 卷是脏的（上次没正常关机）：位图不可信，先让系统正常启动一次");
-            return IMG_ESTATE;
-        }
-        gcs = img_ntfs_cluster_size(fs);
-        uint64_t n = img_ntfs_cluster_count(fs);
-        nbits = part_bytes / (gcs ? gcs : 1);
-        if(gcs && (part_bytes % gcs)) nbits++;          /* 尾部不满一簇也算一格 */
-        bits = (uint8_t*)calloc(1, (size_t)((nbits + 7) / 8) + 1);
-        if(!bits){ img_ntfs_umount(fs); return IMG_ENOMEM; }
-        /* 默认全"已用"，只有 $Bitmap 说空闲的才置 1 —— 引导扇区/MFT 保留区
-         * 不在 $Bitmap 覆盖范围，保持"已用"是保守正确的。*/
-        int rc = img_ntfs_free_map(fs, bits, nbits);
-        (void)n;
-        img_ntfs_umount(fs);
-        if(rc != IMG_OK){
-            free(bits);
-            if(err&&errcap) snprintf(err,errcap,"读 $Bitmap 失败（rc=%d）", rc);
-            return rc;
-        }
-        fsname = "ntfs";
-    } else
-#endif
-    if(img_fat32_probe(q, part_lba, NULL) == IMG_OK){
-        img_fat32_fs *fs = img_fat32_mount(q, part_lba, false);
-        if(!fs){
-            if(err&&errcap) snprintf(err,errcap,"FAT32 挂载失败");
-            return IMG_ESTATE;
-        }
-        if(img_fat32_is_dirty(fs)){
-            img_fat32_unmount(fs);
-            if(err&&errcap) snprintf(err,errcap,"FAT32 卷是脏的（上次没正常卸载）：位图不可信");
-            return IMG_ESTATE;
-        }
-        gcs = img_fat32_cluster_bytes(fs);
-        nbits = part_bytes / (gcs ? gcs : 1) + ((gcs && (part_bytes % gcs)) ? 1 : 0);
-        bits = (uint8_t*)calloc(1, (size_t)((nbits + 7) / 8) + 1);
-        if(!bits){ img_fat32_unmount(fs); return IMG_ENOMEM; }
-        int rc = img_fat32_free_map(fs, bits, nbits);
-        img_fat32_unmount(fs);
-        if(rc != IMG_OK){
-            free(bits);
-            if(err&&errcap) snprintf(err,errcap,"读 FAT 表失败（rc=%d）", rc);
-            return rc;
-        }
-        fsname = "fat32";
-    } else {
-        snprintf(out->code, sizeof out->code, "TRIM-FS-UNSUPPORTED");
-        if(err&&errcap) snprintf(err,errcap,"这个分区既不是 NTFS 也不是 FAT32");
-        return IMG_ENOTSUP;
-    }
+    int mrc = img_fs_free_map(q, part_lba, part_bytes, &bits, &nbits, &gcs,
+                              out->fs, sizeof out->fs, out->code, sizeof out->code,
+                              err, errcap);
+    if(mrc != IMG_OK) return mrc;
+    if(!bits){ snprintf(out->code, sizeof out->code, "TRIM-FS-UNSUPPORTED"); return IMG_ENOTSUP; }
 
-    snprintf(out->fs, sizeof out->fs, "%s", fsname);
     out->fs_cluster_bytes = gcs;
     if(!gcs || gcs == 0){ free(bits); return IMG_ESTATE; }
     if(gcs > cs){
@@ -317,7 +342,6 @@ int img_trim(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
     }
     free(hosts.v);
     out->alloc_after = host_alloc_bytes(q->io);
-    (void)fsname;
     if(prog) img_prog_done(prog, "清理完成");
     return IMG_OK;
 }

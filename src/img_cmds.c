@@ -38,6 +38,7 @@
 #include "img_archive_w.h"
 #include "img_du.h"
 #include "img_trim.h"
+#include "img_sparsify.h"
 #include "img_win_finish.h"
 #include "img_reg.h"
 #include "img_wim_capture.h"
@@ -8521,6 +8522,70 @@ static int cmd_reg_del(img_ctx *ctx, const img_args *in, img_result *out){
 }
 
 /* ================= img.trim（REQ-66）：按空闲位图原地释放簇 ================= */
+/* ============ img.sparsify（T7）：原地回收未使用块 ============ */
+static const img_arg A_IMGSPARSIFY[] = {
+    {"img",     IMG_A_STR,  true,  NULL,     "映像路径（raw / qcow2）", NULL},
+    {"mode",    IMG_A_ENUM, false, "all",    "fs=按客户机空闲位图 | zero=按内容全零 | all=先 fs 再 zero", NULL},
+    {"dry-run", IMG_A_BOOL, false, "false",  "只统计，一个字节都不改（App 用它显示「可释放 N」）", NULL},
+};
+static int cmd_img_sparsify(img_ctx *ctx, const img_args *in, img_result *out){
+    bool dry = img_args_bool(in,"dry-run",false);
+    const char *ms = img_args_get(in,"mode");
+    int mode = IMG_SPARSIFY_ALL;
+    if(ms){
+        if(!strcmp(ms,"fs"))        mode = IMG_SPARSIFY_FS;
+        else if(!strcmp(ms,"zero")) mode = IMG_SPARSIFY_ZERO;
+        else if(!strcmp(ms,"all"))  mode = IMG_SPARSIFY_ALL;
+        else { img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","mode",
+                   "只能是 fs / zero / all",NULL); return IMG_EINVAL; }
+    }
+    img_qcow2 *q = img_ctx_qcow2(ctx);
+    if(!q) return qc_open_fail(out,ctx);
+
+    img_sparsify_opts_t o; memset(&o,0,sizeof o);
+    o.dry_run = dry; o.mode = mode;
+    img_sparsify_result_t r; char err[256]="";
+    img_span sp; img_span_prep(&sp,"img","sparsify","原地回收未使用块");
+    img_span_kv_u64(&sp,"dry_run",dry?1:0);
+    img_span_kv_u64(&sp,"mode",(uint64_t)mode);
+    img_span_begin(&sp);
+    int rc = img_sparsify(q,&o,&r,img_cmd_prog(),err,sizeof err);
+    img_span_end(&sp,rc);
+
+    img_result_str(out,"format",r.format);
+    img_result_str(out,"mode_effective",r.mode_effective);
+    if(r.fs[0]) img_result_str(out,"fs",r.fs);
+    img_result_bool(out,"dry_run",dry);
+    img_result_u64(out,"bytes_before",r.bytes_before);
+    img_result_u64(out,"bytes_after",r.bytes_after);
+    img_result_u64(out,"freed_bytes",r.freed_bytes);
+    img_result_u64(out,"would_free_bytes",r.would_free_bytes);
+    img_result_u64(out,"scanned_bytes",r.scanned_bytes);
+    img_result_u64(out,"zero_bytes",r.zero_bytes);
+    img_result_u64(out,"free_bytes_by_fs",r.free_bytes_by_fs);
+    img_result_u64(out,"punched_segments",r.punched_segments);
+    img_result_u64(out,"punch_failed",r.punch_failed);
+    img_result_bool(out,"punch_supported",r.punch_supported);
+    if(r.punch_note[0]) img_result_str(out,"punch_note",r.punch_note);
+    img_result_u64(out,"parts_scanned",r.parts_scanned);
+    img_result_u64(out,"parts_skipped",r.parts_skipped);
+    img_result_u64(out,"skipped_bytes",r.skipped_bytes);
+    img_result_bool(out,"verified",r.verified);
+
+    if(rc != IMG_OK){
+        const char *code = (rc==IMG_ECANCELLED) ? "CMD-CANCELLED"
+                         : (r.code[0])          ? r.code
+                         : (rc==IMG_ENOTSUP)    ? "SPARSIFY-NOTSUP"
+                         : (rc==IMG_EREADONLY)  ? "SPARSIFY-READONLY"
+                         : (rc==IMG_ESTATE)     ? "SPARSIFY-STATE"
+                                                : "SPARSIFY-FAIL";
+        img_result_fail(out,rc,code,img_ctx_path(ctx),err[0]?err:"回收失败",
+            "raw 只能打洞（长度不变）；没有分区表的盘会把前 1 MiB 留下不动");
+        return rc;
+    }
+    return IMG_OK;
+}
+
 static const img_arg A_IMGTRIM[] = {
     {"img",     IMG_A_STR,  true,  NULL,   "qcow2 映像路径", NULL},
     {"lba",     IMG_A_U64,  true,  NULL,   "分区起始 LBA（NTFS 或 FAT32）", chk_lba},
@@ -9570,6 +9635,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_IMGCOMPACT,(int)(sizeof A_IMGCOMPACT/sizeof A_IMGCOMPACT[0]), cmd_img_compact, NULL, 0},
     {"img.trim","1.0", "按客户机空闲位图原地释放 qcow2 簇（NTFS/FAT32；有快照或 backing 拒绝）",
         A_IMGTRIM,(int)(sizeof A_IMGTRIM/sizeof A_IMGTRIM[0]), cmd_img_trim, NULL, 0},
+    {"img.sparsify","1.0", "原地回收未使用块（raw：打洞；qcow2：复用 trim）；默认先试运行看数",
+        A_IMGSPARSIFY,(int)(sizeof A_IMGSPARSIFY/sizeof A_IMGSPARSIFY[0]), cmd_img_sparsify, NULL, 0},
     {"ntfs.label","1.0", "只改 NTFS 卷标（不格式化、不动文件数据）",
         A_FSLABEL,(int)(sizeof A_FSLABEL/sizeof A_FSLABEL[0]), cmd_ntfs_label, NULL, 0},
     {"fat.label","1.0", "只改 FAT32 卷标（BPB + 根目录卷标项；不格式化）",

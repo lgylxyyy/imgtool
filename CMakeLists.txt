@@ -108,6 +108,7 @@ set(IMG_SOURCES
   src/img_cmd.c
   src/img_clone.c       # 扇区级克隆（机制；政策在 App/命令层）
   src/img_trim.c        # 按空闲位图原地释放簇（REQ-66）
+  src/img_sparsify.c    # 原地回收未使用块（T7：raw fs/zero + qcow2 复用 trim）
   src/img_cmds.c
   src/img_lock.c
   src/img_host.c

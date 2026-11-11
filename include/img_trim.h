@@ -45,6 +45,14 @@ typedef struct {
  * 崩溃顺序（不要改）：L2=0 → fsync → refcount=0 → fsync → punch。
  * 反序会产生"L2 指向 refcount=0 的簇"= 真丢数据；本序中断只留泄漏簇（qc.verify 可查）。
  */
+/* 读一个分区的客户机空闲位图（NTFS $Bitmap / FAT 表）。trim 与 sparsify 共用。
+ * *bits 由调用方 free；bits[i]=1 表示分区内第 i 个卷簇空闲。
+ * 返回 IMG_ENOTSUP：分区不是 NTFS/FAT32。*/
+int img_fs_free_map(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
+                    uint8_t **bits, uint64_t *nbits, uint64_t *gcs,
+                    char *fsname, size_t fscap, char *code, size_t codecap,
+                    char *err, size_t errcap);
+
 int img_trim(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
              const img_trim_opts_t *opts, img_trim_result_t *out,
              img_prog *prog, char *err, size_t errcap);
