@@ -12,6 +12,7 @@
 #include "img_partition.h"
 #include "img_trim.h"
 #include "img_io.h"
+#include "img_event.h"   /* img_cancelled */
 
 #include <stdio.h>
 #include <stdlib.h>
