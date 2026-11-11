@@ -90,6 +90,12 @@ int img_qcow2_any_allocated(img_qcow2 *q, uint64_t off, uint64_t len, bool *any)
 /* ---- 写（阶段1 拆步实现）---- */
 int img_qcow2_write(img_qcow2 *q, uint64_t off, const void *buf, size_t len);
 
+/* 写一个【压缩簇】（T6）：len 必须等于簇大小且 512 对齐。
+ * 返回 IMG_OK = 已按压缩簇写入；IMG_ENOTSUP = 这一簇不值得压缩（调用方退回普通写）。
+ * 产物与 QEMU 的 qcow2 压缩簇兼容：裸 deflate 流（无 zlib 头、无长度前缀），
+ * L2 的低 9 位之外是 host 偏移，csize_shift 起 8 位是"扇区数-1"。*/
+int img_qcow2_write_compressed(img_qcow2 *q, uint64_t off, const void *buf, size_t len);
+
 /* 为写入做准备：计算 refcount 布局、追加分配水位。
  * 打开镜像后若要写入，必须先调用一次（否则返回 IMG_ESTATE）。 */
 int img_qcow2_write_init(img_qcow2 *q);

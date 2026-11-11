@@ -18,6 +18,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#ifdef IMG_HAVE_ZLIB
+#include <zlib.h>
+#endif
 
 /* ------------------------------------------------------------------ */
 /* 内部小工具                                                          */
@@ -50,12 +53,14 @@ static inline int wr16(img_io *io, uint64_t off, uint16_t v){
 
 /* 不设 refcount 的裸分配（用于 refcount block 自身等） */
 static int alloc_cluster_raw(img_qcow2 *q, uint64_t *out_off){
-    uint64_t off = q->alloc_next;
+    /* ★ T6 之后 alloc_next 可能停在 512 对齐（压缩簇只占几扇区），
+     *   普通簇必须重新对齐到整簇，否则会写进同一个簇的后半段。*/
+    uint64_t off = align_up(q->alloc_next, q->h.cluster_size);
     if(off == 0){
         off = align_up(img_io_size(q->io), q->h.cluster_size);
         if(off == 0) off = q->h.cluster_size;   /* 至少从簇1开始 */
-        q->alloc_next = off;
     }
+    q->alloc_next = off;
     /* 延伸文件（写一个 0 簇保证真正占位；qcow2 要求文件包含真实字节） */
     uint8_t *z = calloc(1, (size_t)q->h.cluster_size);
     if(!z) return IMG_ENOMEM;
@@ -446,6 +451,118 @@ int img_qcow2_write(img_qcow2 *q, uint64_t off, const void *buf, size_t len){
     }
     free(scratch);
     return rc;
+}
+
+
+/* ---------- T6：压缩簇 ----------
+ * 布局（与 QEMU 一致，实测 qemu-img 造的 zstd 簇同样没有长度前缀）：
+ *   L2 entry bit62=1（压缩）、bit63=COPIED（refcount==1 时必须置）
+ *   低 csize_shift(54，cluster_bits=16) 位 = host 字节偏移（512 对齐）
+ *   bit 54 起 (cluster_bits-8)=8 位 = 占用扇区数 - 1
+ *   host 处放【裸 deflate 流】（不是 zlib 格式：deflateInit2(-15)）
+ *
+ * 注意：不走 alloc_cluster_raw —— 它会先写一个完整 0 簇，那等于把压缩省下的
+ * 空间又写回去了。这里只 truncate 撑到簇末尾，实际只写压缩数据那几扇区，
+ * 其余天然是洞（宿主按 st_blocks 记账，文件看起来还是簇对齐的长度）。 */
+static int alloc_cluster_sparse(img_qcow2 *q, uint64_t nbytes, uint64_t *out_off){
+    uint64_t cs = q->h.cluster_size;
+    uint64_t off = q->alloc_next;
+    if(off == 0) off = align_up(img_io_size(q->io), 512);
+    /* 压缩数据不能跨簇：放不下就换到下一簇起点（尾部那点浪费无所谓）。
+     * 这样 refcount 永远只涉及【一个】簇，语义最简单。*/
+    if((off % cs) && (off % cs) + nbytes > cs) off = align_up(off, cs);
+    if(img_io_truncate(q->io, off + nbytes) != IMG_OK) return IMG_EIO;
+    q->alloc_next = off + nbytes;
+    if(q->alloc_next > q->total_clusters * cs)
+        q->total_clusters = (q->alloc_next + cs - 1) / cs;
+    *out_off = off;
+    return IMG_OK;
+}
+
+/* 压缩簇共享同一个宿主簇时 refcount 要累加（QEMU 的 check 会核对引用次数）。*/
+static int refcount_inc(img_qcow2 *q, uint64_t host_cluster_idx){
+    uint32_t v = 0;
+    int rc = qc2_refcount_get(q, host_cluster_idx, &v);
+    if(rc != IMG_OK) return rc;
+    return qc2_refcount_set(q, host_cluster_idx, v + 1);
+}
+
+int img_qcow2_write_compressed(img_qcow2 *q, uint64_t off, const void *buf, size_t len){
+#ifdef IMG_HAVE_ZLIB
+    if(!q || !buf) return IMG_EINVAL;
+    if(!q->writable) return IMG_ESTATE;
+    if(q->fmt != DISK_FMT_QCOW2) return IMG_ENOTSUP;
+    uint64_t cs = q->h.cluster_size;
+    if(!cs || len != (size_t)cs || (off % cs)) return IMG_ENOTSUP;
+    if(off > q->h.size || cs > q->h.size - off) return IMG_EFULL;
+
+    /* ① 压缩：至少省出一个 512 扇区才值得 */
+    uint8_t *out = (uint8_t*)malloc((size_t)cs);
+    if(!out) return IMG_ENOMEM;
+    z_stream zs; memset(&zs, 0, sizeof zs);
+    if(deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 9,
+                    Z_DEFAULT_STRATEGY) != Z_OK){ free(out); return IMG_EIO; }
+    zs.next_in  = (Bytef*)buf; zs.avail_in  = (uInt)cs;
+    zs.next_out = out;         zs.avail_out = (uInt)cs;
+    int zr = deflate(&zs, Z_FINISH);
+    size_t clen = (size_t)cs - zs.avail_out;
+    deflateEnd(&zs);
+    if(zr != Z_STREAM_END){ free(out); return IMG_ENOTSUP; }
+    uint64_t nsec = (clen + 511) / 512;
+    if(nsec == 0) nsec = 1;
+    if(nsec * 512 >= cs){ free(out); return IMG_ENOTSUP; }   /* 压不动：交给普通写 */
+
+    /* ② 拿 L2（没有就建） */
+    uint64_t l1i = off / q->h.l1_span_bytes;
+    if(l1i >= q->h.l1_size){ free(out); return IMG_EFULL; }
+    uint64_t l2_addr = 0;
+    int rc = l1_get(q, l1i, &l2_addr);
+    if(rc != IMG_OK){ free(out); return rc; }
+    l2_addr &= QCOW2_OFFSET_MASK;
+    uint8_t *l2 = NULL;
+    if(l2_addr == 0){
+        if((rc = alloc_cluster(q, &l2_addr)) != IMG_OK){ free(out); return rc; }
+        l2 = (uint8_t*)calloc(1, (size_t)cs);
+        if(!l2){ free(out); return IMG_ENOMEM; }
+        if((rc = l1_set(q, l1i, l2_addr | QCOW2_COPIED_BIT)) != IMG_OK){ free(l2); free(out); return rc; }
+        if((rc = write_l2_cluster(q, l2_addr, l2)) != IMG_OK){ free(l2); free(out); return rc; }
+    } else {
+        if((rc = read_l2_cluster(q, l2_addr, &l2)) != IMG_OK){ free(out); return rc; }
+    }
+
+    uint64_t l2i = (off % q->h.l1_span_bytes) / cs;
+    uint64_t old = rd_be64_i(l2 + l2i*8);
+    /* 目标簇已有普通映射：refcount 1 → 0（追加式分配器不回收，但至少不泄漏 refcount）。
+     * 压缩簇（旧）没有独立 refcount 语义之外的占用，这里不动。 */
+    if(old && !(old & QCOW2_COMPRESSED_BIT)){
+        uint64_t oh = old & QCOW2_OFFSET_MASK;
+        uint32_t rn = 0;
+        if(oh && qc2_refcount_get(q, oh / cs, &rn) == IMG_OK && rn == 1)
+            (void)qc2_refcount_set(q, oh / cs, 0);
+    }
+
+    /* ③ 分配 + 只写压缩数据 */
+    uint64_t h = 0;
+    if((rc = alloc_cluster_sparse(q, nsec*512, &h)) != IMG_OK){ free(l2); free(out); return rc; }
+    if((rc = refcount_inc(q, h / cs)) != IMG_OK){ free(l2); free(out); return rc; }
+    memset(out + clen, 0, (size_t)(nsec*512 - clen));
+    if((rc = img_io_write_full(q->io, h, out, (size_t)nsec*512)) != IMG_OK){ free(l2); free(out); return rc; }
+
+    /* ④ L2 entry */
+    int x = 62 - ((int)q->h.cluster_bits - 8);
+    uint64_t mask = (x >= 64) ? ~0ULL : ((1ULL << x) - 1);
+    uint64_t desc = (h & mask) | ((nsec - 1) << x);
+    /* ★ 压缩簇【绝不能】置 COPIED 位：qemu-img check 的原话是
+     *   "copied flag must never be set for compressed clusters"。
+     *   （普通簇 refcount==1 时必须置，两种簇规则相反，别想当然。）*/
+    wr_be64_i(l2 + l2i*8, desc | QCOW2_COMPRESSED_BIT);
+    rc = write_l2_cluster(q, l2_addr, l2);
+    free(l2); free(out);
+    return rc;
+#else
+    (void)q; (void)off; (void)buf; (void)len;
+    return IMG_ENOTSUP;      /* 未编入 zlib */
+#endif
 }
 
 /* ------------------------------------------------------------------ */

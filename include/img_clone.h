@@ -24,6 +24,7 @@ extern "C" {
 typedef struct {
     uint64_t bytes_written;  /* 实际写进新盘的字节（跳零之后；小于保留分区总容量是正常的）*/
     int      parts_copied;   /* 拷了几个分区 */
+    uint64_t clusters_compressed;   /* 按压缩簇写的簇数（T6）*/
 } img_clone_stats_t;
 
 /* 克隆。keep_lbas/nkeep = 要保留的分区起始 LBA 列表（不在此列表的分区 → 新盘留空）。
@@ -33,6 +34,9 @@ typedef struct {
 int img_clone(const char *src_path, const char *dst_path,
               const uint64_t *keep_lbas, int nkeep,
               bool guid_random,
+              /* ★ T6：true = 能压的簇按 qcow2 压缩簇写（产物仍兼容 QEMU；
+               *   「压不动」的簇自动退回普通簇，不报错）。 */
+              bool compress,
               img_clone_stats_t *out, img_prog *prog);
 
 #ifdef __cplusplus

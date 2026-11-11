@@ -24,6 +24,7 @@
 #   move-rename-test.sh  move 的 moved_by=rename|copy（raw 会不会被实体化）
 #   copy-sparse-test.sh  copy --sparse=auto|never（宿主→宿主保不保洞）
 #   sparsify-test.py     img.sparsify：raw fs/zero 原地回收 + dry-run + 校验点
+#   compact-compress-test.py  img.compact --compress=zlib（T6）：qemu 互验
 #   wim-capture-test.sh  wim.capture 端到端（含临时目录清理）
 #   style-check.py       用户可见文本符合 STYLE-GUIDE
 #   genbcd-test.sh       imggenbcd UEFI BCD 定制（GUID 映射/4 参/反例）
@@ -184,6 +185,7 @@ run "compact-fmt-test（compact 四种源格式都真的搬数据；D2）"   pyt
 run "move-rename-test（move 的 moved_by=rename|copy；T3）"      bash "$ROOT/tests/move-rename-test.sh"
 run "copy-sparse-test（copy --sparse 保不保洞；T4）"            bash "$ROOT/tests/copy-sparse-test.sh"
 run "sparsify-test（img.sparsify：raw fs/zero + dry-run + 校验点；T7）" python3 "$ROOT/tests/sparsify-test.py"
+run "compact-compress-test（compact --compress=zlib + qemu 互验；T6）" python3 "$ROOT/tests/compact-compress-test.py"
 run "bigdir-wim-test（REQ-65：单目录 >256 条、宽树估算不截断）" python3 "$ROOT/tests/bigdir-wim-test.py"
 run "wim-capture-test（捕获、临时目录清理、产物可读）"          bash "$ROOT/tests/wim-capture-test.sh"
 run "wim-exclude-test（REQ-67：--exclude 同口径 + extract/pack/write 三段进度）" python3 "$ROOT/tests/wim-exclude-test.py"

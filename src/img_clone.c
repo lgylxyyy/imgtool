@@ -18,6 +18,7 @@
 int img_clone(const char *src_path, const char *dst_path,
               const uint64_t *keep_lbas, int nkeep,
               bool guid_random,
+              bool compress,
               img_clone_stats_t *out, img_prog *prog){
     if(!src_path||!dst_path||!keep_lbas||nkeep<=0) return IMG_EINVAL;
     img_clone_stats_t st; memset(&st,0,sizeof st);
@@ -88,6 +89,10 @@ int img_clone(const char *src_path, const char *dst_path,
         uint64_t unit=img_qcow2_header(sq)->cluster_size;
         if(unit<4096) unit=4096;
         if(unit>CLONE_CHUNK) unit=CLONE_CHUNK;
+        /* ★ T6：压缩簇必须是【目标】的整簇。源是 raw 时 unit 只有 4 KiB，
+         *   按 4 KiB 写根本压不了；所以这里改成按目标簇大小读写。*/
+        uint64_t dcs = img_qcow2_header(dq)->cluster_size;
+        if(compress && dcs >= 4096 && dcs <= CLONE_CHUNK) unit = dcs;
         while(done<bytes && rc==IMG_OK){
             size_t n=(size_t)((bytes-done)<unit?(bytes-done):unit);
             bool any=false;
@@ -95,8 +100,15 @@ int img_clone(const char *src_path, const char *dst_path,
             if(rc==IMG_OK && any){
                 rc=img_qcow2_read_full(sq, off+done, buf, n);
                 if(rc==IMG_OK && memcmp(buf,zero,n)!=0){   /* ★ 全零块跳过（保持稀疏） */
-                    rc=img_qcow2_write(dq, off+done, buf, n);
-                    if(rc==IMG_OK) st.bytes_written += n;
+                    if(compress && n==dcs){
+                        int wrc=img_qcow2_write_compressed(dq, off+done, buf, n);
+                        if(wrc==IMG_OK){ st.clusters_compressed++; }
+                        else if(wrc==IMG_ENOTSUP) rc=img_qcow2_write(dq, off+done, buf, n);
+                        else rc=wrc;
+                    } else {
+                        rc=img_qcow2_write(dq, off+done, buf, n);
+                    }
+                    if(rc==IMG_OK){ st.bytes_written += n; }
                 }
             }
             done+=n;
