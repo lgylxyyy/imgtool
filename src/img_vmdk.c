@@ -332,3 +332,44 @@ int img_vmdk_any_allocated(img_qcow2 *q, uint64_t off, uint64_t len, bool *any){
     free(gtbuf);
     return rc;
 }
+
+/* ---------- T7：把 guest 区间对应的宿主 grain 打洞 ----------
+ * 只动数据区：GD/RGD/GT/描述符都在 overHead 之前（或在文件尾的 GT 区），
+ * 这里按 GTE 精确换算，不会碰到元数据。未分配的 grain（GTE=0）本来就跳过。 */
+int img_vmdk_punch_guest(img_qcow2 *q, uint64_t goff, uint64_t glen){
+    if(!q || !q->fmt_priv) return IMG_EINVAL;
+    vmdk_priv *p = (vmdk_priv*)q->fmt_priv;
+    uint64_t grain_bytes = (uint64_t)p->grain_size * VMDK_SECTOR;
+    uint8_t *gtbuf = NULL;
+    uint32_t cached = UINT32_MAX;
+    size_t gt_bytes = (size_t)p->gtes_per_gt * 4;
+    int rc = IMG_OK;
+    while(glen){
+        uint64_t grain_idx = goff / grain_bytes;
+        uint64_t in = goff % grain_bytes;
+        uint64_t n = grain_bytes - in;
+        if(n > glen) n = glen;
+        uint64_t gt_idx = grain_idx / p->gtes_per_gt;
+        uint64_t gte_idx = grain_idx % p->gtes_per_gt;
+        if(gt_idx >= p->num_gts) break;
+        if((uint32_t)gt_idx != cached){
+            if(p->gts[gt_idx] == VMDK_UNALLOC){ cached = UINT32_MAX; }
+            else {
+                if(!gtbuf && !(gtbuf = (uint8_t*)malloc(gt_bytes))){ rc = IMG_ENOMEM; break; }
+                rc = img_io_read_full(q->io, (uint64_t)p->gts[gt_idx] * VMDK_SECTOR, gtbuf, gt_bytes);
+                if(rc != IMG_OK) break;
+                cached = (uint32_t)gt_idx;
+            }
+        }
+        if(cached != UINT32_MAX){
+            uint32_t ds = rd_le32(gtbuf + (size_t)gte_idx * 4);
+            if(ds != VMDK_UNALLOC){
+                uint64_t host = (uint64_t)ds * VMDK_SECTOR + in;
+                (void)img_io_punch_strict(q->io, host, n);
+            }
+        }
+        goff += n; glen -= n;
+    }
+    free(gtbuf);
+    return rc;
+}

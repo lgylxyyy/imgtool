@@ -214,15 +214,29 @@ def main():
         check('qcow2 之后 FAT 还能读', cmd('fat.ls', '--img=' + q, '--lba=%d' % qlba,
                                           '--path=/')['ok'])
 
-    print('════ 7. vhd / vmdk：明确报不支持（P1）════')
+    print('════ 7. vhd / vmdk：只打洞、不动 BAT/GTE ════')
     for f in ('vhd', 'vmdk'):
         p = os.path.join(W, 'x.' + f)
-        cmd('img.create', '--out=' + p, '--size-gb=1', '--format=' + f,
-            '--table=mbr', '--limits=off')
-        r = cmd('img.sparsify', '--img=' + p)
-        check('%s 被拒且给出原因' % f,
-              (not r['ok']) and r['err']['error_code'] == 'SPARSIFY-FMT-UNSUPPORTED',
-              json.dumps(r.get('err'), ensure_ascii=False)[:160])
+        cmd('img.create', '--out=' + p, '--size-gb=2', '--format=' + f,
+            '--table=gpt', '--sys-mb=256', '--rec-mb=0', '--limits=off')
+        pl = big_part(cmd('part.show', '--img=' + p)['data']['pt'])['first']
+        cmd('fs.format', '--img=' + p, '--lba=%d' % pl, '--fs=fat32')
+        cmd('fat.put', '--img=' + p, '--lba=%d' % pl, '--src=' + big, '--dst=/x.bin')
+        b0 = blocks(p)
+        cmd('rm', '--path=%s!lba%d:/x.bin' % (p, pl))
+        r = cmd('img.sparsify', '--img=' + p, '--mode=fs')
+        check('%s：sparsify 成功' % f, r['ok'],
+              json.dumps(r, ensure_ascii=False)[:240])
+        if r['ok']:
+            dd = r['data']
+            check('%s：释放了空间（%d B）' % (f, dd['freed_bytes']), dd['freed_bytes'] > (16 << 20))
+            check('%s：verified=true' % f, dd['verified'] is True)
+            check('%s：占用下降（%d → %d 块）' % (f, b0, blocks(p)), blocks(p) < b0)
+            check('%s：sparsify 后 FAT 还能读' % f,
+                  cmd('fat.ls', '--img=' + p, '--lba=%d' % pl, '--path=/')['ok'])
+            # qemu 必须还能打开（打洞没有碰到元数据）
+            rc, qo, qe = run('qemu-img', 'info', p)
+            check('%s：qemu-img info 仍能打开' % f, rc == 0, (qe or qo)[:120])
 
     print('════ 8. 参数校验 ════')
     r = cmd('img.sparsify', '--img=' + d, '--mode=bogus')

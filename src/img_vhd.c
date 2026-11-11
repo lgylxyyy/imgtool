@@ -338,3 +338,23 @@ int img_vhd_any_allocated(img_qcow2 *q, uint64_t off, uint64_t len, bool *any){
     }
     return IMG_OK;
 }
+
+/* ---------- T7：把 guest 区间对应的宿主字节打洞 ----------
+ * 只动【数据区】：块首 512 字节是位图，不能碰（全 0 会把 qemu 的位图优化搞乱）。
+ * 未分配的块（BAT=0xFFFFFFFF）本来就是洞，直接跳过。 */
+int img_vhd_punch_guest(img_qcow2 *q, uint64_t goff, uint64_t glen){
+    if(!q || !q->fmt_priv) return IMG_EINVAL;
+    vhd_priv *p = (vhd_priv*)q->fmt_priv;
+    while(glen){
+        uint64_t blk = goff / p->block_size;
+        uint64_t in  = goff % p->block_size;
+        uint64_t n   = p->block_size - in;
+        if(n > glen) n = glen;
+        if(blk < p->max_entries && p->bat[blk] != VHD_UNALLOC){
+            uint64_t host = (uint64_t)p->bat[blk] * VHD_SECTOR + VHD_SECTOR + in;
+            (void)img_io_punch_strict(q->io, host, n);
+        }
+        goff += n; glen -= n;
+    }
+    return IMG_OK;
+}

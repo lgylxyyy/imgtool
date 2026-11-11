@@ -391,6 +391,11 @@ static int sparsify_qcow2(img_qcow2 *q, const img_sparsify_opts_t *opts,
     return rc;
 }
 
+typedef int (*punch_fn)(img_qcow2*, uint64_t, uint64_t);
+static int sparsify_punch(img_qcow2 *q, const img_sparsify_opts_t *opts,
+                          img_sparsify_result_t *o, img_prog *prog,
+                          char *err, size_t errcap, punch_fn pf);
+
 int img_sparsify(img_qcow2 *q, const img_sparsify_opts_t *opts,
                  img_sparsify_result_t *out, img_prog *prog,
                  char *err, size_t errcap){
@@ -413,10 +418,204 @@ int img_sparsify(img_qcow2 *q, const img_sparsify_opts_t *opts,
     }
     if(q->fmt == DISK_FMT_RAW)   return sparsify_raw(q,&o,out,prog,err,errcap);
     if(q->fmt == DISK_FMT_QCOW2) return sparsify_qcow2(q,&o,out,prog,err,errcap);
+    /* ★ T7：vhd/vmdk 只打洞、不动 BAT/GTE —— 元数据写入风险高，
+     *   而"少占宿主空间"的目标靠打洞已经达到（洞读出来是 0，对空闲/零区无害）。*/
+    if(q->fmt == DISK_FMT_VHD)  return sparsify_punch(q,&o,out,prog,err,errcap,img_vhd_punch_guest);
+    if(q->fmt == DISK_FMT_VMDK) return sparsify_punch(q,&o,out,prog,err,errcap,img_vmdk_punch_guest);
 
     snprintf(out->code,sizeof out->code,"SPARSIFY-FMT-UNSUPPORTED");
-    if(err&&errcap) snprintf(err,errcap,
-        "%s 的分配表（BAT/GTE）还没接进来：先另存为 qcow2（紧凑化）再释放",
-        img_diskfmt_name(q->fmt));
+    if(err&&errcap) snprintf(err,errcap,"这个格式不支持原地回收（%s）",
+                             img_diskfmt_name(q->fmt));
     return IMG_ENOTSUP;
+}
+/* ---------------- vhd / vmdk：只打洞，不动分配表 ----------------
+ *
+ * 为什么不去改 BAT/GTE：那是元数据写入，一旦写坏映像就打不开了；而"释放空间"
+ * 的用户价值（宿主少占）靠打洞已经拿到。洞读出来是 0 —— 对【客户机空闲】或
+ * 【本来就是零】的区域，内容变 0 无害。
+ *
+ * 两种模式都支持：
+ *   fs   读分区空闲位图 → 空闲簇对应的 guest 区间打洞
+ *   zero 扫内容全零 → 打洞
+ */
+static uint64_t guest_fingerprint(img_qcow2 *q, uint64_t start, uint64_t bytes){
+    uint64_t h = 1469598103934665603ULL;
+    if(!bytes) return h;
+    uint8_t buf[65536];
+    size_t n = bytes < sizeof buf ? (size_t)bytes : sizeof buf;
+    if(img_qcow2_read_full(q,start,buf,n)!=IMG_OK) return 0;
+    h = fnv1a(h,buf,n);
+    for(int i=0;i<16;i++){
+        uint64_t rel = (bytes > 4096) ? (bytes - 4096) * (uint64_t)i / 16 : 0;
+        size_t sn = (size_t)((bytes - rel) < 4096 ? (bytes - rel) : 4096);
+        if(!sn) break;
+        if(img_qcow2_read_full(q,start+rel,buf,sn)!=IMG_OK) return 0;
+        h = fnv1a(h,buf,sn);
+    }
+    return h;
+}
+
+static int sparsify_punch(img_qcow2 *q, const img_sparsify_opts_t *opts,
+                          img_sparsify_result_t *o, img_prog *prog,
+                          char *err, size_t errcap, punch_fn pf){
+    const bool dry = opts->dry_run;
+    const int mode = opts->mode;
+    const uint64_t total = q->h.size;
+
+    img_parttable_t pt;
+    bool have_pt = (img_parttable_read(q,&pt,total/512ULL) == IMG_OK);
+    typedef struct { uint64_t off, len, fp; } chkpt_t;
+    chkpt_t chk[48]; int nchk = 0;
+    #define GCHK_ADD(O,L) do{ if(nchk < 48 && (L)){ chk[nchk].off=(O); chk[nchk].len=(L); \
+        chk[nchk].fp=guest_fingerprint(q,(O),(L)); nchk++; } }while(0)
+    GCHK_ADD(0, total < 65536 ? total : 65536);
+
+    uint64_t ranges[IMG_MAX_PARTITIONS][2];
+    int rn = 0;
+    if(have_pt){
+        for(int i=0;i<IMG_MAX_PARTITIONS;i++){
+            if(!pt.parts[i].used) continue;
+            uint64_t so = (uint64_t)pt.parts[i].first_lba * 512ULL;
+            uint64_t ln = ((uint64_t)pt.parts[i].last_lba - pt.parts[i].first_lba + 1) * 512ULL;
+            if(so >= total) continue;
+            if(so + ln > total) ln = total - so;
+            GCHK_ADD(so, ln < 32768 ? ln : 32768);
+            if(rn < IMG_MAX_PARTITIONS){ ranges[rn][0]=so; ranges[rn][1]=ln; rn++; }
+        }
+        uint64_t covered = 0;
+        for(int i=0;i<rn;i++) covered += ranges[i][1];
+        if(total > covered) o->skipped_bytes = total - covered;
+    } else {
+        snprintf(o->code,sizeof o->code,"SPARSIFY-NO-PARTABLE");
+        if(err&&errcap) snprintf(err,errcap,"读不到分区表：不知道哪些区间属于分区");
+        return IMG_ESTATE;
+    }
+
+    segv segs; memset(&segs,0,sizeof segs);
+    int rc = IMG_OK;
+
+    if(prog){ img_prog_phase(prog,IMG_PH_FIX,"扫描分区"); img_prog_op(prog,IMG_OP_SCAN); }
+    for(int r=0;r<rn && rc==IMG_OK;r++){
+        uint64_t rstart = ranges[r][0], rbytes = ranges[r][1];
+        if(!rbytes) continue;
+        o->scanned_bytes += rbytes;
+        bool part_ok = false;
+
+        if(mode == IMG_SPARSIFY_FS || mode == IMG_SPARSIFY_ALL){
+            uint8_t *bits = NULL;
+            uint64_t nbits=0, gcs=0;
+            char code[40]=""; char fsn[8]="";
+            int mrc = img_fs_free_map(q, rstart/512ULL, rbytes, &bits, &nbits, &gcs,
+                                      fsn, sizeof fsn, code, sizeof code, err, errcap);
+            if(mrc == IMG_OK && bits && gcs){
+                part_ok = true;
+                if(!o->fs[0]) snprintf(o->fs,sizeof o->fs,"%s",fsn);
+                uint64_t run_start = 0; bool in_run = false;
+                for(uint64_t i=0;i<nbits;i++){
+                    bool f = (bits[i>>3] >> (i&7)) & 1;
+                    if(f){ if(!in_run){ run_start = i; in_run = true; } }
+                    else if(in_run){
+                        uint64_t gs = rstart + run_start*gcs;
+                        uint64_t gl = (i - run_start)*gcs;
+                        if(gs + gl > rstart + rbytes) gl = rstart + rbytes - gs;
+                        (void)seg_push(&segs,gs,gl);
+                        o->free_bytes_by_fs += gl;
+                        in_run = false;
+                    }
+                }
+                if(in_run){
+                    uint64_t gs = rstart + run_start*gcs;
+                    uint64_t gl = (nbits - run_start)*gcs;
+                    if(gs + gl > rstart + rbytes) gl = rstart + rbytes - gs;
+                    (void)seg_push(&segs,gs,gl);
+                    o->free_bytes_by_fs += gl;
+                }
+                if(gcs >= 4096){
+                    uint64_t step = nbits > 64 ? nbits/8 : 1;
+                    for(uint64_t i = 0; i < nbits && nchk < 48; i += step)
+                        if(!((bits[i>>3] >> (i&7)) & 1)) GCHK_ADD(rstart + i*gcs, 4096);
+                }
+            } else if(mrc != IMG_ENOTSUP){
+                rc = mrc;
+            }
+            free(bits);
+            if(rc != IMG_OK) break;
+        }
+
+        if(mode == IMG_SPARSIFY_ZERO || mode == IMG_SPARSIFY_ALL){
+            uint8_t *buf = (uint8_t*)malloc(SP_CHUNK);
+            if(!buf){ rc = IMG_ENOMEM; break; }
+            uint64_t done = 0;
+            while(done < rbytes && rc == IMG_OK){
+                if(img_cancelled()){ rc = IMG_ECANCELLED; break; }
+                size_t n = (size_t)((rbytes-done) < SP_CHUNK ? (rbytes-done) : SP_CHUNK);
+                if(img_qcow2_read_full(q, rstart+done, buf, n) != IMG_OK){ rc = IMG_EIO; break; }
+                bool zero = true;
+                for(size_t k=0;k<n;k++){ if(buf[k]){ zero=false; break; } }
+                if(zero){ o->zero_bytes += n; (void)seg_push(&segs, rstart+done, n); }
+                else if(nchk < 48 && (done / SP_CHUNK) % 16 == 0) GCHK_ADD(rstart+done, n < 4096 ? n : 4096);
+                done += n;
+                if(prog) img_prog_bytes(prog,done,rbytes);
+            }
+            free(buf);
+            if(rc == IMG_OK) part_ok = true;
+        }
+        if(part_ok) o->parts_scanned++; else o->parts_skipped++;
+    }
+    if(rc == IMG_OK && mode == IMG_SPARSIFY_FS && o->parts_scanned == 0){
+        snprintf(o->code,sizeof o->code,"SPARSIFY-FS-UNSUPPORTED");
+        if(err&&errcap) snprintf(err,errcap,
+            "扫描了 %llu 个分区，都不是 NTFS/FAT32：请改用 mode=zero（按内容全零）",
+            (unsigned long long)o->parts_skipped);
+        rc = IMG_ENOTSUP;
+    }
+
+    if(rc == IMG_OK){
+        o->bytes_before = host_alloc(q->io);
+        o->punch_supported = true;
+        size_t npair = seg_normalize(&segs);
+        uint64_t seg_bytes = 0;
+        if(prog){ img_prog_phase(prog,IMG_PH_FIX,"释放宿主空间"); img_prog_op(prog,IMG_OP_WRITE); img_prog_count(prog,0,npair); }
+        for(size_t i=0;i<npair && rc==IMG_OK;i++){
+            uint64_t s0 = segs.v[i*2], ln = segs.v[i*2+1];
+            if(dry){ seg_bytes += mapped_in(q->io,0,0); /* 见下：按映射量估算 */ }
+            if(dry) continue;
+            int prc = pf(q, s0, ln);
+            if(prc == IMG_OK) o->punched_segments++;
+            else { o->punch_failed++; if(prc==IMG_ENOTSUP){ o->punch_supported=false;
+                   if(!o->punch_note[0]) snprintf(o->punch_note,sizeof o->punch_note,
+                       "宿主文件系统不支持打洞，没有真正释放空间"); } }
+            if(prog) img_prog_count(prog,i+1,npair);
+        }
+        o->bytes_after = host_alloc(q->io);
+        if(dry){
+            /* guest 偏移不等于宿主偏移，这里只能给"这些空闲区有多大"的上限；
+             * 真正执行后的 freed_bytes 以宿主占用差为准。 */
+            uint64_t seg_total = 0;
+            for(size_t i=0;i<npair;i++) seg_total += segs.v[i*2+1];
+            o->would_free_bytes = seg_total;
+            o->freed_bytes = 0;
+            if(!o->punch_note[0]) snprintf(o->punch_note,sizeof o->punch_note,
+                                            "试运行：没有改动任何字节");
+        } else {
+            o->freed_bytes = (o->bytes_before > o->bytes_after)
+                             ? (o->bytes_before - o->bytes_after) : 0;
+            if(!o->punch_note[0] && !o->freed_bytes)
+                snprintf(o->punch_note,sizeof o->punch_note,"没有可释放的块");
+        }
+        bool same = true;
+        for(int i=0;i<nchk;i++)
+            if(guest_fingerprint(q,chk[i].off,chk[i].len) != chk[i].fp){ same = false; break; }
+        o->verified = same;
+        if(!same && !dry){
+            snprintf(o->code,sizeof o->code,"SPARSIFY-VERIFY-FAIL");
+            if(err&&errcap) snprintf(err,errcap,
+                "执行后校验点不一致（分区表/分区头/已用数据被改动）：立刻停止使用这份映像");
+            rc = IMG_ECORRUPT;
+        }
+        (void)seg_bytes;
+    }
+    #undef GCHK_ADD
+    free(segs.v);
+    return rc;
 }
