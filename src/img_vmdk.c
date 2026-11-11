@@ -294,3 +294,41 @@ int img_vmdk_create(img_io *io, uint64_t bytes){
     (void)img_io_sync(io);
     return IMG_OK;
 }
+
+/* ---------- D2：这段 guest 区间有没有已分配的 grain ----------
+ * GTE == 0 表示未分配（读出来是零）。粒度 64 KiB（grainSize=128 扇区）。
+ * 为了不让 compact 对每个 grain 都做一次 4 字节 pread，按 GT 整张读进来。 */
+int img_vmdk_any_allocated(img_qcow2 *q, uint64_t off, uint64_t len, bool *any){
+    if(!q || !q->fmt_priv || !any) return IMG_EINVAL;
+    vmdk_priv *p = (vmdk_priv*)q->fmt_priv;
+    *any = false;
+    if(!len || off >= q->h.size) return IMG_OK;
+    if(len > q->h.size - off) len = q->h.size - off;
+    if(!p->gtes_per_gt) return IMG_OK;
+
+    uint64_t grain_bytes = (uint64_t)p->grain_size * VMDK_SECTOR;
+    uint64_t end = off + len;
+    uint8_t *gtbuf = NULL;
+    uint32_t cached_gt = UINT32_MAX;
+    size_t gt_bytes = (size_t)p->gtes_per_gt * 4;
+    int rc = IMG_OK;
+
+    for(uint64_t abs = off; abs < end; ){
+        uint64_t grain_idx = abs / grain_bytes;
+        uint64_t gt_idx = grain_idx / p->gtes_per_gt;
+        uint64_t gte_idx = grain_idx % p->gtes_per_gt;
+        if(gt_idx >= p->num_gts) break;
+
+        if((uint32_t)gt_idx != cached_gt){
+            if(p->gts[gt_idx] == VMDK_UNALLOC){ cached_gt = UINT32_MAX; abs = (grain_idx + 1) * grain_bytes; continue; }
+            if(!gtbuf && !(gtbuf = (uint8_t*)malloc(gt_bytes))){ rc = IMG_ENOMEM; break; }
+            rc = img_io_read_full(q->io, (uint64_t)p->gts[gt_idx] * VMDK_SECTOR, gtbuf, gt_bytes);
+            if(rc != IMG_OK) break;
+            cached_gt = (uint32_t)gt_idx;
+        }
+        if(rd_le32(gtbuf + (size_t)gte_idx * 4) != VMDK_UNALLOC){ *any = true; break; }
+        abs = (grain_idx + 1) * grain_bytes;
+    }
+    free(gtbuf);
+    return rc;
+}

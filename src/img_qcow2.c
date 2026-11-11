@@ -386,12 +386,20 @@ int img_qcow2_read_full(img_qcow2 *q, uint64_t off, void *buf, size_t len){
 
 /* ---------- 紧凑另存用：这段 guest 区间有没有已分配的簇 ---------- */
 int img_qcow2_any_allocated(img_qcow2 *q, uint64_t off, uint64_t len, bool *any){
+    /* ★ D2：先判空指针再用 q->fmt 会崩；原来就是这样。 */
+    if(!q || !any) return IMG_EINVAL;
+    *any = false;
+    /* ★ 2026-11-11（D2）：每种格式都有自己的分配表，不能都按 qcow2 的 L1/L2 去查。
+     *   原来只特判 raw，VHD/VMDK 落到 qcow2 的 load_l2 上 —— 它们没有 L1，
+     *   结果恒"无分配"，img.compact 对这两种格式产出的是空盘（实测
+     *   bytes_written=0、输出 524288 B、fat.ls 报 FAT-MOUNT-FAIL）。 */
     if(q->fmt == DISK_FMT_RAW){   /* raw: 区间在文件内就当已分配（没有稀疏位图） */
-        if(any) *any = (off < q->raw_size);
+        *any = (off < q->raw_size) && len;
         return IMG_OK;
     }
-    if(!q||!any) return IMG_EINVAL;
-    *any=false;
+    if(q->fmt == DISK_FMT_VHD)  return img_vhd_any_allocated(q, off, len, any);
+    if(q->fmt == DISK_FMT_VMDK) return img_vmdk_any_allocated(q, off, len, any);
+
     if(!len || off>=q->h.size) return IMG_OK;
     if(len > q->h.size - off) len = q->h.size - off;
     uint64_t c=q->h.cluster_size;

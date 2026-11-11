@@ -74,6 +74,8 @@ int         img_vhd_open(img_qcow2 *q);
 void        img_vhd_close(img_qcow2 *q);
 int         img_vhd_read(img_qcow2 *q, uint64_t off, void *buf, size_t len);
 int         img_vhd_write(img_qcow2 *q, uint64_t off, const void *buf, size_t len);
+int         img_vhd_any_allocated(img_qcow2 *q, uint64_t off, uint64_t len, bool *any);
+int         img_vmdk_any_allocated(img_qcow2 *q, uint64_t off, uint64_t len, bool *any);
 int         img_vmdk_open(img_qcow2 *q);
 void        img_vmdk_close(img_qcow2 *q);
 int         img_vmdk_read(img_qcow2 *q, uint64_t off, void *buf, size_t len);

@@ -316,3 +316,25 @@ int img_vhd_create(img_io *io, uint64_t bytes){
     if(img_io_write_full(io, data_start, foot, sizeof foot) != IMG_OK) return IMG_EIO;
     return img_io_sync(io);
 }
+
+/* ---------- D2：这段 guest 区间有没有已分配的块 ----------
+ * compact 只跳"肯定没有数据"的区间。VHD 的分配粒度是 2 MiB 块：
+ * BAT[blk] != 0xFFFFFFFF 表示该块已分配（不等于有数据，但会被 memcmp 判零兜住）。
+ * 块内位图（512B/块）更细，但它是"已写扇区提示"，qemu 也只当提示用；
+ * 我们按块判，粒度对 2 MiB 的读-判零循环没有影响。 */
+int img_vhd_any_allocated(img_qcow2 *q, uint64_t off, uint64_t len, bool *any){
+    if(!q || !q->fmt_priv || !any) return IMG_EINVAL;
+    vhd_priv *p = (vhd_priv*)q->fmt_priv;
+    *any = false;
+    if(!len || off >= q->h.size) return IMG_OK;
+    if(len > q->h.size - off) len = q->h.size - off;
+    if(!p->max_entries) return IMG_OK;
+
+    uint64_t first = off / p->block_size;
+    uint64_t last  = (off + len - 1) / p->block_size;
+    if(last >= p->max_entries) last = p->max_entries - 1;
+    for(uint64_t b = first; b <= last; b++){
+        if(p->bat[b] != VHD_UNALLOC){ *any = true; return IMG_OK; }
+    }
+    return IMG_OK;
+}
