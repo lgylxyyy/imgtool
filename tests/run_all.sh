@@ -19,6 +19,7 @@
 #   winver-registry-test.sh  win.version 的四个"Windows 自己写"的字段（REQ-72）
 #   diskfmt-test.sh      raw / VHD / VMDK 读写与 qemu 互验
 #   vhd-test.py          VHD 建盘、多块写入、重开与 qemu 互验
+#   vmdk-test.py         VMDK 建盘、GD 落盘、跨进程重开与 qemu 互验
 #   wim-capture-test.sh  wim.capture 端到端（含临时目录清理）
 #   style-check.py       用户可见文本符合 STYLE-GUIDE
 #   genbcd-test.sh       imggenbcd UEFI BCD 定制（GUID 映射/4 参/反例）
@@ -174,6 +175,7 @@ run "diskfmt-test（raw / VHD / VMDK 读写 + qemu 互验）"      bash "$ROOT/t
 run "qcow2-zstd-test（qcow2 的 zstd 压缩簇：qemu-img 造、我们读）" python3 "$ROOT/tests/qcow2-zstd-test.py"
 run "vhd-fault-test（N6-3：任意一步失败后映像仍可用、已提交数据不丢）" python3 "$ROOT/tests/vhd-fault-test.py"
 run "vhd-test（VHD 建盘、多块写入、重开与 QEMU 互验）"         python3 "$ROOT/tests/vhd-test.py"
+run "vmdk-test（VMDK 建盘、GD 落盘、跨进程重开与 qemu 互验）"   python3 "$ROOT/tests/vmdk-test.py"
 run "bigdir-wim-test（REQ-65：单目录 >256 条、宽树估算不截断）" python3 "$ROOT/tests/bigdir-wim-test.py"
 run "wim-capture-test（捕获、临时目录清理、产物可读）"          bash "$ROOT/tests/wim-capture-test.sh"
 run "wim-exclude-test（REQ-67：--exclude 同口径 + extract/pack/write 三段进度）" python3 "$ROOT/tests/wim-exclude-test.py"

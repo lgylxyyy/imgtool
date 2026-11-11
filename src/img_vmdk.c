@@ -55,11 +55,21 @@ int img_vmdk_open(img_qcow2 *q){
     if(img_io_read_full(q->io, 0, hdr, sizeof hdr) != IMG_OK) return IMG_EIO;
     if(memcmp(hdr, "KDMV", 4)) return IMG_EFORMAT;
 
+    /* ★ 2026-11-11（D1）：字段偏移按 VMware SparseExtentHeader（实测 qemu-img 造的
+     *   vmdk 逐字段核对过，不是"规范猜的"）：
+     *     0 magic(u32) | 4 version | 8 flags | 12 capacity(u64)
+     *     20 granularity(u64，值只用低 32 位) | 28 descriptorOffset(u64)
+     *     36 descriptorSize(u64) | 44 numGTEsPerGT(u32)
+     *     48 rgdOffset(u64) | 56 gdOffset(u64) | 64 overHead(u64)
+     *     72 uncleanShutdown | 73 singleEndLine | 74 nonEndLine
+     *     75 doubleEndLine1 | 76 doubleEndLine2 | 77 compressAlgorithm(u16)
+     *   一开始以为"整组偏 4 字节"，实测 qemu 造的盘正是这套偏移 —— 原来的
+     *   读写位置是对的。vmdk 写坏的真正原因是 close 不落 GD（见 img_qcow2.c）。*/
     uint32_t flags     = rd_le32(hdr + 8);
     uint64_t capacity  = rd_le64(hdr + 12);      /* 扇区 */
-    uint32_t grain     = rd_le32(hdr + 20);      /* 扇区 */
-    uint64_t gd_sect   = rd_le64(hdr + 56);
+    uint32_t grain     = rd_le32(hdr + 20);      /* 扇区（granularity 低 32 位）*/
     uint32_t gtes      = rd_le32(hdr + 44);
+    uint64_t gd_sect   = rd_le64(hdr + 56);
     uint64_t overHead  = rd_le64(hdr + 64);
 
     if(flags & 0x10000) return IMG_ENOTSUP;      /* streamOptimized */
@@ -79,6 +89,13 @@ int img_vmdk_open(img_qcow2 *q){
 
     p->gts = (uint32_t*)calloc(p->num_gts, sizeof(uint32_t));
     if(!p->gts){ free(p); return IMG_ENOMEM; }
+
+    /* GD 必须在文件里；gdOffset=0 或越界都是坏头，明确拒绝而不是读一堆 0。 */
+    uint64_t fsz = img_io_size(q->io);
+    if(gd_sect == 0 || gd_sect * VMDK_SECTOR > fsz ||
+       (uint64_t)p->num_gts * 4 > fsz - gd_sect * VMDK_SECTOR){
+        free(p->gts); free(p); return IMG_EFORMAT;
+    }
 
     /* 读 GD（每项 4 字节，存 GT 的扇区号）*/
     uint8_t *gd = (uint8_t*)malloc((size_t)p->num_gts * 4);
@@ -107,6 +124,10 @@ void img_vmdk_close(img_qcow2 *q){
             (void)img_io_write_full(q->io, p->gd_offset, gd, (size_t)p->num_gts * 4);
             free(gd);
         }
+        /* GD 写回后自己同步：调用方（img_qcow2_close）还会再 sync 一次，
+         * 但这里也做一次，避免 close 路径被别处复用时漏掉。 */
+        (void)img_io_sync(q->io);
+        p->dirty = false;
     }
     free(p->gts);
     free(p);
@@ -232,11 +253,14 @@ int img_vmdk_create(img_io *io, uint64_t bytes){
     wr_le64(hdr+12, sectors);                    /* capacity */
     wr_le32(hdr+20, grain);
     wr_le32(hdr+28, 1);                          /* descriptorOffset（扇区）*/
-    wr_le32(hdr+36, 20);                         /* descriptorSize（扇区 = 10KB）*/
-    wr_le32(hdr+44, gtes);
-    wr_le32(hdr+48, 2 + 20);                     /* rgdOffset：描述符后 */
-    wr_le32(hdr+56, 2 + 20 + num_gts);           /* gdOffset：rgd 后 */
-    wr_le32(hdr+64, 2 + 20 + num_gts*2);         /* overHead */
+    wr_le32(hdr+36, 20);                         /* descriptorSize（扇区 = 10 KiB）*/
+    wr_le32(hdr+44, gtes);                       /* numGTEsPerGT */
+    wr_le64(hdr+48, 2 + 20);                     /* rgdOffset：描述符之后 */
+    wr_le64(hdr+56, 2 + 20 + num_gts);           /* gdOffset：rgd 之后 */
+    wr_le64(hdr+64, 2 + 20 + num_gts*2);         /* overHead */
+    /* ★ 72..76 是行结束符字符，qemu 读头时会校验；不写就是 0。
+     *   qemu-img 造盘实测：unclean=0、single='\n'、non=' '、double1='\r'、double2='\n'。 */
+    hdr[72] = 0; hdr[73] = '\n'; hdr[74] = ' '; hdr[75] = '\r'; hdr[76] = '\n';
     if(img_io_write_full(io, 0, hdr, sizeof hdr) != IMG_OK) return IMG_EIO;
 
     /* 描述符（文本）*/

@@ -160,9 +160,16 @@ img_qcow2 *img_qcow2_open(img_io *io, const img_qcow2_opts_t *o){
 
 void img_qcow2_close(img_qcow2 *q){
     if(!q) return;
+    /* ★ 2026-11-11（D1）：关盘顺序必须是「后端收尾 → 同步 → 释放」。
+     *   以前只 sync + free，从不调 img_fmt_close()：VMDK 的 GD（组描述符表）
+     *   只在 img_vmdk_close 里写回，于是「写完立刻关盘」后 GD 永远是建盘时的
+     *   全零 —— 新进程重开就是空盘，vmdk_priv 本身也一起泄漏。
+     *   VHD 的 BAT 是即时写的，close 只负责 free，走这里同样正确。 */
+    if(q->fmt == DISK_FMT_VHD || q->fmt == DISK_FMT_VMDK) img_fmt_close(q);
     /* ★ 关盘前落盘：UI 说"完成"的时候，数据必须真的在介质上。
-     *   手机上进程被杀是常态，不做这步，"done" 就只是"写进了页缓存"。*/
-    if(q->writable && q->io) img_io_sync(q->io);
+     *   手机上进程被杀是常态，不做这步，"done" 就只是"写进了页缓存"。
+     *   放在 fmt_close 之后：GD 也得进介质，不能只进页缓存。*/
+    if(q->io) img_io_sync(q->io);
     free(q->l1); free(q->l2_cache); free(q);
 }
 const img_qcow2_header_t *img_qcow2_header(const img_qcow2 *q){ return q?&q->h:NULL; }
