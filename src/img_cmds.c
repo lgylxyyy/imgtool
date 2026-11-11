@@ -7506,6 +7506,8 @@ static int cmd_win_version(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_str(out,"registry.release_id",v.release_id);
     img_result_u64(out,"registry.ubr",(uint64_t)v.ubr);
     img_result_str(out,"registry.installation_type",v.installation_type);
+    /* 服务包："Service Pack 3" / "" —— XP 只有 2600 一个 build，SP2 与 SP3 全靠它 */
+    img_result_str(out,"registry.csd_version",v.csd_version);
     if(v.build_lab[0]) img_result_str(out,"registry.build_lab",v.build_lab);
 
     if(v.kernel_file_version[0]){

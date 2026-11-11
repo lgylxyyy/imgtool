@@ -45,6 +45,7 @@ typedef struct {
     char release_id[32];     /* 老系统（1511~1809）用：1709 / 1607；1903+ 改用 DisplayVersion */
     uint32_t ubr;            /* 补丁修订号（UBR）：26100.3800 → 3800；读不到 0 */
     char installation_type[32];/* Client / Server（同一 build 区分 Win11 与 Server 2025）*/
+    char csd_version[64];    /* 服务包："Service Pack 3"（XP SP3 / 7 SP1）；8 以后为空 */
     char current_version[32];/* 6.1 / 10.0 */
     int  current_build;      /* 7601 / 19044 / 28000 */
 

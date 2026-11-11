@@ -281,6 +281,8 @@ int img_win_version(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
                 hive_str(h,n,"DisplayVersion",out->display_version,sizeof out->display_version);
                 hive_str(h,n,"ReleaseId",out->release_id,sizeof out->release_id);
                 hive_str(h,n,"InstallationType",out->installation_type,sizeof out->installation_type);
+                /* XP / Vista / 7 的服务包级别：XP 只有 2600 一个 build，SP2 与 SP3 只能靠它区分 */
+                hive_str(h,n,"CSDVersion",out->csd_version,sizeof out->csd_version);
                 hive_dword(h,n,"UBR",&out->ubr);
                 hive_str(h,n,"CurrentVersion",out->current_version,sizeof out->current_version);
                 char cb[32]="";

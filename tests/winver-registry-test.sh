@@ -1,11 +1,12 @@
 #!/bin/bash
-# winver-registry-test.sh — win.version 的四个"Windows 自己写"的字段（REQ-20261111-72）
+# winver-registry-test.sh — win.version 的几个"Windows 自己写"的字段（REQ-20261111-72）
 #
 # 背景：App 里原来有一张 build → 功能更新代号（22H2 / 24H2）的硬编码表，微软发一个
-# 新 build 就过期。这四个值就在 HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion 里，
-# 多读四个值就能把那张表删掉：
+# 新 build 就过期。这些值就在 HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion 里，
+# 多读几个值就能把那张表删掉（REQ-74 又加了 CSDVersion）：
 #
 #   DisplayVersion     24H2        （1903+）
+#   CSDVersion         Service Pack 3（XP/7 的服务包；8 以后为空）
 #   ReleaseId          1709        （1511~1809，老系统）
 #   UBR                3800        （补丁修订号 → 显示 26100.3800）
 #   InstallationType   Client      （同 build 区分 Win11 与 Server 2025）
@@ -40,7 +41,7 @@ $T ntfs.mkdir --img="$IMG" --lba=$LBA --path=/Windows/System32/config >/dev/null
 $T ntfs.put --img="$IMG" --lba=$LBA --src="$HIVE" --dst=/Windows/System32/config/SOFTWARE >/dev/null 2>&1 \
   || { echo "放 hive 失败"; exit 2; }
 
-echo "════ 1. 只有基本键时：四个字段都在，值是空串 / 0 ════"
+echo "════ 1. 只有基本键时：五个字段都在，值是空串 / 0 ════"
 # 先写最小的 Windows 身份（win.version 至少要注册表里有个 build 才肯出手）
 KEY='SOFTWARE\Microsoft\Windows NT\CurrentVersion'
 $T reg.set --img="$IMG" --lba=$LBA --path="$KEY\\ProductName"  --type=sz --value='Windows 7 Professional' >/dev/null 2>&1
@@ -55,6 +56,7 @@ check_empty registry.display_version "''"
 check_empty registry.release_id "''"
 check_empty registry.installation_type "''"
 check_empty registry.ubr "0"
+check_empty registry.csd_version "''"
 
 echo "════ 2. 写进去再读（1903+ 形态：DisplayVersion + UBR + Server）════"
 $T reg.set --img="$IMG" --lba=$LBA --path="$KEY\\DisplayVersion"   --type=sz    --value='24H2'  >/dev/null 2>&1
@@ -63,6 +65,7 @@ $T reg.set --img="$IMG" --lba=$LBA --path="$KEY\\UBR"              --type=dword 
 $T reg.set --img="$IMG" --lba=$LBA --path="$KEY\\ProductName"      --type=sz    --value='Windows 11 Pro' >/dev/null 2>&1
 $T reg.set --img="$IMG" --lba=$LBA --path="$KEY\\EditionID"        --type=sz    --value='Professional'   >/dev/null 2>&1
 $T reg.set --img="$IMG" --lba=$LBA --path="$KEY\\CurrentBuild"     --type=sz    --value='26100'    >/dev/null 2>&1
+$T reg.set --img="$IMG" --lba=$LBA --path="$KEY\\CSDVersion"       --type=sz    --value='Service Pack 3' >/dev/null 2>&1
 
 J="$($T win.version --img="$IMG" --lba=$LBA 2>/dev/null)"
 get(){ echo "$J" | jq_ "repr(d['data'].get('$1'))" 2>/dev/null; }
@@ -71,6 +74,7 @@ get(){ echo "$J" | jq_ "repr(d['data'].get('$1'))" 2>/dev/null; }
 [ "$(get registry.ubr)"               = "3800" ]         && ok "UBR 读回 3800"              || ng "UBR 读到 $(get registry.ubr)"
 [ "$(get registry.current_build)"     = "26100" ]        && ok "CurrentBuild 读回 26100"    || ng "CurrentBuild 读到 $(get registry.current_build)"
 [ "$(get registry.edition_id)"        = "'Professional'" ] && ok "EditionID 读回 Professional" || ng "EditionID 读到 $(get registry.edition_id)"
+[ "$(get registry.csd_version)"       = "'Service Pack 3'" ] && ok "CSDVersion 读回 Service Pack 3" || ng "CSDVersion 读到 $(get registry.csd_version)"
 
 echo "════ 3. 老系统形态（只有 ReleaseId，没有 DisplayVersion）════"
 $T reg.del --img="$IMG" --lba=$LBA --path="$KEY" --value=DisplayVersion >/dev/null 2>&1
@@ -85,5 +89,5 @@ A="$(dump)"; B="$(dump)"
 [ -n "$A" ] && [ "$A" = "$B" ] && ok "两次结果一致" || ng "两次结果不一致"
 
 echo
-echo "════ winver-registry-test：通过 $((12-fail)) · 失败 $fail ════"
+echo "════ winver-registry-test：通过 $((14-fail)) · 失败 $fail ════"
 [ $fail -eq 0 ] || exit 1
