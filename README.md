@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-GPL--2.0--or--later-blue)](LICENSE)
 [![C11](https://img.shields.io/badge/C-11-informational)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Android%20%7C%20arm64-informational)]()
-[![Commands](https://img.shields.io/badge/commands-77-informational)]()
+[![Commands](https://img.shields.io/badge/commands-78-informational)]()
 
 </div>
 
@@ -128,7 +128,7 @@ Android 与宿主的行为差异（同一份代码内 `#ifdef __ANDROID__` 共 4
 | **FAT32** | 列目录、读写文件、建目录、改名、删除、卷标、时间戳、8.3 短名 |
 | **NTFS** | 列目录、读写文件、递归复制/移动、删除、`du`、卷标、格式化（mkntfs） |
 | **WIM / ESD** | 列映像、估算展开体积、写入分区、提取单文件、**捕获**（qcow2 生成新 WIM） |
-| **空间回收** | `img.compact` 紧凑另存；`img.trim` 按客户机空闲位图**原地**释放簇并打洞（只做 NTFS / FAT32，有快照或 backing 的映像拒绝） |
+| **空间回收** | `img.compact` 紧凑另存（`--compress=zlib` 顺带压缩）；`img.sparsify` **原地**回收未使用块（raw / qcow2 / vhd / vmdk，`--mode=fs\|zero`，`--dry-run` 先看数）；`img.trim` 是 qcow2 空闲位图那一路的底层命令 |
 | **ISO** | 浏览 ISO9660 / UDF、提取内部文件（`install.wim` 可直接从 ISO 读取） |
 | **压缩包** | zip / 7z / tar / tgz 读写；RAR / CAB 只读；统一 `copy` 命令覆盖解压与打包 |
 | **引导** | 写 MBR/VBR 引导码、铺 `bootmgr` / `bootmgfw.efi` / `boot.sdi` / 字体、生成 BCD（BIOS/UEFI 双体系）、32 位 UEFI 位数判定、引导自检 |

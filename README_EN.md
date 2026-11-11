@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-GPL--2.0--or--later-blue)](LICENSE)
 [![C11](https://img.shields.io/badge/C-11-informational)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Android%20%7C%20arm64-informational)]()
-[![Commands](https://img.shields.io/badge/commands-77-informational)]()
+[![Commands](https://img.shields.io/badge/commands-78-informational)]()
 
 </div>
 
@@ -127,7 +127,7 @@ To build the library for the app, check out `android` and run `./android-cross.s
 
 | Area | Capability |
 |---|---|
-| **Image formats** | qcow2 create / expand / compact / clone / in-place trim (compressed clusters: zlib and **zstd**); raw, VHD (dynamic), VMDK (sparse) read-write; format detected by magic, not extension (see the unsupported list below) |
+| **Image formats** | qcow2 create / expand / compact / clone / in-place trim (compressed clusters: reads zlib/zstd, writes zlib); raw, VHD (dynamic), VMDK (sparse) read-write; format detected by magic, not extension (see the unsupported list below) |
 | **Partition tables** | MBR / GPT read-write; role-based auto layout (ESP + MSR + system + recovery); add / remove / resize; attribute bits; whole-table export / import |
 | **FAT32** | List, read, write, mkdir, rename, delete, volume label, timestamps, 8.3 short names |
 | **NTFS** | List, read, write, recursive copy / move, delete, `du`, volume label, format (mkntfs) |
