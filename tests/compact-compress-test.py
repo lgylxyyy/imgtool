@@ -7,7 +7,10 @@
   ① 压得动：可压缩数据（重复文本）产物要显著变小；
   ② 打得开：`qemu-img check` 零错误、`qemu-img convert` 能还原、内容 md5 一致；
   ③ 不胡来：压不动的随机数据不硬压（clusters_compressed 接近 0、体积不明显变大），
-     `--compress=zstd` 明确拒绝（要 qcow2 v3，老 QEMU 打不开）。
+     未知算法（gzip 等）明确拒绝。
+  ④ zstd（P2）：产物是 qcow2 v3 + incompatible「compression type」位 ——
+     qemu-img 能打开能解、我们自己也能读、内容逐字节一致；qemu 亲自解压
+     （convert 成 raw）再由我们导出比对，两边解出的数据必须一致。
 
 兼容性口径：压缩簇用裸 deflate（无 zlib 头、无长度前缀），L2 的 bit62 置位、
 **bit63(COPIED) 绝不能置**（qemu check 原话："copied flag must never be set for
@@ -86,6 +89,7 @@ def main():
     repeat = (b'ABCDEFGH' * 3750000)          # 30 MB 可压缩
     print('════ 1. qcow2 源 + 可压缩数据 ════')
     src, lba = make_disk('s.qcow2', 'qcow2', repeat)
+    payload_md5 = md5file(os.path.join(W, 'payload.bin'))   # ★ make_disk 会覆写 payload.bin（第2节换随机数据），期望值必须在这里固定
     raw_size = os.path.getsize(src)
     out = os.path.join(W, 'c.qcow2')
     r = cmd('img.compact', '--src=' + src, '--out=' + out, '--compress=zlib')
@@ -100,7 +104,7 @@ def main():
 
     exp = os.path.join(W, 'exp.bin')
     cmd('fat.export', '--img=' + out, '--lba=%d' % lba, '--path=/p.bin', '--dst=' + exp)
-    check('内容逐字节一致', md5file(exp) == md5file(os.path.join(W, 'payload.bin')))
+    check('内容逐字节一致', md5file(exp) == payload_md5)
 
     print('════ 2. 压不动的数据不硬压 ════')
     rnd = os.urandom(8 << 20)
@@ -123,10 +127,34 @@ def main():
     check('off：体积大于 zlib 版（%d vs %d）' % (r['data']['bytes_after'], d['bytes_after']),
           r['data']['bytes_after'] > d['bytes_after'])
 
-    print('════ 4. zstd 明确拒绝 ════')
-    r = cmd('img.compact', '--src=' + src, '--out=' + os.path.join(W, 'z.qcow2'),
-            '--compress=zstd')
-    check('zstd 被拒（CMD-ARG-BAD）',
+    print('════ 4. zstd 压缩（qcow2 v3 + compression type 位）════')
+    outz = os.path.join(W, 'z.qcow2')
+    r = cmd('img.compact', '--src=' + src, '--out=' + outz, '--compress=zstd')
+    check('zstd：compact 成功', r['ok'], json.dumps(r.get('err'), ensure_ascii=False)[:200])
+    dz = r['data']
+    check('zstd：clusters_compressed > 0（%d）' % dz['clusters_compressed'],
+          dz['clusters_compressed'] > 0)
+    check('zstd：compression_type=zstd', dz.get('compression_type') == 'zstd')
+    check('zstd：结果带兼容性提示', 'zstd' in (dz.get('compat_note') or ''))
+    check('zstd：产物显著变小（%d → %d）' % (raw_size, dz['bytes_after']),
+          dz['bytes_after'] < raw_size // 4)
+    good, lines = qemu_check(outz)
+    check('zstd：qemu-img check 零错误', good, ' | '.join(lines))
+    rz = run('qemu-img', 'convert', '-O', 'raw', outz, os.path.join(W, 'z.raw'))
+    check('zstd：qemu 亲自解压（convert）成功', rz[0] == 0, (rz[1] + rz[2])[:160])
+    expq = os.path.join(W, 'expq.bin')
+    cmd('fat.export', '--img=' + os.path.join(W, 'z.raw'), '--lba=%d' % lba,
+        '--path=/p.bin', '--dst=' + expq)
+    check('zstd：qemu 解压的内容与原始一致', md5file(expq) == payload_md5)
+    expz = os.path.join(W, 'expz.bin')
+    cmd('fat.export', '--img=' + outz, '--lba=%d' % lba, '--path=/p.bin', '--dst=' + expz)
+    check('zstd：我们读的内容与原始一致', md5file(expz) == payload_md5)
+    os.remove(os.path.join(W, 'z.raw'))
+
+    print('════ 4b. 未知压缩算法仍明确拒绝 ════')
+    r = cmd('img.compact', '--src=' + src, '--out=' + os.path.join(W, 'zz.qcow2'),
+            '--compress=gzip')
+    check('未知算法被拒（CMD-ARG-BAD）',
           (not r['ok']) and r['err']['error_code'] == 'CMD-ARG-BAD',
           json.dumps(r.get('err'), ensure_ascii=False)[:160])
 
@@ -143,7 +171,7 @@ def main():
     check('raw 源：qemu-img check 零错误', good, ' | '.join(lines))
     exp2 = os.path.join(W, 'exp2.bin')
     cmd('fat.export', '--img=' + outr, '--lba=%d' % lbar, '--path=/p.bin', '--dst=' + exp2)
-    check('raw 源：内容一致', md5file(exp2) == md5file(os.path.join(W, 'payload.bin')))
+    check('raw 源：内容一致', md5file(exp2) == payload_md5)
 
     print()
     print('════ 通过 %d · 失败 %d ════' % (ok, bad))

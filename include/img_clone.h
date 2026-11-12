@@ -27,16 +27,27 @@ typedef struct {
     uint64_t clusters_compressed;   /* 按压缩簇写的簇数（T6）*/
 } img_clone_stats_t;
 
+/* 目标盘压缩算法（qcow2 头 compression_type）。
+ *   AUTO：跟源盘走（源是 raw / zlib → zlib；源是 zstd → 保持 zstd）。
+ *   ZSTD：qcow2 v3 + incompatible「compression type」位 —— QEMU 2.10 起能读、
+ *         5.1 起能写；更老的 QEMU / 其它工具会拒绝打开【整个映像】。 */
+typedef enum {
+    IMG_CLONE_CTYPE_AUTO = 0,
+    IMG_CLONE_CTYPE_ZLIB = 1,
+    IMG_CLONE_CTYPE_ZSTD = 2,
+} img_clone_ctype_t;
+
 /* 克隆。keep_lbas/nkeep = 要保留的分区起始 LBA 列表（不在此列表的分区 → 新盘留空）。
  * guid_random = true 重新生成磁盘/分区 GUID（推荐：避免同机挂两块同 GUID 盘），
  *               false 逐字节保持（完全相同的克隆）。
+ * compress = true 时能压的簇按 qcow2 压缩簇写（「压不动」的簇自动退回普通簇，
+ *               不报错）；压缩算法由 ctype 决定。
  * 成功返回 IMG_OK；失败返回 IMG_E* 且【源文件未被修改】。*/
 int img_clone(const char *src_path, const char *dst_path,
               const uint64_t *keep_lbas, int nkeep,
               bool guid_random,
-              /* ★ T6：true = 能压的簇按 qcow2 压缩簇写（产物仍兼容 QEMU；
-               *   「压不动」的簇自动退回普通簇，不报错）。 */
               bool compress,
+              img_clone_ctype_t ctype,
               img_clone_stats_t *out, img_prog *prog);
 
 #ifdef __cplusplus

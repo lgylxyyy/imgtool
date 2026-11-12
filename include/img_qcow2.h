@@ -28,6 +28,13 @@ extern "C" {
 #define IMG_QCOW2_INCOMPAT_BITMASK     (1ULL<<5)
 #define IMG_QCOW2_INCOMPAT_RAW_CLUSTERS (1ULL<<6)  /* compression_type 要看值 */
 #define IMG_QCOW2_INCOMPAT_EXT_L2      (1ULL<<7)
+/* qemu 规范（docs/interop/qcow2.txt）：incompatible bit 3 = compression type。
+ * 注意：本文件上面的 DIRTY=(1<<3) 与 qemu 规范的 bit 编号有历史出入
+ * （qemu：dirty=bit0、corrupt=bit1、external=bit2、compression=bit3、extL2=bit4）；
+ * 旧常量只影响打开时的拒绝粒度和 info 显示，动它们超出本次范围，故只在此注明。
+ * bit3 在打开端无拒绝逻辑（压不压缩由 compression_type 字段+解码器决定），
+ * 因此与 DIRTY 同值不会造成行为冲突。 */
+#define IMG_QCOW2_INCOMPAT_COMP_TYPE   (1ULL<<3)  /* compression_type 字段有效（v3）*/
 
 /* compatible / ro 特性位 */
 #define IMG_QCOW2_COMPAT_DIRTY_BITMAPS (1ULL<<0)
@@ -105,6 +112,10 @@ typedef struct {
     uint64_t size;               /* 虚拟磁盘大小（字节） */
     uint32_t cluster_bits;       /* 0 → 默认 16 (64KB) */
     bool     compressed;         /* 写入时是否压缩簇 */
+    uint8_t  compression_type;   /* 压缩算法（IMG_QCOW2_COMP_*）：0=zlib（默认）、1=zstd。
+                                    zstd 需要 qcow2 v3 + incompatible「compression type」位
+                                    （QEMU 2.10 起读、5.1 起写；老工具会拒绝打开）。
+                                    只在本构建编入 libzstd 时可用。 */
     uint32_t refcount_bits;      /* 0 → 默认 16 */
 } img_qcow2_create_opts_t;
 

@@ -1488,7 +1488,7 @@ static int cmd_img_clone(img_ctx *ctx, const img_args *in, img_result *out){
     /* ① 改名（源全程只读的前提） ② 写新 ③ 校验 ④ keep_old */
     if(rename(src,oldp)!=0){ img_result_fail(out,IMG_EIO,"IMG-OPEN-FAIL",src,"旧映像改名失败（权限/占用）",NULL); return IMG_EIO; }
     img_clone_stats_t st;
-    rc=img_clone(oldp, src, keep, nkeep, guid_random, false, &st, img_cmd_prog());
+    rc=img_clone(oldp, src, keep, nkeep, guid_random, false, IMG_CLONE_CTYPE_AUTO, &st, img_cmd_prog());
     if(rc!=IMG_OK){
         unlink(src); rename(oldp,src);              /* ★ 回滚：用户文件回到原路径 */
         const char *code=(rc==IMG_ECANCELLED)?"CMD-CANCELLED":
@@ -2637,9 +2637,11 @@ static const img_arg A_IMGCOMPACT[] = {
     {"guid",   IMG_A_ENUM, false, "keep",  "GUID：keep=原样保留（默认，BCD 里记的分区 GUID 还认得）| random=重新生成", NULL},
     {"verify", IMG_A_BOOL, false, "true",  "写完回读校验（虚拟大小 + 分区表 + 每个分区 5 处 64 KiB 抽样）", NULL},
     {"force",  IMG_A_BOOL, false, "false", "out 已存在时覆盖（★会先 unlink 那个文件）", NULL},
-    /* ★ T6：压缩簇。off=只做紧凑化（默认）；zlib=顺带压缩。
-     *   zstd 还没接（要 qcow2 v3 + compression type 位，老 QEMU 直接拒绝打开）*/
-    {"compress", IMG_A_ENUM, false, "off", "off=只去零块 | zlib=压缩（产物仍是 qcow2 v2，读写变慢）", NULL},
+    /* ★ T6：压缩簇。off=只做紧凑化（默认）；zlib/zstd=顺带压缩。
+     *   zlib：裸 deflate 簇（qcow2 v2 起就有，兼容面最广）。
+     *   zstd：qcow2 v3 + incompatible「compression type」位（QEMU 2.10+ 读、5.1+ 写；
+     *     老工具拒绝打开整个映像 —— 所以默认 off，且只在构建编入 libzstd 时可用）。 */
+    {"compress", IMG_A_ENUM, false, "off", "off=只去零块 | zlib=压缩（兼容面最广） | zstd=压缩（更快更小，但 QEMU<2.10 拒绝打开，需明确选择）", NULL},
 };
 static int cmd_img_compact(img_ctx *ctx, const img_args *in, img_result *out){
     (void)ctx;
@@ -2662,17 +2664,19 @@ static int cmd_img_compact(img_ctx *ctx, const img_args *in, img_result *out){
             return IMG_EINVAL;
         }
     }
-    /* ★ T6：压缩方式。只做 zlib（deflate）——产物保持 qcow2 v2，PC 上的 qemu /
-     *   Proxmox 都能打开；zstd 要 v3 + incompatible 位，老 QEMU 会拒绝，列进 P2。*/
+    /* ★ T6：压缩方式。off=只紧凑化；zlib/zstd=压缩簇。
+     *   算法写进产物头 compression_type（zstd 另置 incompatible 位），
+     *   读取方按头走 —— 和 qemu-img -c 的行为一致。 */
     bool compress=false;
+    int  ctype=IMG_CLONE_CTYPE_AUTO;
     const char *cp=img_args_get(in,"compress");
     if(cp && *cp && strcasecmp(cp,"off")){
-        if(!strcasecmp(cp,"zlib")) compress=true;
+        compress=true;
+        if(!strcasecmp(cp,"zlib"))       ctype=IMG_CLONE_CTYPE_ZLIB;
+        else if(!strcasecmp(cp,"zstd"))  ctype=IMG_CLONE_CTYPE_ZSTD;
         else {
             img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","compress",
-                strcasecmp(cp,"zstd")==0 ? "zstd 还没接（要 qcow2 v3，老 QEMU 无法打开）"
-                                         : "只接受 off | zlib",
-                "先用 zlib；zstd 列在 P2");
+                "只接受 off | zlib | zstd", NULL);
             return IMG_EINVAL;
         }
     }
@@ -2741,7 +2745,7 @@ static int cmd_img_compact(img_ctx *ctx, const img_args *in, img_result *out){
 
     if(force) unlink(dst);
     img_clone_stats_t cs; memset(&cs,0,sizeof cs);
-    rc=img_clone(src,dst,keep,nkeep,guid_random,compress,&cs,img_cmd_prog());
+    rc=img_clone(src,dst,keep,nkeep,guid_random,compress,(img_clone_ctype_t)ctype,&cs,img_cmd_prog());
     if(rc!=IMG_OK){
         unlink(dst);                                /* ★ 只删半成品，源一个字节没动 */
         const char *code=(rc==IMG_ECANCELLED)?"CMD-CANCELLED":
@@ -2771,6 +2775,14 @@ static int cmd_img_compact(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_u64(out,"bytes_written",cs.bytes_written);
     img_result_u64(out,"clusters_compressed",cs.clusters_compressed);
     img_result_bool(out,"compressed",compress);
+    {   /* 产物的压缩算法 + 兼容性提示（App 的结果面板直接用）。
+         * 本命令 compress=true 时算法必是显式指定的（AUTO 只在 compress=false 时出现）。 */
+        const char *cname=(ctype==(int)IMG_CLONE_CTYPE_ZSTD)?"zstd":"zlib";
+        img_result_str(out,"compression_type",cname);
+        if(ctype==(int)IMG_CLONE_CTYPE_ZSTD)
+            img_result_str(out,"compat_note",
+                "产物是 qcow2 v3 + zstd 压缩：QEMU 2.10 起可读，更老的工具会拒绝打开");
+    }
     img_result_u64(out,"parts_copied",(uint64_t)cs.parts_copied);
     img_result_u64(out,"size_bytes",vsize);
     img_result_str(out,"disk_guid",guid_out);

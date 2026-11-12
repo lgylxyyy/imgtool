@@ -19,6 +19,7 @@ int img_clone(const char *src_path, const char *dst_path,
               const uint64_t *keep_lbas, int nkeep,
               bool guid_random,
               bool compress,
+              img_clone_ctype_t ctype,
               img_clone_stats_t *out, img_prog *prog){
     if(!src_path||!dst_path||!keep_lbas||nkeep<=0) return IMG_EINVAL;
     img_clone_stats_t st; memset(&st,0,sizeof st);
@@ -43,6 +44,16 @@ int img_clone(const char *src_path, const char *dst_path,
     if(!dfi){ rc=IMG_EIO; goto out_end; }
     img_qcow2_create_opts_t co={0};
     co.size=vsize; co.cluster_bits=16;          /* 64KiB 簇：与本工具所有镜像一致 */
+    /* 目标盘压缩算法：显式指定优先，AUTO 跟源盘（zstd 源 → zstd 盘，不降级）。
+     * 本构建没有 libzstd 时 create 对 ZSTD 直接返回 ENOTSUP —— 造不出自己读不了的盘。 */
+    {
+        uint8_t src_ct=(uint8_t)img_qcow2_header(sq)->compression_type;
+        switch(ctype){
+            case IMG_CLONE_CTYPE_ZSTD: co.compression_type=IMG_QCOW2_COMP_ZSTD; break;
+            case IMG_CLONE_CTYPE_ZLIB: co.compression_type=IMG_QCOW2_COMP_ZLIB; break;
+            default:                   co.compression_type=src_ct;              break;
+        }
+    }
     rc=img_qcow2_create(dfi,&co);
     img_io_close(dfi); dfi=NULL;
     if(rc!=IMG_OK) goto out_end;

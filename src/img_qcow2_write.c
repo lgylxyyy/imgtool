@@ -21,6 +21,9 @@
 #ifdef IMG_HAVE_ZLIB
 #include <zlib.h>
 #endif
+#ifdef IMG_HAVE_ZSTD
+#include <zstd.h>
+#endif
 
 /* ------------------------------------------------------------------ */
 /* 内部小工具                                                          */
@@ -238,6 +241,22 @@ int img_qcow2_create(img_io *dest, const img_qcow2_create_opts_t *o){
     uint64_t cs = 1ULL << cb;
     uint64_t rcb = o->refcount_bits ? o->refcount_bits : 16;
     if(rcb != 16 && rcb != 32) return IMG_ENOTSUP;
+    /* 压缩算法：0=zlib（默认）、1=zstd。zstd 是 qcow2 v3 的 incompatible 特性，
+     * 老工具（QEMU < 2.10）会拒绝打开整个映像 —— 所以必须显式要才写。
+     * 本构建没编 libzstd 时直接拒绝（写了也解不开，不能造出自己读不了的盘）。 */
+    uint8_t ctype = o ? o->compression_type : 0;
+    if(ctype == IMG_QCOW2_COMP_ZSTD){
+#ifndef IMG_HAVE_ZSTD
+        return IMG_ENOTSUP;      /* 本构建没有 zstd：不能造自己读不了的映像 */
+#else
+        /* ok：zstd 只允许 v3（本函数恒写 v3 头，天然满足） */
+#endif
+    } else if(ctype != IMG_QCOW2_COMP_ZLIB){
+        return IMG_EINVAL;       /* 未知的 compression_type */
+    }
+    /* incompatible 特性位（offset 72..79）：zstd = bit20「compression type」 */
+    uint64_t incompat = (ctype == IMG_QCOW2_COMP_ZSTD)
+                      ? IMG_QCOW2_INCOMPAT_COMP_TYPE : 0;
 
     uint64_t l2_entries = cs / 8;
     uint64_t l1_span    = cs * l2_entries;          /* 单张 L2 覆盖量 */
@@ -250,7 +269,9 @@ int img_qcow2_create(img_io *dest, const img_qcow2_create_opts_t *o){
     const uint64_t OFF_L1  = cs * 3;                /* L1 表 */
 
     /* ---- 写头 ---- */
-    uint8_t hdr[104];
+    /* 112 字节：104..103 是标准 v3 头，104 是 compression_type（header_length
+     * 必须 >104 qemu 才会去读它），105..111 是保留的 0 填充（8 字节对齐）。 */
+    uint8_t hdr[112];
     memset(hdr, 0, sizeof hdr);
     hdr[0]='Q'; hdr[1]='F'; hdr[2]='I'; hdr[3]=0xfb;
     wr_be32_i(hdr+4, 3);                            /* version 3 */
@@ -262,9 +283,12 @@ int img_qcow2_create(img_io *dest, const img_qcow2_create_opts_t *o){
     wr_be32_i(hdr+56, 1);                           /* refcount_table_clusters = 1 */
     wr_be32_i(hdr+60, 0);                           /* nb_snapshots */
     wr_be64_i(hdr+64, 0);                           /* snapshots_offset */
-    /* v3 特性区（72..95）全 0 → 无加密/外部文件/脏位/压缩类型 */
+    /* v3 特性区（72..95）：incompatible 位里把「compression type」置上；
+     * 其余（加密/外部文件/脏位/扩展 L2）保持 0。 */
+    wr_be64_i(hdr+72, incompat);
     wr_be32_i(hdr+96,  (uint32_t)(rcb==16 ? 4 : 5));  /* 96-99  refcount_order: 16位→4, 32位→5 */
-    wr_be32_i(hdr+100, 104);                         /* 100-103 header_length (>=104, 8的倍数) */
+    wr_be32_i(hdr+100, 112);                         /* 100-103 header_length (>104：含 compression_type) */
+    hdr[104] = ctype;                                /* 104     compression_type（0=zlib 1=zstd） */
     int rc = img_io_write_full(dest, 0, hdr, sizeof hdr);
     if(rc) return rc;
 
@@ -488,7 +512,7 @@ static int refcount_inc(img_qcow2 *q, uint64_t host_cluster_idx){
 }
 
 int img_qcow2_write_compressed(img_qcow2 *q, uint64_t off, const void *buf, size_t len){
-#ifdef IMG_HAVE_ZLIB
+#if defined(IMG_HAVE_ZLIB) || defined(IMG_HAVE_ZSTD)
     if(!q || !buf) return IMG_EINVAL;
     if(!q->writable) return IMG_ESTATE;
     if(q->fmt != DISK_FMT_QCOW2) return IMG_ENOTSUP;
@@ -496,18 +520,37 @@ int img_qcow2_write_compressed(img_qcow2 *q, uint64_t off, const void *buf, size
     if(!cs || len != (size_t)cs || (off % cs)) return IMG_ENOTSUP;
     if(off > q->h.size || cs > q->h.size - off) return IMG_EFULL;
 
-    /* ① 压缩：至少省出一个 512 扇区才值得 */
+    /* ① 压缩：至少省出一个 512 扇区才值得。
+     *   算法跟映像头走（compression_type）：0=zlib 裸 deflate、1=zstd。
+     *   盘是 zstd 而本构建没编 libzstd（或反之）→ 如实报 ENOTSUP，
+     *   让调用方（img_clone）退回普通写 —— 绝不把 deflate 流写进 zstd 盘。 */
     uint8_t *out = (uint8_t*)malloc((size_t)cs);
     if(!out) return IMG_ENOMEM;
-    z_stream zs; memset(&zs, 0, sizeof zs);
-    if(deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 9,
-                    Z_DEFAULT_STRATEGY) != Z_OK){ free(out); return IMG_EIO; }
-    zs.next_in  = (Bytef*)buf; zs.avail_in  = (uInt)cs;
-    zs.next_out = out;         zs.avail_out = (uInt)cs;
-    int zr = deflate(&zs, Z_FINISH);
-    size_t clen = (size_t)cs - zs.avail_out;
-    deflateEnd(&zs);
-    if(zr != Z_STREAM_END){ free(out); return IMG_ENOTSUP; }
+    size_t clen = 0;
+    if(q->h.compression_type == IMG_QCOW2_COMP_ZSTD){
+#ifdef IMG_HAVE_ZSTD
+        /* 压不动（放不下 cs 字节的输出缓冲）→ ZSTD_compress 报错 → ENOTSUP 退普通写 */
+        size_t zr = ZSTD_compress(out, (size_t)cs, buf, (size_t)cs, 3);
+        if(ZSTD_isError(zr)){ free(out); return IMG_ENOTSUP; }
+        clen = zr;
+#else
+        free(out); return IMG_ENOTSUP;      /* zstd 盘 + 无解码器/编码器 */
+#endif
+    } else {
+#ifdef IMG_HAVE_ZLIB
+        z_stream zs; memset(&zs, 0, sizeof zs);
+        if(deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 9,
+                        Z_DEFAULT_STRATEGY) != Z_OK){ free(out); return IMG_EIO; }
+        zs.next_in  = (Bytef*)buf; zs.avail_in  = (uInt)cs;
+        zs.next_out = out;         zs.avail_out = (uInt)cs;
+        int zr = deflate(&zs, Z_FINISH);
+        clen = (size_t)cs - zs.avail_out;
+        deflateEnd(&zs);
+        if(zr != Z_STREAM_END){ free(out); return IMG_ENOTSUP; }
+#else
+        free(out); return IMG_ENOTSUP;      /* zlib 盘 + 本构建没编 zlib */
+#endif
+    }
     uint64_t nsec = (clen + 511) / 512;
     if(nsec == 0) nsec = 1;
     if(nsec * 512 >= cs){ free(out); return IMG_ENOTSUP; }   /* 压不动：交给普通写 */
@@ -561,7 +604,7 @@ int img_qcow2_write_compressed(img_qcow2 *q, uint64_t off, const void *buf, size
     return rc;
 #else
     (void)q; (void)off; (void)buf; (void)len;
-    return IMG_ENOTSUP;      /* 未编入 zlib */
+    return IMG_ENOTSUP;      /* 未编入 zlib/zstd */
 #endif
 }
 
