@@ -207,7 +207,7 @@ static void csd_try_system(const char *tf_sys, img_winver_t *out){
     hive_h *h=hivex_open(tf_sys,0);
     if(!h) return;
     hive_node_h root=hivex_root(h);
-    hive_node_h nw=NULL;
+    hive_node_h nw=0;
     hive_node_h ns=hivex_node_get_child(h,root,"Select");
     uint32_t cur=0;
     if(ns && hive_dword(h,ns,"Current",&cur)==0 && cur>=1 && cur<=999){
