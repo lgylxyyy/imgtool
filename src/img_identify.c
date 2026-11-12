@@ -343,7 +343,15 @@ int img_win_version(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
                 hive_str(h,n,"CurrentVersion",out->current_version,sizeof out->current_version);
                 char cb[32]="";
                 hive_str(h,n,"CurrentBuild",cb,sizeof cb);
-                if(!cb[0]) hive_str(h,n,"CurrentBuildNumber",cb,sizeof cb);
+                /* ★ 2026-11-12 真盘实测（XP SP3）：XP 的 CurrentBuild 写的是 "1"，
+                 *   真实 build 在 CurrentBuildNumber（REG_SZ "2600"）。两个都读，
+                 *   取较大的那个——XP 修成 2600，Win10/11 两值相同不受影响。*/
+                {
+                    char cbn[32]={0};
+                    hive_str(h,n,"CurrentBuildNumber",cbn,sizeof cbn);
+                    int b1=atoi(cb), b2=atoi(cbn);
+                    if(b2>b1){ snprintf(cb,sizeof cb,"%s",cbn); }
+                }
                 out->current_build=atoi(cb);
             }
             hivex_close(h);
