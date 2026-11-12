@@ -449,10 +449,16 @@ int img_qcow2_alloc_info(img_qcow2 *q, uint64_t *alloc_bytes, bool *alloc_known,
     uint64_t blocks_bytes = (uint64_t)st.st_blocks * 512u;
     uint64_t size = (uint64_t)st.st_size;
     bool known = true;
-    /* 矛盾①：文件长度 0 却占着块（FUSE 竞态实测见过） */
+    /* 矛盾①：文件长度 0 却占着块（FUSE 竞态实测见过）—— 保留，这是真怪值 */
     if(size == 0 && blocks_bytes > 0) known = false;
-    /* 矛盾②：占的块比文件还长（超过 4 MiB 余量才算矛盾；小文件尾巴对齐会差一点） */
-    if(blocks_bytes > size + (4u << 20)) known = false;
+    /* 矛盾②：占的块比文件还长（超过 4 MiB 余量才算矛盾；小文件尾巴对齐会差一点）。
+     * ★ REQ-78：这条对 qcow2 不成立 —— qcow2 的元数据（L1/L2 表、refcount 表）
+     *   本来就长在文件里；trim 后文件长度缩了、元数据块还占着，
+     *   st_blocks ≥ st_size 是 qcow2 的正常形态。盘越大、用得越久越容易踩中
+     *   4 MiB 余量 → App 的「占用」显示 —（REQ-78 真机样本：64 GB 盘差 6.99 MiB）。
+     *   qcow2 只要 fstat 成功且 size>0 就算 known；alloc_bytes 仍用 st_blocks×512
+     *   （元数据算进占用是合理的——文件管理器里看到的也是这个数）。 */
+    if(q->fmt != DISK_FMT_QCOW2 && blocks_bytes > size + (4u << 20)) known = false;
 
     if(alloc_bytes) *alloc_bytes = blocks_bytes;
     if(alloc_known) *alloc_known = known;
