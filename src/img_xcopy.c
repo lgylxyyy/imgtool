@@ -107,10 +107,14 @@ static int host_mkdir_p(const char *path, mode_t mode){
     return IMG_OK;
 }
 static void host_rm_rf(const char *path){
-    struct stat st;
-    if(lstat(path,&st)!=0) return;
-    if(S_ISDIR(st.st_mode)){
-        DIR *d=opendir(path);
+    /* ★ CodeQL cpp/toctou-race-condition：不做 lstat 预检 —— 检查和使用之间
+     *   文件可能被调包（比如换成指向别处的符号链接）。
+     *   直接 O_NOFOLLOW|O_DIRECTORY 打开：是【真目录】才递归进去删；
+     *   打不开（普通文件/符号链接）一律 unlink —— 对符号链接删的是链接本身、
+     *   不跟随，与原来 lstat 的语义一致。检查和使用合并成一个原子操作。 */
+    int fd = open(path, O_RDONLY|O_DIRECTORY|O_NOFOLLOW);
+    if(fd >= 0){
+        DIR *d = fdopendir(fd);
         if(d){
             struct dirent *de;
             while((de=readdir(d))){
@@ -119,9 +123,13 @@ static void host_rm_rf(const char *path){
                 host_rm_rf(c);
             }
             closedir(d);
+        } else {
+            close(fd);
         }
         rmdir(path);
-    } else unlink(path);
+    } else {
+        unlink(path);
+    }
 }
 
 typedef struct { int fd; } host_rd;

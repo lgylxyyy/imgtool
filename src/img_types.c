@@ -308,9 +308,16 @@ static void host_rm_rf_dir_td(const char *path, rmtd *t){
 }
 int img_tmpdir_remove_td(const char *path, int budget_ms){
     if(!path || !*path) return IMG_EINVAL;
-    struct stat st;
-    if(lstat(path,&st)!=0) return (errno==ENOENT)?IMG_OK:IMG_EIO;
-    if(!S_ISDIR(st.st_mode)){ unlink(path); return IMG_OK; }
+    /* ★ CodeQL cpp/toctou-race-condition：不做 lstat 预检 —— 检查和使用之间
+     *   文件可能被调包。直接 O_NOFOLLOW|O_DIRECTORY 打开：是【真目录】才递归删；
+     *   符号链接/普通文件直接 unlink（不跟随，语义同原来的 lstat 判断）。 */
+    int fd = open(path, O_RDONLY|O_DIRECTORY|O_NOFOLLOW);
+    if(fd < 0){
+        if(errno==ENOENT) return IMG_OK;
+        if(errno==ELOOP || errno==ENOTDIR){ unlink(path); return IMG_OK; }
+        return IMG_EIO;
+    }
+    close(fd);                                   /* 只用它做原子判定，删树走下面的路径版 */
     rmtd t;
     t.deadline = rm_now_ms() + (budget_ms > 0 ? budget_ms : 0);
     t.timed_out = 0; t.ticks = 0;
@@ -322,23 +329,30 @@ int img_tmpdir_remove_td(const char *path, int budget_ms){
  * 改个名字（O(1)）交给 img_tmpdir_sweep() 下次清；名字带 "garbage"，sweep 见到就不看 pid 死活。*/
 int img_tmpdir_discard(const char *path){
     if(!path || !*path) return IMG_EINVAL;
-    struct stat st;
-    if(lstat(path,&st)!=0) return (errno==ENOENT)?IMG_OK:IMG_EIO;
+    /* ★ CodeQL cpp/toctou-race-condition：原来的 lstat 预检只用来判 ENOENT，
+     *   和后面的 rename 之间有窗口。直接 rename —— rename 本身就是原子的，
+     *   ENOENT（已经没了）按成功处理，语义与原来一致。 */
     char dst[1300];
     if(snprintf(dst,sizeof dst,"%s-garbage",path) >= (int)sizeof dst)
         return img_tmpdir_remove(path);
     if(rename(path,dst)==0) return IMG_OK;
+    if(errno==ENOENT) return IMG_OK;
     return img_tmpdir_remove(path);          /* 改名失败（不该发生）→ 走老路 */
 }
 
 /* 递归删除临时目录（公开给 wim.capture / recovery 用，替代 system("rm -rf")）。*/
 int img_tmpdir_remove(const char *path){
     if(!path || !*path) return IMG_EINVAL;
-    struct stat st;
-    if(lstat(path,&st)!=0) return (errno==ENOENT)?IMG_OK:IMG_EIO;
-    if(S_ISDIR(st.st_mode)) host_rm_rf_dir(path);
-    else unlink(path);
-    return IMG_OK;
+    /* ★ CodeQL cpp/toctou-race-condition：不做 lstat 预检。先 unlink——
+     *   文件/符号链接一步到位；目录会报 EISDIR → 走递归删。
+     *   与 host_rm_rf_dir 内部「先 unlink 再判目录」是同一套口径（REQ-69 ④）。 */
+    if(unlink(path)==0) return IMG_OK;
+    if(errno==ENOENT) return IMG_OK;
+    if(errno==EISDIR || errno==EPERM){
+        host_rm_rf_dir(path);
+        return IMG_OK;
+    }
+    return IMG_EIO;
 }
 
 /* sweep 一次目录（内部共用） */
