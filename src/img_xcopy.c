@@ -149,6 +149,12 @@ static int host_measure_holes(int fd, uint64_t size, uint64_t *hole_bytes){
             return -1;                        /* EINVAL：文件系统不支持 SEEK_DATA */
         }
         if((uint64_t)d >= size){ holes += size - (uint64_t)off; break; }
+        /* ★ 2026-11-12（REQ-76 ①）：把【上一个数据段的结束处 → 本个数据段的起点】
+         *   这一段算进洞里。原来的循环只统计"最后一个数据段之后的尾洞"，
+         *   于是「洞在中间」的稀疏文件被算成 holes=0 → sparse_source=false
+         *   → copy --sparse=auto 把洞也写实（真机实测：256 MB 的盘复制后变 268 MB）。
+         *   第一次迭代 off=0，所以开头的洞 [0,d) 也在这里被算进去。*/
+        holes += (uint64_t)d - (uint64_t)off;
         off_t h = lseek(fd, d, SEEK_HOLE);
         if(h < 0) return -1;
         if((uint64_t)h > size) h = (off_t)size;

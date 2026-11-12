@@ -44,6 +44,20 @@ NBLK=$(stat -c %b "$W/n.img")
 [ "$NBLK" -gt $((SZ/512/2)) ] && ok "目标块数 $NBLK（确实实体化了）" || ng "目标块数 $NBLK，没有实体化"
 cmp -s "$W/s.img" "$W/n.img" && ok "never 的内容也一致" || ng "never 的内容不一致"
 
+echo "════ 2b. 洞在【中间】（REQ-76 ①的真机样本）：也必须保住 ════"
+# 真机复现：数据在 10 MB 与 200 MB，洞在中间 → 旧实现只数尾洞，会把 256 MB 全部写实
+truncate -s $SZ "$W/mid.img"
+dd if=/dev/urandom of="$W/mid.img" bs=1M count=1 seek=10 conv=notrunc 2>/dev/null
+dd if=/dev/urandom of="$W/mid.img" bs=1M count=1 seek=200 conv=notrunc 2>/dev/null
+MBLK=$(stat -c %b "$W/mid.img")
+OUT=$($T copy --src="host:$W/mid.img" --dst="host:$W/mid2.img" --sparse=auto 2>/dev/null | tail -1)
+[ "$(echo "$OUT" | jq_ "d['data']['sparse_source']")" = "True" ] && ok "中间有洞：sparse_source=true" || ng "中间有洞被判成无洞（sparse_source=$(echo "$OUT" | jq_ "d['data']['sparse_source']")）"
+MH=$(echo "$OUT" | jq_ "d['data']['hole_bytes']")
+[ "${MH:-0}" -gt $((SZ/2)) ] && ok "hole_bytes=$MH（超过一半，中间的洞被算进去了）" || ng "hole_bytes=$MH 太小（中间洞漏算）"
+M2BLK=$(stat -c %b "$W/mid2.img")
+[ "$M2BLK" -le $((MBLK*2+2048)) ] && ok "目标块数 ${M2BLK} ≈ 源 ${MBLK}（洞没被写实）" || ng "目标块数 $M2BLK 远大于源 $MBLK（洞被写实了）"
+cmp -s "$W/mid.img" "$W/mid2.img" && ok "内容逐字节一致" || ng "内容不一致"
+
 echo "════ 3. 源没洞：普通复制，sparse_source=false ════"
 dd if=/dev/urandom of="$W/dense.bin" bs=1M count=8 2>/dev/null
 OUT=$($T copy --src="host:$W/dense.bin" --dst="host:$W/dense2.bin" 2>/dev/null | tail -1)

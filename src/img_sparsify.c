@@ -362,6 +362,11 @@ static int sparsify_qcow2(img_qcow2 *q, const img_sparsify_opts_t *opts,
     }
     img_trim_result_t tr; memset(&tr,0,sizeof tr);
     int ok_parts = 0, rc = IMG_OK;
+    /* ★ 2026-11-12（REQ-76 ②）：bytes_before 必须在 trim 之前量。
+     *   trim 内部已经做完打洞，之后再量 before/after 就是"打洞后 vs 打洞后"，
+     *   两个数一样，freed_bytes 也和它们对不上（真机实测：before==after==226607104，
+     *   而 stat 显示 376353792 → 226607104）。*/
+    o->bytes_before = host_alloc(q->io);
     for(int i=0;i<IMG_MAX_PARTITIONS && rc==IMG_OK;i++){
         if(!pt.parts[i].used) continue;
         uint64_t lba = (uint64_t)pt.parts[i].first_lba;
@@ -375,7 +380,7 @@ static int sparsify_qcow2(img_qcow2 *q, const img_sparsify_opts_t *opts,
         o->scanned_bytes += bytes;
         o->free_bytes_by_fs += tr.guest_bytes_freed;
         o->punched_segments += (tr.host_bytes_punched ? 1 : 0);
-        o->freed_bytes += tr.host_bytes_punched;
+        o->punched_bytes += tr.host_bytes_punched;
         if(!o->fs[0]) snprintf(o->fs,sizeof o->fs,"%s",tr.fs);
     }
     if(rc == IMG_OK && !ok_parts && !o->parts_skipped){
@@ -383,9 +388,16 @@ static int sparsify_qcow2(img_qcow2 *q, const img_sparsify_opts_t *opts,
         if(err&&errcap) snprintf(err,errcap,"没有可处理的分区");
         return IMG_ESTATE;
     }
-    o->bytes_before = host_alloc(q->io);
     o->bytes_after  = host_alloc(q->io);
-    if(opts->dry_run) o->would_free_bytes = o->free_bytes_by_fs;
+    if(opts->dry_run){
+        /* dry：客户机空闲字节（上界；宿主实际能省多少取决于打洞粒度） */
+        o->would_free_bytes = o->free_bytes_by_fs;
+        o->freed_bytes = 0;
+    } else {
+        /* 口径与 raw 分支一致：freed_bytes = 宿主占用前后差 */
+        o->freed_bytes = (o->bytes_before > o->bytes_after)
+                         ? (o->bytes_before - o->bytes_after) : 0;
+    }
     o->verified = !opts->dry_run;
     if(!o->punch_note[0]) snprintf(o->punch_note,sizeof o->punch_note,
         opts->dry_run ? "试运行：没有改动任何字节" : "已按客户机空闲位图释放");

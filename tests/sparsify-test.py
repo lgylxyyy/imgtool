@@ -211,6 +211,13 @@ def main():
     if r['ok']:
         check('qcow2 报告释放了空间（freed_bytes=%d）' % r['data']['freed_bytes'],
               r['data']['freed_bytes'] > 0)
+        # ★ REQ-76 ②：bytes_before 必须在打洞之前量，否则 before==after
+        check('qcow2：bytes_before > bytes_after（%d > %d）'
+              % (r['data']['bytes_before'], r['data']['bytes_after']),
+              r['data']['bytes_before'] > r['data']['bytes_after'])
+        check('qcow2：freed_bytes == before - after（%d）' % r['data']['freed_bytes'],
+              r['data']['freed_bytes'] ==
+              r['data']['bytes_before'] - r['data']['bytes_after'])
         check('qcow2 之后 FAT 还能读', cmd('fat.ls', '--img=' + q, '--lba=%d' % qlba,
                                           '--path=/')['ok'])
 

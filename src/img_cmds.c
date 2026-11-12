@@ -8583,6 +8583,7 @@ static int cmd_img_sparsify(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_u64(out,"zero_bytes",r.zero_bytes);
     img_result_u64(out,"free_bytes_by_fs",r.free_bytes_by_fs);
     img_result_u64(out,"punched_segments",r.punched_segments);
+    img_result_u64(out,"punched_bytes",r.punched_bytes);
     img_result_u64(out,"punch_failed",r.punch_failed);
     img_result_bool(out,"punch_supported",r.punch_supported);
     if(r.punch_note[0]) img_result_str(out,"punch_note",r.punch_note);

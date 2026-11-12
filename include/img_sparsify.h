@@ -55,6 +55,8 @@ typedef struct {
     uint64_t free_bytes_by_fs;      /* 位图说空闲的字节 */
 
     uint64_t punched_segments;      /* 打洞段数（相邻合并后） */
+    uint64_t punched_bytes;         /* 实际打洞的字节（与 freed_bytes 口径不同：这是"打洞量"，
+                                      freed_bytes 是"宿主占用前后差"） */
     uint64_t punch_failed;          /* 打洞调用失败次数 */
     bool     punch_supported;       /* 宿主文件系统支持打洞 */
     char     punch_note[160];       /* 给用户看的一句话 */
