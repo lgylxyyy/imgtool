@@ -177,6 +177,57 @@ static int hive_dword(hive_h *h, hive_node_h node, const char *name, uint32_t *o
     return 0;
 }
 
+/* ---------- XP/2000 的 SP 级别兜底（REQ-75）----------
+ * XP 的 SP 级别在 SYSTEM 里存成 DWORD：
+ *   Select\Current → ControlSet00N\Control\Windows\CSDVersion
+ *   0x100=SP1  0x200=SP2  0x300=SP3  0x400=SP4(2000)
+ * 官方 SP3 安装光盘的默认 hive（HIVESFT.INF）里 SOFTWARE 没有字符串版，只有这一份。
+ * ★ CurrentControlSet 是运行时的符号链接，离线 hive 里通常没有这个键，
+ *   必须经 Select\Current 折算出 ControlSet00N 再走过去。 */
+static void csd_from_dword(uint32_t dw, char *out, size_t cap){
+    if(out && cap) out[0]=0;
+    const char *s=NULL;
+    switch(dw){
+        case 0x100: s="Service Pack 1"; break;
+        case 0x200: s="Service Pack 2"; break;
+        case 0x300: s="Service Pack 3"; break;
+        case 0x400: s="Service Pack 4"; break;   /* Win2000 SP4 */
+        default: break;                          /* 0x0=RTM；未知值不猜，保持空串 */
+    }
+    if(s) snprintf(out,cap,"%s",s);
+}
+
+static void csd_try_system(const char *tf_sys, img_winver_t *out){
+    if(out->csd_version[0]) return;              /* 字符串版已有，不折腾 */
+    /* 只在 XP/2000 家族才多挂一路：8/8.1/10/11 本来就没有 CSDVersion 字符串
+     * （REPLY-74 实测 Win8 为空串），按"空就挂 SYSTEM"会让它们每次都白挂。 */
+    if(!(out->product_name[0] &&
+         (strstr(out->product_name,"Windows XP") ||
+          strstr(out->product_name,"Windows 2000")))) return;
+    hive_h *h=hivex_open(tf_sys,0);
+    if(!h) return;
+    hive_node_h root=hivex_root(h);
+    hive_node_h nw=NULL;
+    hive_node_h ns=hivex_node_get_child(h,root,"Select");
+    uint32_t cur=0;
+    if(ns && hive_dword(h,ns,"Current",&cur)==0 && cur>=1 && cur<=999){
+        char cs[32]; snprintf(cs,sizeof cs,"ControlSet%03u",cur);
+        hive_node_h ncs=hivex_node_get_child(h,root,cs);
+        if(ncs) nw=hivex_node_get_child(h,ncs,"Control");
+    }
+    if(!nw){                                     /* 个别 hive 真带 CurrentControlSet，试一下不亏 */
+        hive_node_h nccs=hivex_node_get_child(h,root,"CurrentControlSet");
+        if(nccs) nw=hivex_node_get_child(h,nccs,"Control");
+    }
+    if(nw){
+        hive_node_h nwin=hivex_node_get_child(h,nw,"Windows");
+        uint32_t dw=0;
+        if(nwin && hive_dword(h,nwin,"CSDVersion",&dw)==0)
+            csd_from_dword(dw,out->csd_version,sizeof out->csd_version);
+    }
+    hivex_close(h);
+}
+
 /* build 的"代" = 发布桶，不是 build/10。
  * ★ 实测教训：Win11 26300 的盘里注册表写 26300、内核等文件是 26100（24H2 基线），
  *   用 build/10 会得到 2630 与 2610 两个"代" → 误报 mismatch=true。
@@ -231,6 +282,11 @@ int img_win_version(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
 
     uint64_t got=0;
     int rc_sw=img_ntfs_copy_out(fs,"/Windows/System32/config/SOFTWARE",tf_sw,NULL,&got);
+
+    /* XP/2000 的 SP 级别兜底要读 SYSTEM（REQ-75）：同一次挂载里一起取出来，
+     * 不违背上面的"只挂载一次"；用不用由注册表读完后的家族判定决定。*/
+    char tf_sys[600]; img_tmpfile("pe-system",tf_sys,sizeof tf_sys);   /* P1-6 统一命名 */
+    int rc_sys=img_ntfs_copy_out(fs,"/Windows/System32/config/SYSTEM",tf_sys,NULL,&got);
 
     /* ② 核心二进制：这些文件被改过就开不了机，所以它们的 PE 版本最可信 */
     static const char *core[]={
@@ -293,6 +349,10 @@ int img_win_version(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
             hivex_close(h);
         }
     }
+    /* ①b XP/2000：SOFTWARE 没有字符串版 CSDVersion 时，读 SYSTEM 的 DWORD（REQ-75）*/
+    if(rc_sys==IMG_OK) csd_try_system(tf_sys,out);
+    unlink(tf_sys);
+
     unlink(tf_sw);
 
     /* ② 多源证据：注册表 + 4 个核心二进制的 PE 版本（改了就开不了机）

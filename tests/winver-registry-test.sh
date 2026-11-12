@@ -88,6 +88,43 @@ dump(){ $T win.version --img="$IMG" --lba=$LBA 2>/dev/null | python3 -c 'import 
 A="$(dump)"; B="$(dump)"
 [ -n "$A" ] && [ "$A" = "$B" ] && ok "两次结果一致" || ng "两次结果不一致"
 
-echo
-echo "════ winver-registry-test：通过 $((14-fail)) · 失败 $fail ════"
 [ $fail -eq 0 ] || exit 1
+echo "════ 5. XP 形态：SOFTWARE 没有字符串版 CSDVersion，SYSTEM 里是 DWORD（REQ-75）════"
+# 官方 XP SP3 光盘的 HIVESFT.INF 里没有 SOFTWARE 的 CSDVersion 字符串；
+# SP 级别在 SYSTEM：Select\Current → ControlSet001\Control\Windows\CSDVersion（DWORD）。
+$T reg.del --img="$IMG" --lba=$LBA --path="$KEY" --value=CSDVersion >/dev/null 2>&1
+$T reg.set --img="$IMG" --lba=$LBA --path="$KEY\\ProductName"  --type=sz --value='Microsoft Windows XP Professional' >/dev/null 2>&1
+$T reg.set --img="$IMG" --lba=$LBA --path="$KEY\\CurrentBuild" --type=sz --value='2600' >/dev/null 2>&1
+# 最小 SYSTEM：Select\Current=1，ControlSet001\Control\Windows\CSDVersion=0x300
+# ★ 先放 hive 文件再写键：ntfs.put 会整个覆盖，顺序反了就把刚写的键抹了
+$T ntfs.put --img="$IMG" --lba=$LBA --src="$HIVE" --dst=/Windows/System32/config/SYSTEM >/dev/null 2>&1
+$T reg.set --img="$IMG" --lba=$LBA --path='SYSTEM\\Select\\Current' --type=dword --value=1 >/dev/null 2>&1
+$T reg.set --img="$IMG" --lba=$LBA --path='SYSTEM\\ControlSet001\\Control\\Windows\\CSDVersion' --type=dword --value=768 >/dev/null 2>&1
+
+J="$($T win.version --img="$IMG" --lba=$LBA 2>/dev/null)"
+[ "$(echo "$J" | jq_ "repr(d['data'].get('registry.csd_version'))" 2>/dev/null)" = "'Service Pack 3'" ] \
+  && ok "XP 兜底：SYSTEM DWORD 0x300 → Service Pack 3" || ng "XP 兜底读到 $(echo "$J" | jq_ "d['data'].get('registry.csd_version')" 2>/dev/null)"
+
+# 未知值不猜：0x500 → 空串（契约：没有就是空串）
+$T reg.set --img="$IMG" --lba=$LBA --path='SYSTEM\\ControlSet001\\Control\\Windows\\CSDVersion' --type=dword --value=1280 >/dev/null 2>&1
+J="$($T win.version --img="$IMG" --lba=$LBA 2>/dev/null)"
+[ "$(echo "$J" | jq_ "repr(d['data'].get('registry.csd_version'))" 2>/dev/null)" = "''" ] \
+  && ok "未知 SP 值 0x500 → 空串" || ng "未知值读到 $(echo "$J" | jq_ "d['data'].get('registry.csd_version')" 2>/dev/null)"
+
+# 2000 形态：0x400 → Service Pack 4
+$T reg.set --img="$IMG" --lba=$LBA --path="$KEY\\ProductName" --type=sz --value='Windows 2000 Professional' >/dev/null 2>&1
+$T reg.set --img="$IMG" --lba=$LBA --path="$KEY\\CurrentBuild" --type=sz --value='2195' >/dev/null 2>&1
+$T reg.set --img="$IMG" --lba=$LBA --path='SYSTEM\\ControlSet001\\Control\\Windows\\CSDVersion' --type=dword --value=1024 >/dev/null 2>&1
+J="$($T win.version --img="$IMG" --lba=$LBA 2>/dev/null)"
+[ "$(echo "$J" | jq_ "repr(d['data'].get('registry.csd_version'))" 2>/dev/null)" = "'Service Pack 4'" ] \
+  && ok "2000 兜底：DWORD 0x400 → Service Pack 4" || ng "2000 兜底读到 $(echo "$J" | jq_ "d['data'].get('registry.csd_version')" 2>/dev/null)"
+
+# 7+ 不兜底：字符串缺失 + SYSTEM 有值 → 仍空串（不为 8+ 的盘多挂 SYSTEM）
+$T reg.set --img="$IMG" --lba=$LBA --path="$KEY\\ProductName" --type=sz --value='Windows 7 Professional' >/dev/null 2>&1
+$T reg.set --img="$IMG" --lba=$LBA --path="$KEY\\CurrentBuild" --type=sz --value='7601' >/dev/null 2>&1
+J="$($T win.version --img="$IMG" --lba=$LBA 2>/dev/null)"
+[ "$(echo "$J" | jq_ "repr(d['data'].get('registry.csd_version'))" 2>/dev/null)" = "''" ] \
+  && ok "7+ 不走 SYSTEM 兜底（字符串缺失 → 空串）" || ng "7+ 误兜底：$(echo "$J" | jq_ "d['data'].get('registry.csd_version')" 2>/dev/null)"
+
+echo
+echo "════ winver-registry-test：通过 $((18-fail)) · 失败 $fail ════"
