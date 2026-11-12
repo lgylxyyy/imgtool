@@ -733,6 +733,8 @@ static int dst_write_file(xep *d, const char *final, const img_stream *src,
                           img_xcopy_stats *st){
     if(out_size) *out_size=meta->size;
     if(out_replaced) *out_replaced=existed;
+    /* ★ REQ-77 Q2：报出"正在写到哪里"（item 是源路径，这个是目标路径）。*/
+    if(prog) img_prog_dst(prog, final);
     if(d->loc.kind==IMG_XK_ARCHIVE){
         if(!d->aw) return IMG_ESTATE;
         uint64_t mt = (o->preserve_times && meta->has_times) ? meta->times[1] : 0;
@@ -981,6 +983,8 @@ typedef struct {
     img_xcopy_stats *st;
     int max_depth;
     xagg agg;                  /* REQ-68：跨文件累计（total_bytes>0 时启用）*/
+    uint64_t files_done;       /* ★ REQ-77 Q1：已复制完成的文件数 */
+    uint64_t files_total;      /* ★ REQ-77 Q1：已扫描到的文件总数（随遍历推进增长，最终准确） */
 } xctx;
 
 static int copy_node(xctx *c, const char *spath, const char *dpath, int depth, bool top);
@@ -1277,6 +1281,9 @@ static int copy_file(xctx *c, const char *spath, const char *dpath, bool top){
     }
     c->st->files++;
     c->st->bytes+=meta.size;
+    /* ★ REQ-77 Q1：完成一个文件 → 已完成计数 +1。*/
+    c->files_done++;
+    if(c->prog) img_prog_files(c->prog, c->files_done, c->files_total);
     if(top){
         xstrlcpy(c->st->final_path,target,sizeof c->st->final_path);
         c->st->replaced=replaced;
@@ -1328,6 +1335,10 @@ static int copy_dir(xctx *c, const char *spath, const char *dpath, int depth, bo
     xlist l;
     rc=src_list(c->s,spath,&l);
     if(rc!=IMG_OK){ c->st->side=1; return rc; }
+    /* ★ REQ-77 Q1：先把这一层的文件数计入总数，再开始复制。
+     *   分母随遍历推进增长（最终准确）；App 侧对 0 显示「—」。*/
+    for(int i=0;i<l.n;i++) if(!l.v[i].isdir && !l.v[i].skip) c->files_total++;
+    if(c->prog) img_prog_files(c->prog, c->files_done, c->files_total);
     char failed[4096]; failed[0]=0;
     for(int i=0;i<l.n && rc==IMG_OK;i++){
         if(img_cancelled()){ rc=IMG_ECANCELLED; break; }   /* REQ-69 ④：目录间也要能停 */
@@ -1368,6 +1379,8 @@ static int copy_node(xctx *c, const char *spath, const char *dpath, int depth, b
         if(!c->o->recursive) return IMG_ENOTSUP;   /* 政策拒绝：零副作用 */
         return copy_dir(c,spath,dpath,depth,top);
     }
+    /* ★ REQ-77 Q1：单文件复制 → 总数就是 1。*/
+    if(c->files_total==0) c->files_total=1;
     return copy_file(c,spath,dpath,top);
 }
 

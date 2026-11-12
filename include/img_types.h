@@ -141,6 +141,13 @@ typedef struct {
     uint64_t    archive_total_bytes;     /* 压缩包口径总量（不知道就 0）*/
     int         eta_s;          /* 预计剩余秒，-1=未知 */
     int         elapsed_s;      /* 已用秒 */
+    /* ★ REQ-77 Q1：文件计数。0 = 该任务没有文件概念（字节流式）或总数未知。
+     *   cur/total 的口径在不同命令里不统一（字节/簇/条目混用），App 用这两个
+     *   字段单独显示「(已完成)/(总数)」的文件数。*/
+    uint64_t    files_cur;
+    uint64_t    files_total;
+    /* ★ REQ-77 Q2：当前写入的目标路径（空 = 不报）。item 是【源】，这个是【目标】。*/
+    const char *dst_item;
 } img_progress_t;
 
 /* 进度回调：>=200ms 触发一次；phase/op 变化立即触发；结束必发一次 100% */

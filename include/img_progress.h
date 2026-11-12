@@ -26,6 +26,11 @@ void img_prog_op(img_prog *p, img_op_t op);
 void img_prog_count(img_prog *p, uint64_t cur, uint64_t total);
 void img_prog_bytes(img_prog *p, uint64_t cur_bytes, uint64_t total_bytes);
 void img_prog_item(img_prog *p, const char *item);   /* item 换了就上报（走节流，≤5 条/秒）*/
+/* ★ REQ-77 Q1：文件计数（逐文件处理的任务用）。total=0 = 总数未知/不适用。
+ *   单独给是因为 cur/total 的口径在不同命令里不统一（字节/簇/条目混用）。*/
+void img_prog_files(img_prog *p, uint64_t cur, uint64_t total);
+/* ★ REQ-77 Q2：当前写入的目标路径（item 是源路径，这个是目标）。传 NULL 清空。*/
+void img_prog_dst(img_prog *p, const char *dst);
 /* 当前 phase（IMG_PH_NONE = 还没设）。xcopy 用它判断"调用方已经定好段了"。*/
 img_phase_t img_prog_phase_of(const img_prog *p);
 /* 全局进度（REQ-49 §3）：cur 单调（传小值会被忽略），pct 单调不减。

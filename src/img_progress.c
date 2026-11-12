@@ -15,6 +15,7 @@ struct img_prog {
     img_phase_t last_phase;
     img_op_t    last_op;
     char item_buf[512];
+    char dst_buf[512];     /* ★ REQ-77 Q2：当前写入的目标路径 */
     char msg_buf[160];
     volatile int cancelled;
     uint64_t ov_cur, ov_total;
@@ -236,6 +237,29 @@ void img_prog_item(img_prog *p, const char *item){
         do_emit(p,0);
     }
 }
+
+/* ★ REQ-77 Q1：文件计数（逐文件处理的任务用）。
+ *   单独给是因为 cur/total 的口径在不同命令里不统一（字节/簇/条目混用），
+ *   App 进度页要单独的文件数「(已完成)/(总数)」。total=0 = 总数未知。*/
+void img_prog_files(img_prog *p, uint64_t cur, uint64_t total){
+    if(!p) return;
+    if(p->cur.files_cur == cur && p->cur.files_total == total) return;
+    p->cur.files_cur = cur;
+    p->cur.files_total = total;
+    do_emit(p,0);
+}
+
+/* ★ REQ-77 Q2：当前写入的目标路径（item 是【源】路径，这个是【目标】）。
+ *   换目标就发一条；传 NULL 清空（App 显示「—」）。*/
+void img_prog_dst(img_prog *p, const char *dst){
+    if(!p) return;
+    const char *n = dst ? dst : "";
+    if(strcmp(p->dst_buf, n) != 0){
+        strcopy(p->dst_buf, sizeof p->dst_buf, n);
+        p->cur.dst_item = dst ? p->dst_buf : NULL;
+        do_emit(p,0);
+    }
+}
 void img_prog_emit(img_prog *p){
     if(p) do_emit(p,1);
 }
@@ -313,9 +337,10 @@ static void jesc(char *d,int cap,const char *s){
 
 int img_prog_json(const img_progress_t *pr, char *buf, int cap){
     if(!pr||!buf||cap<8) return 0;
-    char it[640]={0}, mg[320]={0};
+    char it[640]={0}, mg[320]={0}, ds[640]={0};
     jesc(it,sizeof it, pr->item?pr->item:"");
     jesc(mg,sizeof mg, pr->msg ?pr->msg :"");
+    jesc(ds,sizeof ds, pr->dst_item?pr->dst_item:"");
     return snprintf(buf,cap,
         "{\"ev\":\"progress\",\"phase\":\"%s\",\"op\":\"%s\","
         "\"cur\":%llu,\"total\":%llu,"
@@ -323,7 +348,8 @@ int img_prog_json(const img_progress_t *pr, char *buf, int cap){
         "\"pct\":%d,\"eta\":%d,\"elapsed\":%d,\"elapsed_ms\":%lld,"
         "\"overall_pct\":%d,\"overall_cur_bytes\":%llu,\"overall_total_bytes\":%llu,"
         "\"bytes_kind\":\"%s\",\"archive_cur_bytes\":%llu,\"archive_total_bytes\":%llu,"
-        "\"item\":\"%s\",\"msg\":\"%s\"}",
+        "\"item\":\"%s\",\"dst_item\":\"%s\",\"msg\":\"%s\","
+        "\"files_cur\":%llu,\"files_total\":%llu}",
         img_phase_name(pr->phase), img_op_name(pr->op),
         (unsigned long long)pr->cur,(unsigned long long)pr->total,
         (unsigned long long)pr->cur_bytes,(unsigned long long)pr->total_bytes,
@@ -332,12 +358,13 @@ int img_prog_json(const img_progress_t *pr, char *buf, int cap){
         (unsigned long long)pr->overall_total_bytes,
         pr->bytes_kind?pr->bytes_kind:"raw",
         (unsigned long long)pr->archive_cur_bytes, (unsigned long long)pr->archive_total_bytes,
-        it, mg);
+        it, ds, mg,
+        (unsigned long long)pr->files_cur, (unsigned long long)pr->files_total);
 }
 
 void img_progress_to_stdout(void *ud, const img_progress_t *p){
     (void)ud;
-    char b[2048];
+    char b[4096];   /* ★ REQ-77：加了 dst_item 后 JSON 变长，2048 会截断成坏 JSON */
     if(img_prog_json(p, b, sizeof b) > 0){
         fputs(b, stdout);
         fputc('\n', stdout);

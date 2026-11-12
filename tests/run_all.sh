@@ -186,6 +186,7 @@ run "compact-fmt-test（compact 四种源格式都真的搬数据；D2）"   pyt
 run "move-rename-test（move 的 moved_by=rename|copy；T3）"      bash "$ROOT/tests/move-rename-test.sh"
 run "copy-sparse-test（copy --sparse 保不保洞；T4）"            bash "$ROOT/tests/copy-sparse-test.sh"
 run "sparsify-test（img.sparsify：raw fs/zero + dry-run + 校验点；T7）" python3 "$ROOT/tests/sparsify-test.py"
+run "progress-fields-test（进度事件的 files_cur/files_total/dst_item；REQ-77）" python3 "$ROOT/tests/progress-fields-test.py"
 run "info-alloc-test（img.info 的 logical/alloc 口径 + sparse_risk 三态；T5/T8）" python3 "$ROOT/tests/info-alloc-test.py"
 run "compact-compress-test（compact --compress=zlib + qemu 互验；T6）" python3 "$ROOT/tests/compact-compress-test.py"
 run "bigdir-wim-test（REQ-65：单目录 >256 条、宽树估算不截断）" python3 "$ROOT/tests/bigdir-wim-test.py"

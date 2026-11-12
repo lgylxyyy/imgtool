@@ -315,20 +315,24 @@ static void on_progress_json(void *ud, const img_progress_t *p){
     (void)ud;
     if(!p) return;
     const char *ph=img_phase_name(p->phase), *op=img_op_name(p->op);
-    char line[768], it[256];
+    char line[1280], it[256], ds[256];
     json_esc(p->item?p->item:"",it,sizeof it);
+    /* ★ REQ-77 Q2：目标路径（item 是源）。*/
+    json_esc(p->dst_item?p->dst_item:"",ds,sizeof ds);
     int n=snprintf(line,sizeof line,
         "{\"ev\":\"progress\",\"phase\":\"%s\",\"op\":\"%s\","
         "\"cur\":%llu,\"total\":%llu,\"cur_bytes\":%llu,\"total_bytes\":%llu,\"pct\":%d,"
         "\"overall_pct\":%d,\"overall_cur_bytes\":%llu,\"overall_total_bytes\":%llu,"
-        "\"item\":\"%s\",\"elapsed\":%d,\"elapsed_ms\":%lld,\"msg\":\"%s\"",
+        "\"item\":\"%s\",\"dst_item\":\"%s\",\"elapsed\":%d,\"elapsed_ms\":%lld,"
+        "\"files_cur\":%llu,\"files_total\":%llu,\"msg\":\"%s\"",
         ph?ph:"", op?op:"",
         (unsigned long long)p->cur,(unsigned long long)p->total,
         (unsigned long long)p->cur_bytes,(unsigned long long)p->total_bytes,
         p->pct,
         p->overall_pct, (unsigned long long)p->overall_cur_bytes,
-        (unsigned long long)p->overall_total_bytes, it,
+        (unsigned long long)p->overall_total_bytes, it, ds,
         p->elapsed_s, (long long)p->elapsed_s*1000LL,
+        (unsigned long long)p->files_cur, (unsigned long long)p->files_total,
         p->msg ? p->msg : "");
     if(p->eta_s>=0 && n>0 && n<(int)sizeof line-16)
         n+=snprintf(line+n,sizeof line-(size_t)n,",\"eta_s\":%d",p->eta_s);
