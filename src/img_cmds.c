@@ -169,6 +169,19 @@ static int cmd_img_info(img_ctx *ctx, const img_args *in, img_result *out){
             pct = ((logical - alloc) * 100u + logical/2) / logical;
         img_result_u64(out,"sparse_ratio",pct);
         img_result_u64(out,"hole_bytes", alloc < logical ? logical - alloc : 0);
+        /* ★ T8：sparse_risk 三态（收尾计划 §1）—— App 列表对 copy/all 提示「复制会实体化」。
+         *   none：没有洞（qcow2 恒 none：L2 里没有的簇，复制到 qcow2 本来就不会实体化）
+         *   copy：raw/vhd/vmdk 且占用明显小于容量（复制到不支持稀疏的目标会按完整容量写）
+         *   all ：raw 且一个块都没占（整个文件都是洞；vhd/vmdk 空盘也有元数据占用，到不了 all）
+         * 阈值 alloc*8 < logical = 占用不足 1/8 才算「明显有洞」——尾部对齐的零头不算。
+         * 口径与 sparse_ratio 一致：直接用 alloc_bytes，不看 alloc_known
+         *   （known=false 是 FUSE 竞态的怪值，sparse_ratio 也没因此停算；注释在案）。 */
+        const char *risk = "none";
+        if(q->fmt != DISK_FMT_QCOW2){
+            if(alloc == 0 && logical > 0)  risk = "all";
+            else if(alloc*8 < logical)     risk = "copy";
+        }
+        img_result_str(out,"sparse_risk",risk);
     }
     /* format：App 按扩展名猜格式并不可靠（实际按魔数判定）。
      *   建盘后要显示实际格式，这里直接报探测结果。*/

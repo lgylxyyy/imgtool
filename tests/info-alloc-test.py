@@ -10,12 +10,14 @@
   granule_bytes  分配粒度：qcow2 簇 / VHD 2 MiB 块 / VMDK grain / raw 宿主块
   sparse_ratio   省下来的百分比整数（0..100）
   hole_bytes     容量 − 占用
+  sparse_risk    三态（T8）：none=没有洞 / copy=有洞复制会实体化 / all=长度全空
 
 断言：
   · 四种格式空盘的 logical/granule/ratio
   · 写 100 MiB 后 alloc_bytes ≈ 100 MiB（四格式同量级，说明与格式无关）
   · alloc_bytes 与宿主 du 的口径一致（差 < 5%）
   · 64 GiB 稀疏 raw：写 1 MiB → alloc ≈ 1 MiB、ratio=100、alloc_known=true
+  · sparse_risk 三态：raw 全空=all、raw 写 1 MiB=copy、qcow2=none（T8）
 """
 import ctypes
 import json
@@ -119,6 +121,7 @@ def main():
               d['hole_bytes'] == max(0, d['logical_bytes'] - d['alloc_bytes']))
         check('%s：alloc_bytes 与 du 一致（%d vs %d）' % (f, d['alloc_bytes'], du_bytes(p)),
               abs(d['alloc_bytes'] - du_bytes(p)) <= 4096)
+        check('%s：sparse_risk 字段存在' % f, 'sparse_risk' in d, d.get('sparse_risk'))
 
     print('════ 2. 写 100 MiB 后：四格式占用同量级 ════')
     for f in ('raw', 'vhd', 'vmdk', 'qcow2'):
@@ -132,6 +135,9 @@ def main():
               '%d vs %d' % (d['alloc_bytes'], du_bytes(p)))
         check('%s：sparse_ratio 仍是 98 上下（%d）' % (f, d['sparse_ratio']),
               95 <= d['sparse_ratio'] <= 99)
+        expect_risk = 'none' if f == 'qcow2' else 'copy'
+        check('%s：写 100 MiB 后 sparse_risk=%s（%s）' % (f, expect_risk, d.get('sparse_risk')),
+              d.get('sparse_risk') == expect_risk, d.get('sparse_risk'))
 
     print('════ 3. 64 GiB 稀疏 raw（真稀疏，不是格式模拟）════')
     r = os.path.join(W, 'big.raw')
@@ -146,6 +152,26 @@ def main():
     check('64 GiB：sparse_ratio=100（%d）' % d['sparse_ratio'], d['sparse_ratio'] == 100)
     check('64 GiB：allloc 与 du 一致', abs(d['alloc_bytes'] - du_bytes(r)) <= 65536,
           '%d vs %d' % (d['alloc_bytes'], du_bytes(r)))
+    check('64 GiB：sparse_risk=copy（%s）' % d.get('sparse_risk'),
+          d.get('sparse_risk') == 'copy', d.get('sparse_risk'))
+
+    print('════ 4. sparse_risk 三态（T8）════')
+    # all：raw 只 truncate 不写 —— 整个文件都是洞
+    a = os.path.join(W, 'all.raw')
+    with open(a, 'wb') as f:
+        f.truncate(64 << 30)
+    d = cmd('img.info', '--img=' + a)
+    check('all：raw 全空 → sparse_risk=all（%s）' % d.get('sparse_risk'),
+          d.get('sparse_risk') == 'all', d.get('sparse_risk'))
+    check('all：alloc_bytes=0（%d）' % d['alloc_bytes'], d['alloc_bytes'] == 0)
+    # copy：写 1 MiB 的 64 GiB raw（复用第 3 节的 big.raw）
+    d = cmd('img.info', '--img=' + r)
+    check('copy：raw 写 1 MiB → sparse_risk=copy（%s）' % d.get('sparse_risk'),
+          d.get('sparse_risk') == 'copy', d.get('sparse_risk'))
+    # none：qcow2 恒 none（复用第 2 节写过的 e.qcow2）
+    d = cmd('img.info', '--img=' + os.path.join(W, 'e.qcow2'))
+    check('none：qcow2 → sparse_risk=none（%s）' % d.get('sparse_risk'),
+          d.get('sparse_risk') == 'none', d.get('sparse_risk'))
 
     print()
     print('════ 通过 %d · 失败 %d ════' % (ok, bad))
