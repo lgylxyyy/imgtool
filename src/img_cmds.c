@@ -7809,6 +7809,7 @@ static void jesc(char *out, size_t cap, const char *in){
 typedef struct {
     char *b; size_t cap, len; int n; bool trunc;
     char contains[128]; size_t limit;      /* limit=0 → 用 WIM_LS_MAX */
+    uint64_t total, offset;                /* ★ 分页：total=过滤后总数；offset=本页起点 */
 } wimlist_t;
 /* 手写 JSON 字符串转义（与 iso 同一套规矩：机器可读永远 ASCII/转义安全）*/
 static int wj_esc(char *dst,size_t cap,const char *s){
@@ -7825,9 +7826,13 @@ static void wim_ls_cb(void *ud,const char *name,const char *full,bool isdir,
                       uint64_t size,uint64_t mtime,uint32_t attrs,size_t depth){
     wimlist_t *a=(wimlist_t*)ud;
     if(!a) return;
+    /* ★ 分页口径与 ntfs.list/fat.ls 一致（2026-11-13）：先 contains 过滤，
+     *   再 offset/limit —— total 是【过滤后】的总数，各页拼起来才是全集。 */
+    if(a->contains[0] && !(full&&strstr(full,a->contains))) return;    /* 按整条路径匹配 */
+    const uint64_t idx=a->total++;
+    if(idx < a->offset) return;              /* 本页之前的条目：只计数不写 */
     size_t lim=a->limit?a->limit:WIM_LS_MAX;
     if((size_t)a->n>=lim){ a->trunc=true; return; }
-    if(a->contains[0] && !(full&&strstr(full,a->contains))) return;    /* 按整条路径匹配 */
     char nm[512], fp[1024];
     wj_esc(nm,sizeof nm,name?name:"");
     wj_esc(fp,sizeof fp,full?full:"");
@@ -7863,7 +7868,8 @@ static const img_arg A_WIMLS[] = {
     {"path",      IMG_A_STR, false, "/",    "WIM 内的目录（/ 开头，大小写不敏感）", NULL},
     {"recursive", IMG_A_BOOL,false, "false","true=整棵子树（大映像可达几十万条，务必配 limit）", NULL},
     {"contains",  IMG_A_STR, false, NULL,   "只回路径里含这个子串的条目（App 省字节用）", NULL},
-    {"limit",     IMG_A_U64, false, "2000", "最多回多少条（0=用硬上限 4096）", NULL},
+    {"offset",    IMG_A_U64, false, "0",    "从第几项开始（分页；默认 0；先 --contains 过滤再分页）", NULL},
+    {"limit",     IMG_A_U64, false, "2000", "本页最多多少条（0=用硬上限 4096）", NULL},
 };
 static int cmd_wim_ls(img_ctx *ctx, const img_args *in, img_result *out){
     (void)ctx;
@@ -7876,6 +7882,7 @@ static int cmd_wim_ls(img_ctx *ctx, const img_args *in, img_result *out){
     if(dir[0]!='/'){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","WIM 内路径必须以 / 开头",NULL); return IMG_EINVAL; }
     bool rec=img_args_bool(in,"recursive",false);
     uint64_t lim64=img_args_u64(in,"limit",2000);
+    uint64_t off64=img_args_u64(in,"offset",0);
     const char *contains=img_args_get(in,"contains");
 
     char local[1024]="", used_inner[256]="", why[400]="";
@@ -7887,7 +7894,9 @@ static int cmd_wim_ls(img_ctx *ctx, const img_args *in, img_result *out){
     enum { JB_CAP = 524288 };
     char *jb=img_tbuf(IMG_TB_WIM_LS,JB_CAP);
     if(!jb) return tb_nomem(out,"wim.ls 条目缓冲");
-    jb[0]=(char)0x5b; wimlist_t acc={jb,JB_CAP-2,1,0,false,{0},0};   /* ★ len 从 1 起：第 0 格是 '['，别覆盖掉 */
+    /* ★ len 从 1 起：第 0 格是 '['，别覆盖掉（指定初始化器：加字段不错位） */
+    jb[0]=(char)0x5b; wimlist_t acc={.b=jb,.cap=JB_CAP-2,.len=1,.n=0,.trunc=false,
+                                     .limit=(size_t)lim64,.offset=off64};
     if(contains&&contains[0]) snprintf(acc.contains,sizeof acc.contains,"%s",contains);
     acc.limit=(size_t)lim64;
     char err[256]="";
@@ -7910,6 +7919,9 @@ static int cmd_wim_ls(img_ctx *ctx, const img_args *in, img_result *out){
         return rc;
     }
     jb[acc.len++]=']'; jb[acc.len]=0;
+    img_result_u64(out,"total",acc.total);
+    img_result_u64(out,"offset",off64);
+    img_result_bool(out,"has_more", off64+(uint64_t)acc.n < acc.total);
     img_result_u64(out,"count",(uint64_t)acc.n);
     img_result_bool(out,"truncated",acc.trunc);
     img_result_bool(out,"recursive",rec);

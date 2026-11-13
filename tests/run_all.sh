@@ -191,6 +191,7 @@ run "progress-fields-test（进度事件的 files_cur/files_total/dst_item；REQ
 run "info-alloc-test（img.info 的 logical/alloc 口径 + sparse_risk 三态；T5/T8）" python3 "$ROOT/tests/info-alloc-test.py"
 run "compact-compress-test（compact --compress=zlib + qemu 互验；T6）" python3 "$ROOT/tests/compact-compress-test.py"
 run "bigdir-wim-test（REQ-65：单目录 >256 条、宽树估算不截断）" python3 "$ROOT/tests/bigdir-wim-test.py"
+run "wim-ls-page-test（2026-11-13：wim.ls 分页 + 大结果重渲，System32 不再 RESULT-TOO-BIG）" python3 "$ROOT/tests/wim-ls-page-test.py"
 run "wim-capture-test（捕获、临时目录清理、产物可读）"          bash "$ROOT/tests/wim-capture-test.sh"
 run "wim-exclude-test（REQ-67：--exclude 同口径 + extract/pack/write 三段进度）" python3 "$ROOT/tests/wim-exclude-test.py"
 run "provenance-test（内置模板 == 微软原件；缺原件则跳过）"   bash "$ROOT/tests/provenance-test.sh"

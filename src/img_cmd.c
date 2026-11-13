@@ -323,15 +323,17 @@ int img_result_json(const img_result *r, char *buf, int cap){
     if(w.p<w.end)*w.p++='}';
     if(w.p<w.end)*w.p++='\n';
     *w.p=0;
-    /* ★ 溢出兜底：writer 顶到上限 = 有字段没写进去。宁可吐一个【合法】的错误信封，
-     *   也不能让调用方拿到半截 JSON（那会让 App 崩，而不是报错）。*/
+    /* ★ 溢出：writer 顶到上限 = 有字段没写进去。
+     * ★ 2026-11-13（真机：WIM System32 列表报 RESULT-TOO-BIG，大量文件无法访问）：
+     *   以前这里返回【错误信封的长度】（正数小值），调用方的「换大缓冲重渲」判断
+     *   （n >= cap-1）永远不触发 → 超大列表（System32 几千条）永远拿不到。
+     *   现在返回 -(cap)：负数 =「缓冲不够，请换更大的重渲」；buf 里仍写合法
+     *   错误信封兜底 —— 不检查负数的旧调用方行为与以前完全一致。*/
     if(w.p>=w.end){
-        int n=snprintf(buf,(size_t)cap,
+        snprintf(buf,(size_t)cap,
             "{\"ok\":false,\"cmd\":\"%s\",\"version\":1,\"err\":{\"rc\":-10,\"error_code\":\"RESULT-TOO-BIG\"}}\n",
             r->cmd?r->cmd:"");
-        if(n<0||n>=cap)
-            snprintf(buf,(size_t)cap,"{\"ok\":false,\"err\":{\"rc\":-10,\"error_code\":\"RESULT-TOO-BIG\"}}\n");
-        return (int)strlen(buf);
+        return -(int)cap;
     }
     return (int)(w.p-buf);
 }

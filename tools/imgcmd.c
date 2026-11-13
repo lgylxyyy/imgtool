@@ -513,7 +513,9 @@ int main(int argc, char **argv){
         img_result_fail(&r,IMG_ENOENT,"CMD-NOTFOUND",cmd,"没有这个命令",
                         "用 --list 查看可用命令；文件操作已合并为 copy/move/rename/rm");
         char b[1024]; int n=img_result_json(&r,b,sizeof b);
-        if(n>0) fwrite(b,1,(size_t)n,stdout);
+        char big[4096];
+        if(n<0){ n=img_result_json(&r,big,sizeof big); if(n>0){ fwrite(big,1,(size_t)n,stdout); } }
+        else if(n>0) fwrite(b,1,(size_t)n,stdout);
         img_error_info_t ei; img_error_info(&ei);
         /* 命令不存在是"用法级"致命错：卡片直接出到 stderr（非 tty 也出），
          * 否则机器模式下只剩一行码，用户不知道旧命令已经合并。*/
@@ -530,7 +532,9 @@ int main(int argc, char **argv){
             img_result r; img_result_begin(&r,cmd);
             img_result_fail(&r,IMG_ENOENT,"IMG-OPEN-FAIL",img,err,"检查路径/权限，确认文件存在");
             char b[1024]; int n=img_result_json(&r,b,sizeof b);
-            if(n>0) fwrite(b,1,(size_t)n,stdout);
+            char big[4096];
+            if(n<0){ n=img_result_json(&r,big,sizeof big); if(n>0) fwrite(big,1,(size_t)n,stdout); }
+            else if(n>0) fwrite(b,1,(size_t)n,stdout);
             img_error_info_t ei; img_error_info(&ei);
             if(ei.code[0]) render_card(&ei, ui.human);
             img_args_free(args); return 1;
@@ -541,13 +545,22 @@ int main(int argc, char **argv){
     int rc=img_cmd_exec(cmd, ctx, args, &res);
     static char out[128*1024];
     int n=img_result_json(&res,out,sizeof out);
+    /* ★ 2026-11-13：img_result_json 顶满返回 -(cap)。128KB 装不下的大结果
+     *   （wim.ls 大目录，几千条 entries）换 4MB 堆缓冲重渲。*/
+    char *heap_out=NULL;
+    if(n<0){
+        heap_out=(char*)malloc(4u*1024*1024);
+        if(heap_out) n=img_result_json(&res,heap_out,4u*1024*1024);
+        else n=-1;
+    }
     /* ★ REQ-29：--dst=- / --dst-fd=1 时 stdout 是【数据流】，结果 JSON 必须改走 stderr，
      *   否则数据末尾会多出一行 JSON（文件多 154 字节，校验和全废）。*/
     FILE *resf=stdout;
     const char *dstv=img_args_get(args,"dst");
     if(dstv && !strcmp(dstv,"-")) resf=stderr;
     else if(img_args_u64(args,"dst-fd",0)==1) resf=stderr;
-    if(n>0) fwrite(out,1,(size_t)n,resf);
+    if(n>0) fwrite(heap_out?heap_out:out,1,(size_t)n,resf);
+    free(heap_out);
     if(rc!=IMG_OK){
         img_error_info_t ei; img_error_info(&ei);
         if(ei.code[0]) render_card(&ei, ui.human);
