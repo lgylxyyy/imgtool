@@ -125,6 +125,39 @@ def main():
         check('img.sparsify：dst_item 为空',
               ev3[-1].get('dst_item', '') == '')
 
+    print('════ 4. REQ-79：compact 的进度（pct 单调 / dst=输出 / files=0）════')
+    # 多分区盘才是「pct 钳制」的可观测场景（同一条命令里换分区，last_pct 不清）
+    csrc = os.path.join(W, 'c.qcow2')
+    run(IMGCMD, 'img.create', '--out=' + csrc, '--size-gb=3', '--format=qcow2',
+        '--table=gpt', '--sys-mb=300', '--rec-mb=200', '--limits=off')
+    pt_line = [l for l in run(IMGCMD, 'part.show', '--img=' + csrc)[1].splitlines() if l.startswith('{')][-1]
+    pt = json.loads(pt_line)['data']['pt']
+    lba = sorted(pt['parts'], key=lambda p: p['sectors'])[-1]['first']
+    run(IMGCMD, 'fs.format', '--img=' + csrc, '--lba=%d' % lba, '--fs=fat32')
+    payload = os.path.join(W, 'p.bin')
+    with open(payload, 'wb') as f:
+        f.write(b'Z' * (192 << 20))
+    run(IMGCMD, 'fat.put', '--img=' + csrc, '--lba=%d' % lba, '--src=' + payload, '--dst=/p.bin')
+
+    cout = os.path.join(W, 'c-out.qcow2')
+    rc, out, err = run(IMGCMD, 'img.compact', '--src=' + csrc, '--out=' + cout,
+                       '--compress=zlib', '--progress=json')
+    ev4 = events(out)
+    check('compact：有进度事件（%d 条）' % len(ev4), len(ev4) >= 3, err[-160:])
+    if ev4:
+        pcts = [e.get('pct', -1) for e in ev4]
+        valid = [p for p in pcts if p >= 0]
+        check('compact：pct 单调不减', all(b >= a for a, b in zip(valid, valid[1:])), valid[:12])
+        check('compact：中途出现过 <100 的 pct（不再一直 100%）',
+              any(p < 100 for p in valid[:-1]), valid[:12])
+        check('compact：最后一条 pct = 100', bool(valid) and valid[-1] == 100, valid[-3:])
+        dsts = [e.get('dst_item', '') for e in ev4 if e.get('dst_item')]
+        check('compact：dst_item = 输出文件（%s）' % (dsts[-1] if dsts else '空'),
+              bool(dsts) and all(d == cout for d in dsts), dsts[:2])
+        check('compact：files_cur/files_total 恒 0（没有文件概念）',
+              all(e.get('files_cur', 0) == 0 and e.get('files_total', 0) == 0 for e in ev4),
+              [(e.get('files_cur'), e.get('files_total')) for e in ev4][:4])
+
     print()
     print('════ 通过 %d · 失败 %d ════' % (ok, bad))
     if bad:

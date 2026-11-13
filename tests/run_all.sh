@@ -107,6 +107,7 @@ if [ -n "$RACE_ISO" ]; then
 else
   run "race_test（全局锁/环形缓冲）" "$ROOT/build/tests/race_test" 40
 fi
+run "progress_reuse_test（REQ-79：命令间 elapsed/files/dst 不残留）" "$ROOT/build/tests/progress_reuse_test" "$W/reuse"
 run "ntfs-move-test（盘内改名/移动/删除 端到端）" python3 "$ROOT/tests/ntfs-move-test.py"
 run "ntfs-inventory-test（独立三方对账 + 幽灵目录必抓）" python3 "$ROOT/tests/ntfs-inventory-test.py"
 run "copy-test（盘内复制/粘贴策略 + 删除目录，NTFS+FAT）" python3 "$ROOT/tests/copy-test.py"

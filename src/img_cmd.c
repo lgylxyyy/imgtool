@@ -597,6 +597,10 @@ int img_cmd_exec(const char *name, img_ctx *ctx, const img_args *in, img_result 
      *   malloc 用了 static，并发跑会互相覆盖 → race_test 场景③ 守这条）。
      *   上锁的代价是并发退化成排队（实测 240 次调用直接超时），
      *   拆 static 的代价是一次 malloc/free —— 后者明显更划算。*/
+    /* ★ REQ-79：进程级 prog 在每条命令开始时整体归零 —— 否则上一条命令的
+     *   elapsed/pct/files/dst 会留在第二、三次运行里（App 实测「一打开就 20:23」
+     *   「files 1/1」「dst 报旧文件」都是这个残留）。 */
+    if(g_prog) img_prog_command_begin(g_prog);
     img_lock_t *lk = ctx ? &ctx->lk : NULL;
     rc=img_dispatch(c,ctx,use,out,lk);
     if(tmp) img_args_free(tmp);

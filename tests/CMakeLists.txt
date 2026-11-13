@@ -108,6 +108,10 @@ target_link_libraries(identify_test PRIVATE imgtool)
 add_executable(race_test race_test.c)
 target_link_libraries(race_test PRIVATE imgtool)
 
+# REQ-79：进程级进度对象的命令间残留（elapsed/files/dst）——必须同进程连跑两条命令
+add_executable(progress_reuse_test progress_reuse_test.c)
+target_link_libraries(progress_reuse_test PRIVATE imgtool)
+
 # ADS（命名数据流）探针：file.copy / ntfs.copy 必须保留附加数据
 if(NTFS_INC AND NTFS_LIB)
   add_executable(ads_probe ads_probe.c)

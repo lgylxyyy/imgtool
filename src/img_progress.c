@@ -70,6 +70,36 @@ img_prog *img_prog_new(img_progress_cb cb, void *ud, int throttle_ms){
 }
 void img_prog_free(img_prog *p){ free(p); }
 
+/* ★ REQ-79：命令开始时整体软复位（不重新 malloc）。
+ *   App 进程常驻，g_prog 只 img_prog_new 一次 → start_ms 从进程启动算
+ *   （「第二次跑一打开就 20:23」）、last_pct 留在 100（「圆盘一直 100%」）、
+ *   files 留在上一条 xcopy 的 1/1、dst 留在旧目标。全部在这里清掉。 */
+void img_prog_command_begin(img_prog *p){
+    if(!p) return;
+    p->start_ms = now_ms();
+    p->phase_ms = p->start_ms;
+    p->last_ms = 0;
+    p->cur.phase = IMG_PH_NONE;
+    p->cur.op    = IMG_OP_NONE;
+    p->cur.cur = 0; p->cur.total = 0;
+    p->cur.cur_bytes = 0; p->cur.total_bytes = 0;
+    p->cur.pct = -1; p->cur.eta_s = -1; p->cur.elapsed_s = 0;
+    p->cur.overall_pct = -1;
+    p->cur.overall_cur_bytes = 0; p->cur.overall_total_bytes = 0;
+    p->cur.files_cur = 0; p->cur.files_total = 0;
+    p->cur.dst_item = NULL;
+    p->cur.item = NULL; p->cur.msg = NULL;
+    p->item_buf[0] = 0; p->msg_buf[0] = 0; p->dst_buf[0] = 0;
+    p->last_phase = IMG_PH_NONE; p->last_op = IMG_OP_NONE;
+    p->last_pct = -1; p->eta_s = -1;
+    p->ov_pct = -1; p->ov_cur = 0; p->ov_total = 0;
+    p->arc_cur = 0; p->arc_total = 0;
+    p->smp_n = 0; p->phase_base = 0;
+    p->cancelled = 0;
+    snprintf(p->kind_buf, sizeof p->kind_buf, "%s", "raw");
+    p->cur.bytes_kind = p->kind_buf;
+}
+
 static void do_emit(img_prog *p, int force){
     if(!p || !p->cb) return;
     long long t = now_ms();

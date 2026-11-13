@@ -75,6 +75,25 @@ int img_clone(const char *src_path, const char *dst_path,
     if(rc!=IMG_OK) goto out_end;
 
     /* ④ 拷贝保留分区（1MiB 分块；全零块跳过 → 保持稀疏） */
+    /* ★ REQ-79：整体进度按【所有保留分区】的累计字节算。
+     *   以前每个分区各自报 0..bytes、且中途调 img_prog_done 直接报 100%，
+     *   App 的圆盘在第二个分区开始就被 do_emit 的「阶段内不倒退」钳死在 100%
+     *   （5.3 GB 压缩跑 20 分钟、界面一直 100% 就是这个）。
+     *   现在 total 固定 = keep 分区字节和，进度用 base+done 单调推进。 */
+    uint64_t total_all = 0;
+    for(int k=0;k<nkeep;k++){
+        for(int i=0;i<IMG_MAX_PARTITIONS;i++)
+            if(stab.parts[i].used && stab.parts[i].first_lba==keep_lbas[k]){
+                total_all += (stab.parts[i].last_lba - stab.parts[i].first_lba + 1)*512u;
+                break;
+            }
+    }
+    uint64_t base = 0;                            /* 前面分区已完成的字节累计 */
+    if(prog){
+        img_prog_phase(prog,IMG_PH_COPY,"克隆保留分区");
+        img_prog_dst(prog, dst_path);   /* ★ REQ-79：dst_item 报【输出】文件，不是源 */
+        img_prog_bytes(prog, 0, total_all);
+    }
     unsigned char *buf = (unsigned char*)malloc(CLONE_CHUNK);
     unsigned char *zero= (unsigned char*)calloc(1,CLONE_CHUNK);
     if(!buf||!zero){ free(buf); free(zero); rc=IMG_ENOMEM; goto out_end; }
@@ -91,7 +110,6 @@ int img_clone(const char *src_path, const char *dst_path,
         img_span_kv_u64(&sp,"lba",lba);
         img_span_kv_u64(&sp,"size_bytes",bytes);
         img_span_begin(&sp);
-        if(prog){ img_prog_phase(prog,IMG_PH_COPY,"克隆保留分区"); img_prog_bytes(prog,0,bytes); }
         uint64_t done=0;
         /* ★ 2026-10-25（img.compact）：按【簇】粒度跳读 ——
          *   先问源盘这段有没有已分配的簇（没有 → 读出来必然是零，连读都省了），
@@ -123,12 +141,15 @@ int img_clone(const char *src_path, const char *dst_path,
                 }
             }
             done+=n;
-            if(prog) img_prog_bytes(prog,done,bytes);
+            if(prog) img_prog_bytes(prog,base+done,total_all);
         }
         img_span_end(&sp,rc);
-        if(rc==IMG_OK){ st.parts_copied++; if(prog) img_prog_done(prog,"分区克隆完成"); }
+        if(rc==IMG_OK) st.parts_copied++;
+        base += bytes;                            /* 下一个分区的累计起点 */
     }
     free(buf); free(zero);
+    /* 整个克隆结束才报 100%（各分区中间不再报，否则圆盘提前冲到 100） */
+    if(prog && rc==IMG_OK) img_prog_done(prog,"克隆完成");
     if(out && rc==IMG_OK) *out=st;
 
 out_end:

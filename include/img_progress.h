@@ -20,6 +20,10 @@ void      img_prog_free(img_prog *p);
  *   wim.apply 里格式化阶段留下的 3/3 被 extract 拿去用，第一帧就报 pct=100
  *   （App 显示成"直接跳到 95%"），随后又掉回 2%。调用方约定：先 phase，再设数值。 */
 void img_prog_phase(img_prog *p, img_phase_t ph, const char *msg);
+/* ★ REQ-79：每条命令开始时把进度状态【整体】归零。
+ *   g_prog 是进程级的（App 进程常驻、只 install 一次）——不清就会把上一条命令的
+ *   elapsed_ms / pct / files_cur·total / dst_item 带进下一次运行。 */
+void img_prog_command_begin(img_prog *p);
 void img_prog_op(img_prog *p, img_op_t op);
 
 /* 设置进度数据（内部按节流决定是否真正上报） */
