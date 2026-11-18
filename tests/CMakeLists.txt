@@ -112,6 +112,10 @@ target_link_libraries(race_test PRIVATE imgtool)
 add_executable(progress_reuse_test progress_reuse_test.c)
 target_link_libraries(progress_reuse_test PRIVATE imgtool)
 
+# 2026-11-18：目录会话缓存（翻页 O(1) + 搜索）——会话在进程内存里，必须同进程测
+add_executable(lscache_test lscache_test.c)
+target_link_libraries(lscache_test PRIVATE imgtool)
+
 # ADS（命名数据流）探针：file.copy / ntfs.copy 必须保留附加数据
 if(NTFS_INC AND NTFS_LIB)
   add_executable(ads_probe ads_probe.c)

@@ -115,7 +115,8 @@ static int rd_iso(void *ud, uint64_t off, void *buf, size_t len){
  #include <strings.h>
 #include <unistd.h>   /* rename/unlink/access（克隆的改名与回滚护栏）*/  /* strcasecmp（Windows/Android 都可用）*/
 #include <time.h>
-#include "img_tbuf.h"   /* 线程级缓冲（堆上，替代 1.5MB 静态 TLS，REQ-21）*/
+#include "img_tbuf.h"   /* 线程级缓冲（堆上，替代 1.5MB 静态 TLS，REQ-21） */
+#include "img_lscache.h"   /* 目录会话缓存（翻页 O(1) + 搜索）*/
 
 static long long now_ms_(void){
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
@@ -1412,7 +1413,6 @@ static int verify_clone(const char *oldp, const char *newp,
     img_qcow2_close(qb); img_io_close(b);
     return bad?-1:0;
 }
-static int cmd_img_clone(img_ctx *ctx, const img_args *in, img_result *out){
 /* ★ REQ-81（2026-11-18 真机：「明明有 30GB 还报空间不足」）：宿主空间预检的
  *   「需要多少」按【已分配字节】估，不再按分区【逻辑容量】。
  *   compact / clone 只拷已分配（有数据）的块 —— 64G 逻辑 / 实际 5G 的盘按逻辑算
@@ -1428,6 +1428,7 @@ static void host_sz_str(uint64_t b, char *out, size_t cap){
     else             snprintf(out,cap,"%llu KB",(unsigned long long)(b/1024));
 }
 
+static int cmd_img_clone(img_ctx *ctx, const img_args *in, img_result *out){
     const char *src=img_ctx_path(ctx);
     const char *guidp=img_args_get(in,"guid");
     bool guid_random = !guidp || !strcmp(guidp,"random");
@@ -2580,7 +2581,6 @@ static int compact_src_open(const char *src, img_parttable_t *t, uint64_t *vsize
     }
     int rc=img_parttable_read(q,t,0);
     if(vsize) *vsize=img_qcow2_size(q);
-    img_qcow2_close(q); img_io_close(f);
     /* ★ REQ-81：源盘已分配字节（只读打开也能拿；alloc_known=false 时调用方兜底）*/
     if(alloc_bytes || alloc_known){
         uint64_t ab=0; bool ak=false;
@@ -2589,6 +2589,7 @@ static int compact_src_open(const char *src, img_parttable_t *t, uint64_t *vsize
             if(alloc_known) *alloc_known=ak;
         }
     }
+    img_qcow2_close(q); img_io_close(f);
     if(rc!=IMG_OK){
         img_result_fail(out,rc,"PART-READ-FAIL",src,
             "源映像没有可读的分区表（空盘？）","空盘用 cp 复制即可，compact 只对分区盘有意义");
@@ -2674,8 +2675,8 @@ static const img_arg A_IMGCOMPACT[] = {
      *   zstd：qcow2 v3 + incompatible「compression type」位（QEMU 2.10+ 读、5.1+ 写；
      *     老工具拒绝打开整个映像 —— 所以默认 off，且只在构建编入 libzstd 时可用）。 */
     {"compress", IMG_A_ENUM, false, "off", "off=只去零块 | zlib=压缩（兼容面最广） | zstd=压缩（更快更小，但 QEMU<2.10 拒绝打开，需明确选择）", NULL},
-};
     {"host_free", IMG_A_U64, false, NULL, "宿主剩余可用字节（一般不用传，工具自己查；查不到时才传）", NULL},
+};
 static int cmd_img_compact(img_ctx *ctx, const img_args *in, img_result *out){
     (void)ctx;
     const char *src=img_args_get(in,"src");
@@ -7885,6 +7886,34 @@ static void wim_ls_cb(void *ud,const char *name,const char *full,bool isdir,
     if(a->len+(size_t)k+1 < a->cap){ memcpy(a->b+a->len,item,(size_t)k); a->len+=(size_t)k; a->n++; }
     else a->trunc=true;
 }
+/* ★ 2026-11-18（目录会话）：把遍历结果收集成数组。
+ *   ⚠ path 必须 strdup：wimlib 回调给的是临时指针，遍历结束后已失效
+ *   （第一版没拷 → 会话里全是悬空路径，翻页能出数、搜索永远 0 命中）。
+ *   条目上限 50 万，超了标 truncated。*/
+enum { LS_COL_MAX = 500000 };
+typedef struct { img_lsc_ent *v; size_t n, cap; bool trunc; } ls_col;
+static void wim_lsc_collect_cb(void *ud,const char *name,const char *full,bool isdir,
+                               uint64_t size,uint64_t mtime,uint32_t attrs,size_t depth){
+    (void)name;
+    ls_col *a=(ls_col*)ud;
+    if(!a) return;
+    if(a->n>=LS_COL_MAX){ a->trunc=true; return; }
+    if(a->n>=a->cap){
+        size_t nc=a->cap?a->cap*2:256;
+        img_lsc_ent *nv=(img_lsc_ent*)realloc(a->v,nc*sizeof(*nv));
+        if(!nv){ a->trunc=true; return; }
+        a->v=nv; a->cap=nc;
+    }
+    a->v[a->n].path=strdup(full?full:"");       /* ★ 回调指针只在本帧有效：必须拷 */
+    if(!a->v[a->n].path){ a->trunc=true; return; }
+    a->v[a->n].size=size;
+    a->v[a->n].mtime=mtime;
+    a->v[a->n].attrs=attrs;
+    a->v[a->n].depth=(uint32_t)depth;
+    a->v[a->n].isdir=isdir;
+    a->n++;
+}
+
 /* --wim 可以指 WIM/ESD 本体，也可以指含它的 ISO。返回本地可用路径；
  * is_tmp=true 时调用方用完必须 unlink。note/nsecap 回填"替你做了什么"。*/
 /* wim.ls / wim.extract 共用的失败码翻译（把"没这个路径"和"库读不动"分开）*/
@@ -7902,8 +7931,59 @@ static const char *wim_fs_code(int rc,int kind){
     }
 }
 #endif /* IMG_WITH_WIM */
+
+/* ================= 目录会话搜索（wim.search，2026-11-18）=================
+ * 在 wim.ls --open 建立的会话缓存上做【不区分大小写的子串】匹配（完整 path）。
+ * 5000 条量级 < 5ms —— 输入即搜的前提。不需要 wimlib（纯内存扫描），
+ * 所以不放在 IMG_WITH_WIM 里。*/
+static const img_arg A_WIMSEARCH[] = {
+    {"token", IMG_A_STR, true,  NULL,  "目录会话 id（先 wim.ls --open 拿）", NULL},
+    {"q",     IMG_A_STR, true,  NULL,  "搜索词（不区分大小写的子串，匹配完整路径）", NULL},
+    {"offset",IMG_A_U64, false, "0",   "从第几个结果开始（分页；默认 0）", NULL},
+    {"limit", IMG_A_U64, false, "200", "本页最多多少条（1~2000；默认 200）", NULL},
+};
+static int cmd_wim_search(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx;
+    const char *tok=img_args_get(in,"token");
+    const char *q=img_args_get(in,"q");
+    if(!tok || !*tok){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","token",
+            "缺少目录会话 id","先调 wim.ls --open 拿 token，再搜索");
+        return IMG_EINVAL;
+    }
+    if(!q || !*q){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","q","搜索词不能为空",NULL);
+        return IMG_EINVAL;
+    }
+    uint64_t off=img_args_u64(in,"offset",0);
+    uint64_t lim=img_args_u64(in,"limit",200);
+    if(lim==0) lim=200;
+    if(lim>2000) lim=2000;
+
+    enum { JB_CAP = 524288 };
+    char *jb=img_tbuf(IMG_TB_WIM_LS,JB_CAP);
+    if(!jb) return tb_nomem(out,"wim.search 条目缓冲");
+    uint64_t total=0,count=0; bool more=false;
+    int rc=img_lsc_search(tok,q,off,lim,jb,JB_CAP-2,&total,&count,&more);
+    if(rc==IMG_ENOENT){
+        img_result_fail(out,IMG_ENOENT,"TOKEN-EXPIRED","token",
+            "目录会话已过期（60 秒未用，或进程重启过）","重新 wim.ls --open，再搜");
+        return IMG_ENOENT;
+    }
+    if(rc!=IMG_OK){
+        img_result_fail(out,rc,"LS-SEARCH-FAIL","token",img_strerror(rc),NULL);
+        return rc;
+    }
+    img_result_str(out,"q",q);
+    img_result_u64(out,"total",total);
+    img_result_u64(out,"offset",off);
+    img_result_u64(out,"count",count);
+    img_result_bool(out,"has_more",more);
+    img_result_raw(out,"entries",jb);
+    return IMG_OK;
+}
 static const img_arg A_WIMLS[] = {
-    {"wim",       IMG_A_STR, true,  NULL,   "WIM/ESD 路径；也可以直接给含它的 ISO（工具自动定位 install.wim/.esd）", NULL},
+    {"wim",       IMG_A_STR, false, NULL,   "WIM/ESD 路径；也可以直接给含它的 ISO（工具自动定位 install.wim/.esd）；--token 模式下可省", NULL},
     {"inner",     IMG_A_STR, false, NULL,   "（ISO）内部路径，如 /x64/sources/install.wim", NULL},
     {"index",     IMG_A_U64, false, "1",    "映像索引（先用 wim.identify 拿清单）", NULL},
     {"path",      IMG_A_STR, false, "/",    "WIM 内的目录（/ 开头，大小写不敏感）", NULL},
@@ -7911,17 +7991,55 @@ static const img_arg A_WIMLS[] = {
     {"contains",  IMG_A_STR, false, NULL,   "只回路径里含这个子串的条目（App 省字节用）", NULL},
     {"offset",    IMG_A_U64, false, "0",    "从第几项开始（分页；默认 0；先 --contains 过滤再分页）", NULL},
     {"limit",     IMG_A_U64, false, "2000", "本页最多多少条（0=用硬上限 4096）", NULL},
+    /* ★ 2026-11-18：目录会话（翻页 O(1)）——一次 --open 遍历全目录，之后翻页/搜索
+     *   都带 --token，不再重开 ISO/WIM（每页从 100-300ms 降到 5-10ms）。*/
+    {"token",     IMG_A_STR, false, NULL,   "目录会话 id（先 --open 拿；翻页带它免去每次重开 ISO/WIM）", NULL},
+    {"open",      IMG_A_BOOL,false, "false","true=遍历全目录建会话（回 token+total，供 --token 翻页）", NULL},
 };
 static int cmd_wim_ls(img_ctx *ctx, const img_args *in, img_result *out){
     (void)ctx;
     if(!IMG_WITH_WIM) return feat_unavail(out,"wimlib（WIM/ESD 浏览）","重新编译时开启 IMG_WITH_WIM 并安装 libwim");
 #if IMG_WITH_WIM
+    /* ★ 会话翻页：token 在就完全脱离 ISO/WIM（缓存命中，O(1) 切片） */
+    {
+        const char *token=img_args_get(in,"token");
+        if(token && *token){
+            uint64_t off64=img_args_u64(in,"offset",0);
+            uint64_t lim64=img_args_u64(in,"limit",2000);
+            if(lim64==0 || lim64>4096) lim64=2000;
+            enum { JB_CAP = 524288 };
+            char *jb=img_tbuf(IMG_TB_WIM_LS,JB_CAP);
+            if(!jb) return tb_nomem(out,"wim.ls 条目缓冲");
+            const char *d2=img_args_get(in,"path");
+            if(!d2||!d2[0]) d2="/";
+            uint64_t total=0,count=0; bool more=false;
+            int prc=img_lsc_page(token,off64,lim64,jb,JB_CAP-2,&total,&count,&more);
+            if(prc==IMG_ENOENT){
+                img_result_fail(out,IMG_ENOENT,"TOKEN-EXPIRED","token",
+                    "目录会话已过期（60 秒未用，或进程重启过）","重新 --open 一次，再拉这一页");
+                return IMG_ENOENT;
+            }
+            if(prc!=IMG_OK){
+                img_result_fail(out,prc,"LS-PAGE-FAIL","token",img_strerror(prc),NULL);
+                return prc;
+            }
+            img_result_u64(out,"total",total);
+            img_result_u64(out,"offset",off64);
+            img_result_u64(out,"count",count);
+            img_result_bool(out,"has_more",more);
+            img_result_bool(out,"cached",true);
+            img_result_str(out,"path",d2);
+            img_result_raw(out,"entries",jb);
+            return IMG_OK;
+        }
+    }
     const char *srcp=img_args_get(in,"wim");
     if(!srcp||!srcp[0]){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","wim","要一个 WIM/ESD 或 ISO 路径",NULL); return IMG_EINVAL; }
     int index=(int)img_args_u64(in,"index",1);
     const char *dir=img_args_get(in,"path"); if(!dir||!dir[0]) dir="/";
     if(dir[0]!='/'){ img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","path","WIM 内路径必须以 / 开头",NULL); return IMG_EINVAL; }
     bool rec=img_args_bool(in,"recursive",false);
+    bool open_mode=img_args_bool(in,"open",false);
     uint64_t lim64=img_args_u64(in,"limit",2000);
     uint64_t off64=img_args_u64(in,"offset",0);
     const char *contains=img_args_get(in,"contains");
@@ -7952,6 +8070,39 @@ static int cmd_wim_ls(img_ctx *ctx, const img_args *in, img_result *out){
     }
     img_span sp; img_span_prep(&sp,"wim","ls","列 WIM/ESD 目录");
     img_span_kv_str(&sp,"path",dir); img_span_begin(&sp);
+    if(open_mode){
+        /* ★ 2026-11-18：建目录会话 —— 一次遍历全目录，之后翻页带 token 不再重开 */
+        ls_col c; memset(&c,0,sizeof c);
+        rc=img_wim_list(local,index,dir,rec,wim_lsc_collect_cb,&c,err,sizeof err);
+        img_span_end(&sp,rc);
+        wim_src_cleanup(local,wk);
+        if(rc!=IMG_OK){
+            for(size_t k=0;k<c.n;k++) free(c.v[k].path);
+            free(c.v);
+            img_result_fail(out,rc,wim_fs_code(rc,1),dir,err[0]?err:"列目录失败",NULL);
+            return rc;
+        }
+        char tok[40]="";
+        bool trun=c.trunc;
+        size_t cnt=c.n;
+        int orc=img_lsc_open(c.v,cnt,trun,tok,sizeof tok);
+        for(size_t k=0;k<cnt;k++) free(c.v[k].path);   /* collector 里 strdup 的 */
+        free(c.v);
+        if(orc!=IMG_OK){
+            img_result_bool(out,"cached",false);
+            img_result_u64(out,"total",cnt);
+            img_result_str(out,"path",dir);
+            img_result_fail(out,IMG_ENOMEM,"LS-CACHE-TOO-BIG","token",
+                "这个目录太大，缓存不下（上限 64MB）","App 走不带 token 的分页（每页重新遍历）");
+            return IMG_ENOMEM;
+        }
+        img_result_str(out,"token",tok);
+        img_result_bool(out,"cached",true);
+        img_result_u64(out,"total",cnt);
+        img_result_bool(out,"truncated",trun);
+        img_result_str(out,"path",dir);
+        return IMG_OK;
+    }
     rc=img_wim_list(local,index,dir,rec,wim_ls_cb,&acc,err,sizeof err);
     img_span_end(&sp,rc);
     wim_src_cleanup(local,wk);                    /* ★ 用完就删，不把 4~8 GB 垃圾留在用户机上 */
@@ -9785,6 +9936,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_WIMID,(int)(sizeof A_WIMID/sizeof A_WIMID[0]), cmd_wim_identify, NULL, 0},
     {"wim.ls",     "1.0", "浏览 WIM/ESD 内部目录树（只读；--wim 可直接给 ISO，工具自己找出 install.wim/.esd）",
         A_WIMLS,(int)(sizeof A_WIMLS/sizeof A_WIMLS[0]), cmd_wim_ls, NULL, 0},
+    {"wim.search", "1.0", "在目录会话里搜文件名/路径（子串，不区分大小写；先 wim.ls --open 拿 token）",
+        A_WIMSEARCH,(int)(sizeof A_WIMSEARCH/sizeof A_WIMSEARCH[0]), cmd_wim_search, NULL, 0},
     {"wim.extract","1.0", "从 WIM/ESD 里只读提取【单个文件】到本地（--wim 可直接给 ISO；取消不留半成品）",
         A_WIMEXTRACT,(int)(sizeof A_WIMEXTRACT/sizeof A_WIMEXTRACT[0]), cmd_wim_extract, NULL, 0},
     {"wim.file-version","1.0", "读映像里某个【文件】的 PE 版本（跨映像取引导文件前的版本闸门；不落临时文件）",

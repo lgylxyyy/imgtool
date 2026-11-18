@@ -19,6 +19,7 @@
 #include "img_event.h"
 #include "img_lock.h"
 #include "img_tbuf.h"   /* 线程级缓冲 + raw 接力槽（REQ-21） */
+#include "img_lscache.h"   /* 目录会话缓存：翻页 O(1) + 搜索 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -603,6 +604,7 @@ int img_cmd_exec(const char *name, img_ctx *ctx, const img_args *in, img_result 
      *   elapsed/pct/files/dst 会留在第二、三次运行里（App 实测「一打开就 20:23」
      *   「files 1/1」「dst 报旧文件」都是这个残留）。 */
     if(g_prog) img_prog_command_begin(g_prog);
+    img_lsc_gc();                  /* 顺手清过期的目录会话（60 秒 TTL，无后台线程） */
     img_lock_t *lk = ctx ? &ctx->lk : NULL;
     rc=img_dispatch(c,ctx,use,out,lk);
     if(tmp) img_args_free(tmp);
