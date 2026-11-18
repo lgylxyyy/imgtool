@@ -1413,6 +1413,21 @@ static int verify_clone(const char *oldp, const char *newp,
     return bad?-1:0;
 }
 static int cmd_img_clone(img_ctx *ctx, const img_args *in, img_result *out){
+/* ★ REQ-81（2026-11-18 真机：「明明有 30GB 还报空间不足」）：宿主空间预检的
+ *   「需要多少」按【已分配字节】估，不再按分区【逻辑容量】。
+ *   compact / clone 只拷已分配（有数据）的块 —— 64G 逻辑 / 实际 5G 的盘按逻辑算
+ *   会高估 10 倍（40G 可用的手机也被 HOST-ENOSPC 拒，一个字节都没写）。
+ *   alloc 不可知（alloc_known=false）→ 退回逻辑容量兜底，绝不误放行。 */
+static uint64_t host_need_estimate(bool alloc_known, uint64_t alloc_bytes, uint64_t logical_bytes){
+    uint64_t base = (alloc_known && alloc_bytes > 0) ? alloc_bytes : logical_bytes;
+    return base + base/32 + 4u*1024*1024;          /* +3% 元数据 + 4MiB 余量 */
+}
+/* 数字格式化（MB/KB）：两条 HOST-ENOSPC 的 detail 共用（App 直接把 detail 给用户看）*/
+static void host_sz_str(uint64_t b, char *out, size_t cap){
+    if(b >= 1048576) snprintf(out,cap,"%llu MB",(unsigned long long)(b/1048576));
+    else             snprintf(out,cap,"%llu KB",(unsigned long long)(b/1024));
+}
+
     const char *src=img_ctx_path(ctx);
     const char *guidp=img_args_get(in,"guid");
     bool guid_random = !guidp || !strcmp(guidp,"random");
@@ -1447,19 +1462,27 @@ static int cmd_img_clone(img_ctx *ctx, const img_args *in, img_result *out){
             return IMG_EINVAL;
         }
     }
-    uint64_t need=4u*1024*1024;
+    uint64_t need=0;
     for(int k=0;k<nkeep;k++){
         for(int i=0;i<IMG_MAX_PARTITIONS;i++)
             if(t->parts[i].used && t->parts[i].first_lba==keep[k]){
                 need += (t->parts[i].last_lba - t->parts[i].first_lba + 1)*512u; break; }
     }
-    need += need/32 + 4u*1024*1024;              /* 约 +3%：元数据/对齐/GPT */
+    /* ★ REQ-81：按已分配字节估（与 img.compact 同口径；逻辑容量只兜底）*/
+    { uint64_t ab=0; bool ak=false;
+      img_qcow2 *qq=img_ctx_qcow2(ctx);
+      if(qq) (void)img_qcow2_alloc_info(qq,&ab,&ak,NULL);
+      need = host_need_estimate(ak, ab, need); }
     { char dir[600]; snprintf(dir,sizeof dir,"%s",src);
       char *sl=strrchr(dir,'/'); if(sl) *sl=0; else snprintf(dir,sizeof dir,".");
       uint64_t free_b=img_host_free_bytes_path(dir);
       if(free_b && free_b < need){
-          img_result_fail(out,IMG_EFULL,"HOST-ENOSPC",src,
-                          "宿主剩余空间不足以克隆（未写入任何字节）","清理宿主磁盘后重试");
+          char a[48], b[48];
+          host_sz_str(free_b,a,sizeof a); host_sz_str(need,b,sizeof b);
+          char why[256];
+          snprintf(why,sizeof why,
+              "宿主剩余 %s，本次预计需要 %s（按已分配块估算；未写入任何字节）", a, b);
+          img_result_fail(out,IMG_EFULL,"HOST-ENOSPC",src,why,"清理宿主磁盘后重试");
           return IMG_EFULL;
       } }
 
@@ -2540,7 +2563,8 @@ static int cmd_img_create(img_ctx *ctx, const img_args *in, img_result *out){
  * 与 img.clone 的区别：img.clone 是【原地换盘】（原名→.old→写回原路径→删 .old），
  * 这条【绝不碰源文件】—— 写完就落在 out，替换不替换由用户决定。
  * ★ GUID 默认 keep：BCD 里记着分区 GUID，重新生成会让拷过去的系统起不来。*/
-static int compact_src_open(const char *src, img_parttable_t *t, uint64_t *vsize, img_result *out){
+static int compact_src_open(const char *src, img_parttable_t *t, uint64_t *vsize,
+                            uint64_t *alloc_bytes, bool *alloc_known, img_result *out){
     img_io *f=img_io_open_existing(src,false);
     if(!f){
         img_result_fail(out,IMG_ENOENT,"IMG-OPEN-FAIL",src,
@@ -2557,6 +2581,14 @@ static int compact_src_open(const char *src, img_parttable_t *t, uint64_t *vsize
     int rc=img_parttable_read(q,t,0);
     if(vsize) *vsize=img_qcow2_size(q);
     img_qcow2_close(q); img_io_close(f);
+    /* ★ REQ-81：源盘已分配字节（只读打开也能拿；alloc_known=false 时调用方兜底）*/
+    if(alloc_bytes || alloc_known){
+        uint64_t ab=0; bool ak=false;
+        if(img_qcow2_alloc_info(q,&ab,&ak,NULL)==IMG_OK){
+            if(alloc_bytes) *alloc_bytes=ab;
+            if(alloc_known) *alloc_known=ak;
+        }
+    }
     if(rc!=IMG_OK){
         img_result_fail(out,rc,"PART-READ-FAIL",src,
             "源映像没有可读的分区表（空盘？）","空盘用 cp 复制即可，compact 只对分区盘有意义");
@@ -2643,6 +2675,7 @@ static const img_arg A_IMGCOMPACT[] = {
      *     老工具拒绝打开整个映像 —— 所以默认 off，且只在构建编入 libzstd 时可用）。 */
     {"compress", IMG_A_ENUM, false, "off", "off=只去零块 | zlib=压缩（兼容面最广） | zstd=压缩（更快更小，但 QEMU<2.10 拒绝打开，需明确选择）", NULL},
 };
+    {"host_free", IMG_A_U64, false, NULL, "宿主剩余可用字节（一般不用传，工具自己查；查不到时才传）", NULL},
 static int cmd_img_compact(img_ctx *ctx, const img_args *in, img_result *out){
     (void)ctx;
     const char *src=img_args_get(in,"src");
@@ -2687,7 +2720,8 @@ static int cmd_img_compact(img_ctx *ctx, const img_args *in, img_result *out){
         return IMG_EEXISTS;
     }
     img_parttable_t st; uint64_t vsize=0;
-    int rc=compact_src_open(src,&st,&vsize,out);
+    uint64_t src_alloc=0; bool src_alloc_known=false;
+    int rc=compact_src_open(src,&st,&vsize,&src_alloc,&src_alloc_known,out);
     if(rc!=IMG_OK) return rc;
 
     /* 保留名单：默认 = 源盘全部分区 */
@@ -2730,15 +2764,22 @@ static int cmd_img_compact(img_ctx *ctx, const img_args *in, img_result *out){
             return IMG_EINVAL;
         }
     }
-    need += need/32 + 4u*1024*1024;                 /* 约 +3% 元数据 + 4 MiB 余量 */
+    /* ★ REQ-81：按已分配字节估（逻辑容量只作 alloc 不可知时的兜底）*/
+    need = host_need_estimate(src_alloc_known, src_alloc, need);
     {   char dir[600]; snprintf(dir,sizeof dir,"%s",dst);
         char *sl=strrchr(dir,'/');
         if(sl) *sl=0;
         else snprintf(dir,sizeof dir,".");
-        uint64_t free_b=img_host_free_bytes_path(dir);
+        uint64_t free_b=img_args_u64(in,"host_free",0);
+        if(!free_b) free_b=img_host_free_bytes_path(dir);
         if(free_b && free_b < need){
-            img_result_fail(out,IMG_EFULL,"HOST-ENOSPC",dst,
-                "输出目录剩余空间不够（未写入任何字节）","清理空间后重试，或减少保留分区");
+            char a[48], b[48];
+            host_sz_str(free_b,a,sizeof a); host_sz_str(need,b,sizeof b);
+            char why[256];
+            snprintf(why,sizeof why,
+                "输出目录剩余 %s，本次预计需要 %s（按已分配块估算；未写入任何字节）", a, b);
+            img_result_fail(out,IMG_EFULL,"HOST-ENOSPC",dst,why,
+                            "清理空间后重试，或减少保留分区");
             return IMG_EFULL;
         }
     }
@@ -2767,7 +2808,7 @@ static int cmd_img_compact(img_ctx *ctx, const img_args *in, img_result *out){
     char guid_out[64]; snprintf(guid_out,sizeof guid_out,"%s",st.disk_guid);
     if(guid_random){                                /* 重新生成过 → 从结果里读真值 */
         img_parttable_t ot; uint64_t v2=0;
-        if(compact_src_open(dst,&ot,&v2,out)==IMG_OK) snprintf(guid_out,sizeof guid_out,"%s",ot.disk_guid);
+        if(compact_src_open(dst,&ot,&v2,NULL,NULL,out)==IMG_OK) snprintf(guid_out,sizeof guid_out,"%s",ot.disk_guid);
     }
     img_result_str(out,"out",dst);
     img_result_u64(out,"bytes_before",(uint64_t)a2.st_size);
