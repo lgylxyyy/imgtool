@@ -424,7 +424,13 @@ int img_sparsify(img_qcow2 *q, const img_sparsify_opts_t *opts,
     snprintf(out->mode_effective,sizeof out->mode_effective,"%s",
              o.mode==IMG_SPARSIFY_FS?"fs":(o.mode==IMG_SPARSIFY_ZERO?"zero":"fs+zero"));
 
-    if(!q->writable){
+    /* ★ REQ-82（2026-11-18 真机）：dry-run 是「一个字节都不写」的分析，只读打开
+     *   完全合法 —— 以前这里连 dry_run 都按「要写」拦（App 分析传 writable=false
+     *   → O_RDONLY 打开 → 直接 SPARSIFY-READONLY；「自己建的盘也报只读」多轮反馈的根因）。
+     *   dry 路径已确认无写操作：raw 分支 seg_punch(dry=1) 不打洞；qcow2 分支透传
+     *   trim 的 dry_run（trim 内部 `if(dry) continue` 跳过一切写）。
+     *   实写（非 dry_run）保持拦截：真要改盘必须可写。*/
+    if(!q->writable && !o.dry_run){
         snprintf(out->code,sizeof out->code,"SPARSIFY-READONLY");
         if(err&&errcap) snprintf(err,errcap,"映像是只读打开的");
         return IMG_EREADONLY;

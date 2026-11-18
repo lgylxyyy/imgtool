@@ -147,7 +147,9 @@ int img_trim(img_qcow2 *q, uint64_t part_lba, uint64_t part_bytes,
     const bool punch = opts ? opts->punch   : true;
 
     /* ---------------- 门禁 ---------------- */
-    if(!q->writable){
+    /* ★ REQ-82：dry-run 不写任何字节 → 只读打开放行（与 img_sparsify 同口径）。
+     *   实写（非 dry）保持拦截：真要改盘必须可写。*/
+    if(!q->writable && !dry){
         snprintf(out->code, sizeof out->code, "TRIM-READONLY");
         if(err&&errcap) snprintf(err,errcap,"映像是只读打开的");
         return IMG_EREADONLY;

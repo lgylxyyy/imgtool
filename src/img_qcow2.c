@@ -138,6 +138,11 @@ img_qcow2 *img_qcow2_open(img_io *io, const img_qcow2_opts_t *o){
     }
     /* refcount_bits = 1 << refcount_order，上限 6 (64 位) */
     if(q->h.refcount_order > 6){ free(q); return NULL; }
+    /* ★ REQ-82：只读打开也要有正确位宽 —— img_trim 的门禁读 refcount_bits，
+     *   以前只在 write_init()（写路径）里赋值 → 只读 dry-run 被当成
+     *   「refcount 位宽不支持」（真机「分析报只读」的第二道墙）。
+     *   order 4 → 16 位、5 → 32 位；写路径自己再限 16/32。 */
+    q->refcount_bits = (uint32_t)(1u << q->h.refcount_order);
 
     /* ★ 特性位校验：超出能力范围就明确报错，绝不静默出错 */
     if(q->h.incompatible & IMG_QCOW2_INCOMPAT_ENCRYPTED){ free(q); return NULL; }
