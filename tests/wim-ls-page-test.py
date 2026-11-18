@@ -105,6 +105,15 @@ def main():
         check("① has_more=true", d.get("has_more") is True, d.get("has_more"))
         p1 = [e.get("path") for e in (d.get("entries") or [])]
 
+        # ── ①b 500 条的页必须装得进 256KB 首渲缓冲（App 的 PAGE 该降到这个量级：
+        #      首渲一次成功，不触发重渲 → 不赌 4MB malloc）──
+        import subprocess as _sp
+        p500 = _sp.run([IMGCMD, "wim.ls", "--wim=" + wim, "--path=/many",
+                        "--limit=500"], capture_output=True, text=True)
+        outlen = len(p500.stdout.encode())
+        check("①b limit=500 的结果 %d B < 256KB（首渲装得下，不触发重渲）" % outlen,
+              outlen < 256 * 1024, outlen)
+
         # ── ② 第二页：offset=2000 ──
         r = run("wim.ls", "--wim=" + wim, "--path=/many", "--limit=%d" % PAGE,
                 "--offset=%d" % PAGE)

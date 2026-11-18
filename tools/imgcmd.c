@@ -546,12 +546,19 @@ int main(int argc, char **argv){
     static char out[128*1024];
     int n=img_result_json(&res,out,sizeof out);
     /* ★ 2026-11-13：img_result_json 顶满返回 -(cap)。128KB 装不下的大结果
-     *   （wim.ls 大目录，几千条 entries）换 4MB 堆缓冲重渲。*/
+     *   （wim.ls 大目录）用【逐步倍增】重渲（512KB→1MB→2MB→4MB）——
+     *   一步跳到 4MB 在内存紧张时会 malloc 失败（App 侧真机就这么报的
+     *   RESULT-BAD），逐级寻找让峰值停在「刚好装得下的那一档」。*/
     char *heap_out=NULL;
     if(n<0){
-        heap_out=(char*)malloc(4u*1024*1024);
-        if(heap_out) n=img_result_json(&res,heap_out,4u*1024*1024);
-        else n=-1;
+        for(size_t cap2=512u*1024u; cap2<=4u*1024u*1024u; cap2*=2){
+            char *b=(char*)malloc(cap2);
+            if(!b) continue;
+            int m=img_result_json(&res,b,(int)cap2);
+            if(m>=0){ heap_out=b; n=m; break; }
+            free(b);
+        }
+        if(!heap_out) n=-1;
     }
     /* ★ REQ-29：--dst=- / --dst-fd=1 时 stdout 是【数据流】，结果 JSON 必须改走 stderr，
      *   否则数据末尾会多出一行 JSON（文件多 154 字节，校验和全废）。*/
