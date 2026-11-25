@@ -114,6 +114,7 @@ set(IMG_SOURCES
   src/img_host.c
   src/img_progress.c
   src/img_lscache.c    # 目录会话缓存（翻页 O(1)，2026-11-18）
+  src/img_lswalk.c     # 统一路径递归遍历 + 过滤（img.search 内核，REQ-83）
   src/img_tbuf.c       # 线程级缓冲（堆上，替代 1.5MB 静态 TLS，REQ-21）
   src/img_io.c
   src/img_qcow2.c

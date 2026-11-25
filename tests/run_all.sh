@@ -196,6 +196,7 @@ run "readonly-dryrun-test（REQ-82：dry-run 只读打开放行、实写仍拦�
 run "compact-space-test（REQ-81：空间预检按已分配字节估 + detail 数字）" python3 "$ROOT/tests/compact-space-test.py"
 run "lscache_test（目录会话缓存：翻页/搜索纯逻辑，同进程）" "$ROOT/build/tests/lscache_test"
 run "lscache-test（目录会话命令层 + 跨进程 TOKEN-EXPIRED）" python3 "$ROOT/tests/lscache-test.py"
+run "search-all-test（REQ-83：img.search 统一路径搜索，五类容器 + 分页 + 会话隔离）" python3 "$ROOT/tests/search-all-test.py"
 run "wim-capture-test（捕获、临时目录清理、产物可读）"          bash "$ROOT/tests/wim-capture-test.sh"
 run "wim-exclude-test（REQ-67：--exclude 同口径 + extract/pack/write 三段进度）" python3 "$ROOT/tests/wim-exclude-test.py"
 run "provenance-test（内置模板 == 微软原件；缺原件则跳过）"   bash "$ROOT/tests/provenance-test.sh"

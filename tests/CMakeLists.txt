@@ -116,6 +116,10 @@ target_link_libraries(progress_reuse_test PRIVATE imgtool)
 add_executable(lscache_test lscache_test.c)
 target_link_libraries(lscache_test PRIVATE imgtool)
 
+# REQ-83：img.search 会话隔离（同进程；CLI 跨进程测不了 token 翻页）
+add_executable(search_sess_test search_sess_test.c)
+target_link_libraries(search_sess_test PRIVATE imgtool)
+
 # ADS（命名数据流）探针：file.copy / ntfs.copy 必须保留附加数据
 if(NTFS_INC AND NTFS_LIB)
   add_executable(ads_probe ads_probe.c)

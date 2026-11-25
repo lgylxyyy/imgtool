@@ -117,6 +117,7 @@ static int rd_iso(void *ud, uint64_t off, void *buf, size_t len){
 #include <time.h>
 #include "img_tbuf.h"   /* 线程级缓冲（堆上，替代 1.5MB 静态 TLS，REQ-21） */
 #include "img_lscache.h"   /* 目录会话缓存（翻页 O(1) + 搜索）*/
+#include "img_lswalk.h"    /* 统一路径遍历 + 过滤（REQ-83：img.search 内核）*/
 
 static long long now_ms_(void){
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
@@ -7982,6 +7983,185 @@ static int cmd_wim_search(img_ctx *ctx, const img_args *in, img_result *out){
     img_result_raw(out,"entries",jb);
     return IMG_OK;
 }
+
+/* ================= img.search（REQ-83，2026-11-19）=================
+ * 一条命令覆盖全部容器：宿主目录 / qcow2 里的 NTFS·FAT / ISO / WIM / 压缩包。
+ *
+ * 为什么不是给 ntfs.list / fat.ls / iso.ls / archive.ls 各加 --recursive/--contains：
+ *   · 五类容器五个入口，会有五套参数、五套口径（total 是过滤前还是过滤后、
+ *     大小写敏不敏感、has_more 怎么算）——改一处容易忘另一处；
+ *   · App 端还要对着四个命令各探测一次 hasArg，探测本身就容易写错；
+ *   · 「列目录」和「搜索」是 App 的两个不同动作：浏览继续用各自的 ls（轻量、
+ *     一句不动），搜索用这一条（统一路径 + 过滤 + 分页 + 会话翻页），职责不混。
+ * 遍历/过滤的内核在 img_lswalk.c：只写一份，六类容器共用。
+ *
+ * 会话与 wim.ls --open 完全同一套（img_lscache）：
+ *   首次搜索 = 一次遍历 → 过滤 → 入会话 → 回 token + total + 首页；
+ *   翻页只带 --token（O(1)，不再碰容器）；60 秒 TTL / 8 会话 LRU / 64MB 上限。
+ *   会话按 token 隔离 → 翻页不可能串目录；遍历中途取消不会建会话（无残留）。
+ */
+typedef struct { img_lsc_ent *v; size_t n, cap; bool trunc; } srch_col;
+enum { SRCH_COL_MAX = 500000 };
+
+static void srch_collect_cb(void *ud, const img_lswalk_ent *e){
+    srch_col *c=(srch_col*)ud;
+    if(!c || !e) return;
+    if(c->n>=SRCH_COL_MAX){ c->trunc=true; return; }
+    if(c->n>=c->cap){
+        size_t nc=c->cap?c->cap*2:256;
+        img_lsc_ent *nv=(img_lsc_ent*)realloc(c->v,nc*sizeof *nv);
+        if(!nv){ c->trunc=true; return; }
+        c->v=nv; c->cap=nc;
+    }
+    img_lsc_ent *x=&c->v[c->n];
+    memset(x,0,sizeof *x);
+    x->path=strdup(e->path);     /* ★ 会话长期保存，必须拷贝（回调指针只在本帧有效）*/
+    if(!x->path){ c->trunc=true; return; }
+    x->size=e->size; x->mtime=e->mtime; x->isdir=e->is_dir;
+    x->depth=e->depth?e->depth-1:0;      /* lswalk: 直接子项=1；会话: 直接子项=0 */
+    c->n++;
+}
+
+static const char *srch_kind_name(img_xkind k){
+    switch(k){
+    case IMG_XK_HOST:    return "host";
+    case IMG_XK_NTFS:    return "ntfs";
+    case IMG_XK_FAT:     return "fat";
+    case IMG_XK_ISO:     return "iso";
+    case IMG_XK_WIM:     return "wim";
+    case IMG_XK_ARCHIVE: return "archive";
+    default:             return "?";
+    }
+}
+
+static const img_arg A_IMGSEARCH[] = {
+    {"spec",      IMG_A_STR,  false, NULL,   "统一路径（host:/… / x.qcow2!p3:/… / x.iso!:/… / x.iso!/sources/install.wim!1:/… / x.zip!:/…）；带 --token 时可省", NULL},
+    {"q",         IMG_A_STR,  false, NULL,   "按完整路径的子串过滤（不区分大小写）；不传=全量递归列出", NULL},
+    {"recursive", IMG_A_BOOL, false, "true", "true=整棵子树（默认，搜索语义）；false=只搜当前层", NULL},
+    {"offset",    IMG_A_U64,  false, "0",    "从第几项开始（分页；默认 0；先过滤再分页）", NULL},
+    {"limit",     IMG_A_U64,  false, "500",  "本页最多多少条（1~2000；默认 500）", NULL},
+    {"token",     IMG_A_STR,  false, NULL,   "搜索会话 id（首次搜索返回；翻页带上它免去重新遍历）", NULL},
+};
+
+static int cmd_img_search(img_ctx *ctx, const img_args *in, img_result *out){
+    (void)ctx;
+    uint64_t off64=img_args_u64(in,"offset",0);
+    uint64_t lim64=img_args_u64(in,"limit",500);
+    if(lim64==0) lim64=500;
+    if(lim64>2000) lim64=2000;
+    enum { SR_JB_CAP = 524288 };
+    char *jb=img_tbuf(IMG_TB_WIM_LS,SR_JB_CAP);
+    if(!jb) return tb_nomem(out,"img.search 条目缓冲");
+
+    /* ① 会话翻页：token 在就完全脱离容器（O(1) 切片） */
+    const char *token=img_args_get(in,"token");
+    if(token && *token){
+        uint64_t total=0,count=0; bool more=false;
+        int prc=img_lsc_page(token,off64,lim64,jb,SR_JB_CAP-2,&total,&count,&more);
+        if(prc==IMG_ENOENT){
+            img_result_fail(out,IMG_ENOENT,"TOKEN-EXPIRED","token",
+                "搜索会话已过期（60 秒未用，或进程重启过）",
+                "重新带 --spec 搜一次，再拉这一页");
+            return IMG_ENOENT;
+        }
+        if(prc!=IMG_OK){
+            img_result_fail(out,prc,"LS-PAGE-FAIL","token",img_strerror(prc),NULL);
+            return prc;
+        }
+        img_result_u64(out,"total",total);
+        img_result_u64(out,"offset",off64);
+        img_result_u64(out,"limit",lim64);
+        img_result_u64(out,"count",count);
+        img_result_bool(out,"has_more",more);
+        img_result_bool(out,"cached",true);
+        img_result_raw(out,"entries",jb);
+        return IMG_OK;
+    }
+
+    /* ② 首次搜索：统一路径 → 遍历 + 过滤 → 建会话 → 出首页 */
+    const char *spec=img_args_get(in,"spec");
+    if(!spec || !*spec){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","spec",
+            "要么给 --spec（首次搜索），要么给 --token（翻页）",
+            "例子：--spec=x.qcow2!p3:/Windows --q=drivers");
+        return IMG_EINVAL;
+    }
+    const char *q=img_args_get(in,"q");
+    if(q && !*q) q=NULL;
+    if(q && strlen(q)>512){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","q","关键字太长（上限 512 字节）",NULL);
+        return IMG_EINVAL;
+    }
+    bool rec=img_args_bool(in,"recursive",true);
+    img_path p;
+    char why[400]="";
+    int rc=img_path_parse(spec,&p,why,sizeof why);
+    if(rc!=IMG_OK){
+        img_result_fail(out,IMG_EINVAL,"CMD-ARG-BAD","spec",why[0]?why:"统一路径解析失败",
+            "例子：x.qcow2!p3:/Windows、x.iso!:/sources、x.zip!:/、x.qcow2!lba2048:/");
+        return IMG_EINVAL;
+    }
+    img_span spn; img_span_prep(&spn,"img","search","搜索（统一路径）");
+    img_span_kv_str(&spn,"spec",spec); img_span_kv_str(&spn,"q",q?q:"");
+    img_span_begin(&spn);
+    srch_col col; memset(&col,0,sizeof col);
+    img_prog *prog=img_cmd_prog();
+    if(prog){ img_prog_phase(prog,IMG_PH_BROWSE,"搜索"); img_prog_op(prog,IMG_OP_SCAN); }
+    rc=img_lswalk_run(&p,rec,q,srch_collect_cb,&col,prog,why,sizeof why);
+    size_t cnt=col.n;
+    bool trun=col.trunc;
+    img_path_cleanup(&p);                 /* ISO 内 WIM 的临时抽取文件 */
+    img_span_end(&spn,rc);
+    if(rc!=IMG_OK){
+        for(size_t k=0;k<cnt;k++) free(col.v[k].path);
+        free(col.v);
+        const char *code=(rc==IMG_ECANCELLED)?"CMD-CANCELLED":
+                         (rc==IMG_ENOENT)?"SEARCH-NOTFOUND":
+                         (rc==IMG_ENOTSUP)?"SEARCH-NOTSUP":"SEARCH-FAIL";
+        img_result_str(out,"spec",spec);
+        img_result_str(out,"q",q?q:"");
+        img_result_fail(out,rc,code,spec,why[0]?why:img_strerror(rc),
+            (rc==IMG_ECANCELLED)?"已取消（没有留下任何会话）":"核对 --spec 指向的位置是否存在");
+        return rc;
+    }
+    char tok[40]="";
+    int orc=img_lsc_open(col.v,cnt,trun,tok,sizeof tok);
+    for(size_t k=0;k<cnt;k++) free(col.v[k].path);
+    free(col.v);
+    if(orc!=IMG_OK){
+        img_result_str(out,"spec",spec);
+        img_result_str(out,"kind",srch_kind_name(p.kind));
+        img_result_bool(out,"cached",false);
+        img_result_u64(out,"total",(uint64_t)cnt);
+        img_result_bool(out,"truncated",trun);
+        img_result_fail(out,IMG_ENOMEM,"LS-CACHE-TOO-BIG","token",
+            "结果太多，缓存不下（上限 64MB）",
+            "缩小区间（换更深一层的 --spec）或加 --q 过滤");
+        return IMG_ENOMEM;
+    }
+    /* 首页直接用同一个渲染器出（不重复写一遍 JSON） */
+    uint64_t total=0,count=0; bool more=false;
+    int prc=img_lsc_page(tok,off64,lim64,jb,SR_JB_CAP-2,&total,&count,&more);
+    if(prc!=IMG_OK){
+        img_result_fail(out,prc,"LS-PAGE-FAIL","token",img_strerror(prc),NULL);
+        return prc;
+    }
+    img_result_str(out,"spec",spec);
+    img_result_str(out,"kind",srch_kind_name(p.kind));
+    img_result_str(out,"q",q?q:"");
+    img_result_bool(out,"recursive",rec);
+    img_result_str(out,"token",tok);
+    img_result_bool(out,"cached",true);
+    img_result_u64(out,"total",total);
+    img_result_u64(out,"offset",off64);
+    img_result_u64(out,"limit",lim64);
+    img_result_u64(out,"count",count);
+    img_result_bool(out,"has_more",more);
+    img_result_bool(out,"truncated",trun);
+    img_result_raw(out,"entries",jb);
+    return IMG_OK;
+}
+
 static const img_arg A_WIMLS[] = {
     {"wim",       IMG_A_STR, false, NULL,   "WIM/ESD 路径；也可以直接给含它的 ISO（工具自动定位 install.wim/.esd）；--token 模式下可省", NULL},
     {"inner",     IMG_A_STR, false, NULL,   "（ISO）内部路径，如 /x64/sources/install.wim", NULL},
@@ -9938,6 +10118,8 @@ const img_cmd IMG_CMD_TABLE[] = {
         A_WIMLS,(int)(sizeof A_WIMLS/sizeof A_WIMLS[0]), cmd_wim_ls, NULL, 0},
     {"wim.search", "1.0", "在目录会话里搜文件名/路径（子串，不区分大小写；先 wim.ls --open 拿 token）",
         A_WIMSEARCH,(int)(sizeof A_WIMSEARCH/sizeof A_WIMSEARCH[0]), cmd_wim_search, NULL, 0},
+    {"img.search", "1.0", "统一路径搜索：宿主目录/qcow2 分区/ISO/WIM/压缩包一处搜；--q 子串、先过滤后分页、带 token 翻页 O(1)",
+        A_IMGSEARCH,(int)(sizeof A_IMGSEARCH/sizeof A_IMGSEARCH[0]), cmd_img_search, NULL, 0},
     {"wim.extract","1.0", "从 WIM/ESD 里只读提取【单个文件】到本地（--wim 可直接给 ISO；取消不留半成品）",
         A_WIMEXTRACT,(int)(sizeof A_WIMEXTRACT/sizeof A_WIMEXTRACT[0]), cmd_wim_extract, NULL, 0},
     {"wim.file-version","1.0", "读映像里某个【文件】的 PE 版本（跨映像取引导文件前的版本闸门；不落临时文件）",
